@@ -232,6 +232,10 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   lists — so control flow nests naturally and reuses the same status plumbing
   (`if`/`while` branch on a list's exit status; `for` expands its word list via
   `expand::expand_words` and sets the loop variable each iteration).
+- **`break`/`continue`:** those builtins set a thread-local request in `vars`;
+  `exec_list` and `run_andor` stop early when one is pending, and each loop's
+  `loop_step` consumes one level (so `break 2` escapes two loops). The public
+  `run_list` clears any request that escapes every loop.
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 Implements the parts that need POSIX process groups and signals, via the `libc`
@@ -259,6 +263,8 @@ crate, following the classic glibc job-control structure:
 - `test EXPR` / `[ EXPR ]` — file tests (`-e`/`-f`/`-d`/`-s`/…), string
   `-z`/`-n`/`=`/`!=`, integer `-eq`/`-lt`/… and a leading `!`; status `0`/`1`.
 - `true` / `:` (status `0`) and `false` (status `1`).
+- `break [n]` / `continue [n]` — record a loop-control request (via `vars`)
+  that `exec::run_compound` consumes one level at a time.
 - `exit [code]` — terminates the process (diverges; defaults to `0`).
 - On Unix, `jobs`/`fg`/`bg` are dispatched to `job::builtin`.
 

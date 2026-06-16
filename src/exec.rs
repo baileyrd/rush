@@ -44,11 +44,22 @@ pub struct Pipeline {
 }
 
 /// Run a whole command line, returning the exit status of the last foreground
-/// job that ran.
+/// job that ran. A `break`/`continue` that escapes all loops is discarded here.
 pub fn run_list(list: &CommandList) -> Result<i32, String> {
+    let status = exec_list(list)?;
+    crate::vars::set_loop_ctl(None);
+    Ok(status)
+}
+
+/// Run a list, stopping early if a `break`/`continue` becomes pending — used for
+/// both the top level and the bodies of compound commands.
+fn exec_list(list: &CommandList) -> Result<i32, String> {
     let mut status = 0;
     for job in &list.jobs {
         status = run_job(job)?;
+        if crate::vars::loop_ctl().is_some() {
+            break;
+        }
     }
     Ok(status)
 }
@@ -74,10 +85,16 @@ fn run_andor(list: &AndOrList) -> Result<i32, String> {
     // it (e.g. `false || echo $?`).
     let mut status = run_pipeline_node(&list.first)?;
     crate::vars::set_last_status(status);
+    if crate::vars::loop_ctl().is_some() {
+        return Ok(status);
+    }
     for (connector, raw) in &list.rest {
         if should_run(*connector, status) {
             status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
+            if crate::vars::loop_ctl().is_some() {
+                break;
+            }
         }
     }
     Ok(status)
@@ -96,23 +113,26 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
     match compound {
         Compound::If { branches, else_body } => {
             for (cond, body) in branches {
-                if run_list(cond)? == 0 {
-                    return run_list(body);
+                if exec_list(cond)? == 0 {
+                    return exec_list(body);
                 }
             }
             match else_body {
-                Some(body) => run_list(body),
+                Some(body) => exec_list(body),
                 None => Ok(0),
             }
         }
         Compound::Loop { until, cond, body } => {
             let mut status = 0;
             loop {
-                let met = run_list(cond)? == 0;
+                let met = exec_list(cond)? == 0;
                 if met == *until {
                     break; // while: stop when not met; until: stop when met
                 }
-                status = run_list(body)?;
+                status = exec_list(body)?;
+                if loop_step()? {
+                    break;
+                }
             }
             Ok(status)
         }
@@ -120,9 +140,39 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
             let mut status = 0;
             for value in crate::expand::expand_words(words)? {
                 crate::vars::set(var, &value);
-                status = run_list(body)?;
+                status = exec_list(body)?;
+                if loop_step()? {
+                    break;
+                }
             }
             Ok(status)
+        }
+    }
+}
+
+/// After running a loop body, consume one level of any pending `break`/
+/// `continue`. Returns `true` if this loop should stop iterating.
+fn loop_step() -> Result<bool, String> {
+    use crate::vars::LoopCtl;
+    match crate::vars::loop_ctl() {
+        None => Ok(false),
+        Some(LoopCtl::Continue(1)) => {
+            crate::vars::set_loop_ctl(None);
+            Ok(false) // keep looping
+        }
+        Some(LoopCtl::Break(1)) => {
+            crate::vars::set_loop_ctl(None);
+            Ok(true)
+        }
+        // `break N` / `continue N` for an outer loop: drop a level and stop this
+        // one, leaving the request pending for the enclosing loop to handle.
+        Some(LoopCtl::Break(n)) => {
+            crate::vars::set_loop_ctl(Some(LoopCtl::Break(n - 1)));
+            Ok(true)
+        }
+        Some(LoopCtl::Continue(n)) => {
+            crate::vars::set_loop_ctl(Some(LoopCtl::Continue(n - 1)));
+            Ok(true)
         }
     }
 }

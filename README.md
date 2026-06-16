@@ -38,7 +38,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Arithmetic (`$((...))`) | ✅ | `+ - * / %`, comparisons, `&& \|\| !`, parentheses, variables (`i=$((i+1))`) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
-| Control flow | ✅ | `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`, `for … in … ; do … done`; single- or multi-line |
+| Control flow | ✅ | `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`, `for … in … ; do … done`, `break`/`continue [n]`; single- or multi-line |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
 
 ## Build & Run

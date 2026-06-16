@@ -17,9 +17,28 @@ struct Var {
     exported: bool,
 }
 
+/// A pending `break`/`continue` request, carrying how many enclosing loops it
+/// applies to (`break 2`). The executor consumes it level by level.
+#[derive(Clone, Copy)]
+pub enum LoopCtl {
+    Break(u32),
+    Continue(u32),
+}
+
 thread_local! {
     static LAST_STATUS: RefCell<i32> = const { RefCell::new(0) };
     static VARS: RefCell<HashMap<String, Var>> = RefCell::new(HashMap::new());
+    static LOOP_CTL: RefCell<Option<LoopCtl>> = const { RefCell::new(None) };
+}
+
+/// Record a pending loop-control request (from the `break`/`continue` builtins).
+pub fn set_loop_ctl(ctl: Option<LoopCtl>) {
+    LOOP_CTL.with(|c| *c.borrow_mut() = ctl);
+}
+
+/// The pending loop-control request, if any.
+pub fn loop_ctl() -> Option<LoopCtl> {
+    LOOP_CTL.with(|c| *c.borrow())
 }
 
 /// The exit status of the most recently completed pipeline — exposed as `$?`.

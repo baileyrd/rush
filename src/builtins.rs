@@ -17,6 +17,8 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "unset" => Some(unset(argv)),
         "test" => Some(test_dispatch(argv, false)),
         "[" => Some(test_dispatch(argv, true)),
+        "break" => Some(loop_ctl(argv, true)),
+        "continue" => Some(loop_ctl(argv, false)),
         // POSIX no-op (`:`) and the canonical true/false.
         "true" | ":" => Some(0),
         "false" => Some(1),
@@ -166,6 +168,22 @@ fn test_binary(a: &str, op: &str, b: &str) -> Result<bool, String> {
         "-ge" => int(a)? >= int(b)?,
         _ => return Err(format!("unknown operator `{op}`")),
     })
+}
+
+/// `break [n]` / `continue [n]` — request loop control; the executor acts on it.
+fn loop_ctl(argv: &[String], is_break: bool) -> i32 {
+    let n: u32 = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+    if n == 0 {
+        eprintln!("{}: loop count must be positive", argv[0]);
+        return 1;
+    }
+    let ctl = if is_break {
+        crate::vars::LoopCtl::Break(n)
+    } else {
+        crate::vars::LoopCtl::Continue(n)
+    };
+    crate::vars::set_loop_ctl(Some(ctl));
+    0
 }
 
 /// `unset NAME...` — remove shell variables.

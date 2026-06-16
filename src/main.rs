@@ -4,14 +4,15 @@
 //! (`>`, `>>`, `<`), and the builtins that must run in-process (`cd`, `exit`,
 //! `pwd`). Quoting is handled by a small hand-written lexer so that
 //! `echo "hello world"` is one argument. An expansion stage resolves `$VAR`,
-//! `~`, and `$(...)` before a command runs.
+//! `~`, `$(...)`, and filename globs (`*`, `?`, `[…]`) before a command runs.
 //!
-//! Not yet here (see the roadmap): globbing, `&&`/`||`, background jobs, and
+//! Not yet here (see the roadmap): `&&`/`||`/`;`, background jobs, and
 //! signal/job control. Those come next.
 
 mod builtins;
 mod exec;
 mod expand;
+mod glob;
 mod lexer;
 mod parser;
 

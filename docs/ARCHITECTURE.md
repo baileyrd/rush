@@ -87,8 +87,10 @@ flowchart TD
 
 Expansion sits deliberately between parse and exec: the parser preserves each
 word's quoting (single-quoted text is literal, double-quoted and bare text may
-expand), and the expansion stage resolves `~`, `$VAR`/`${VAR}`, and `$(...)`
-against the environment and sub-shells before any process is spawned.
+expand), and the expansion stage resolves `~`, `$VAR`/`${VAR}`, `$(...)`, and
+filename globs (`*`, `?`, `[…]`) against the environment, sub-shells, and the
+filesystem before any process is spawned. Globbing can turn one word into
+several arguments, so the stage is a flat-map, not a one-to-one map.
 
 ---
 
@@ -140,11 +142,25 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
   text and runs it via `exec::capture`, inlining stdout with trailing newlines
   trimmed.
-- **Quoting:** `Literal` parts pass through verbatim; `Quoted`/`Unquoted` parts
-  are scanned for `$`. A word that is entirely unquoted and expands to empty
-  (e.g. `$UNSET`) drops out, mirroring shell field-splitting; a quoted empty
-  (`""`) is kept. Word-splitting and globbing of results are *not* done yet, so
-  one word yields one argument.
+- **Globbing:** each word is also assembled as a glob *pattern* in lock-step
+  with its plain text, escaping metacharacters that came from quoted/literal
+  parts so only unquoted `*?[` stay active. If the pattern matches files
+  (via `glob::glob`), the sorted matches replace the word; otherwise the
+  literal text is kept (POSIX no-match).
+- **Quoting / emptiness:** `Literal` parts pass through verbatim; `Quoted`/
+  `Unquoted` parts are scanned for `$`. A word that is entirely unquoted and
+  expands to empty (e.g. `$UNSET`) drops out, mirroring shell field-splitting;
+  a quoted empty (`""`) is kept. Whitespace word-splitting of results is *not*
+  done yet.
+
+### `glob.rs` — filename matching
+A from-scratch globber, no external crate:
+- `match_component` matches one path component with `*` (within a component),
+  `?`, `[…]` (ranges and `[!…]`/`[^…]` negation); a backslash escapes the next
+  character so quoted metacharacters are literal.
+- `glob` walks the filesystem component-by-component, so `src/*.rs` and
+  `*/*.rs` descend directories. A leading `.` in a filename matches only when
+  the pattern component begins with a literal `.`, so `*` skips dotfiles.
 
 ### `exec.rs` — runtime
 Turns a `Pipeline` into running processes:
@@ -331,7 +347,7 @@ Ordered roughly by dependency and effort:
 flowchart LR
     v0["v0 ✅<br/>REPL · lex · parse<br/>pipes · redirects · builtins"]
     e1["Expansion ✅<br/>$VAR · ~ · $(...)"]
-    e2["Globbing<br/>* · ? · [..]"]
+    e2["Globbing ✅<br/>* · ? · [..]"]
     e3["Operators<br/>&amp;&amp; · || · ;"]
     e4["Job control<br/>pgrps · Ctrl-Z · fg/bg · signals"]
 
@@ -341,12 +357,13 @@ flowchart LR
     classDef todo fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
     class v0 done;
     class e1 done;
-    class e2,e3,e4 todo;
+    class e2 done;
+    class e3,e4 todo;
 ```
 
 | Milestone | Touches | Notes |
 |---|---|---|
 | Variable & tilde expansion | ✅ `expand.rs`, between parse and exec | `$VAR`, `${VAR}`, `~`, command substitution `$(...)`; no word-splitting yet |
-| Globbing | expansion stage | expand `*`, `?`, `[…]` against the filesystem |
+| Globbing | ✅ `glob.rs`, driven from the expansion stage | `*`, `?`, `[…]` with ranges/negation, multi-component, dotfile rule |
 | Control operators | lexer + parser + a new AST node | `&&`, `\|\|`, `;` sequence/short-circuit |
 | Job control | exec rewrite on `nix` | process groups, terminal control, `Ctrl-Z`/`fg`/`bg`, signal forwarding — the headline feature for daily use |

@@ -6,11 +6,14 @@
 //!   * tilde expansion   — a leading unquoted `~` becomes `$HOME`
 //!   * variables         — `$VAR`, `${VAR}` (unset → empty)
 //!   * command substitution — `$(...)` runs a sub-pipeline and inlines its stdout
+//!   * globbing          — `*`, `?`, `[…]` match against the filesystem
 //!
-//! Single-quoted and backslash-escaped text is taken verbatim. We do *not* do
-//! word-splitting on expansion results yet (that, and globbing, come next), so
-//! one word expands to exactly one argument — except a bare expansion that
-//! comes out empty, which drops out the way `echo $UNSET` does in a real shell.
+//! Single-quoted and backslash-escaped text is taken verbatim, and only
+//! metacharacters originating from *unquoted* text are active for globbing
+//! (`"*.rs"` is literal). Globbing can turn one word into several arguments;
+//! a pattern that matches nothing is left as its literal text. We do *not* do
+//! whitespace word-splitting of expansion results yet. A bare expansion that
+//! comes out empty drops out the way `echo $UNSET` does in a real shell.
 
 use std::iter::Peekable;
 use std::str::Chars;
@@ -30,9 +33,7 @@ pub fn expand(raw: RawPipeline) -> Result<Pipeline, String> {
 fn expand_command(rc: RawCommand) -> Result<Command, String> {
     let mut argv = Vec::new();
     for word in &rc.argv {
-        if let Some(s) = expand_argv_word(word)? {
-            argv.push(s);
-        }
+        argv.extend(expand_argv_word(word)?);
     }
 
     let mut redirects = Vec::with_capacity(rc.redirects.len());
@@ -48,18 +49,69 @@ fn expand_command(rc: RawCommand) -> Result<Command, String> {
     Ok(Command { argv, redirects })
 }
 
-/// Expand a word destined for `argv`. Returns `None` when an entirely unquoted
-/// word expands to nothing — e.g. `$UNSET` — mirroring shell field-splitting,
-/// which discards empty unquoted expansions. A quoted empty (`""`) is kept.
-fn expand_argv_word(word: &Word) -> Result<Option<String>, String> {
-    let quoted = word
-        .iter()
-        .any(|p| matches!(p, WordPart::Literal(_) | WordPart::Quoted(_)));
-    let s = expand_word(word)?;
-    if s.is_empty() && !quoted {
-        Ok(None)
+/// Expand a word destined for `argv`, possibly into several arguments.
+///
+/// Builds two views of the word in lock-step: `plain` (the literal text) and
+/// `pattern` (the same, but with metacharacters from quoted/literal parts
+/// backslash-escaped, so only unquoted `*?[` stay active). If the pattern has
+/// active metacharacters and matches files, the matches replace the word;
+/// otherwise the literal `plain` is used.
+///
+/// An entirely unquoted word that expands to nothing — e.g. `$UNSET` — yields
+/// no arguments, mirroring shell field-splitting. A quoted empty (`""`) is kept.
+fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
+    let mut plain = String::new();
+    let mut pattern = String::new();
+    let mut quoted = false;
+    let mut globbable = false;
+
+    for (i, part) in word.iter().enumerate() {
+        match part {
+            WordPart::Literal(s) => {
+                quoted = true;
+                plain.push_str(s);
+                escape_meta_into(&mut pattern, s);
+            }
+            WordPart::Quoted(s) => {
+                quoted = true;
+                let e = expand_dollars(s)?;
+                plain.push_str(&e);
+                escape_meta_into(&mut pattern, &e);
+            }
+            WordPart::Unquoted(s) => {
+                let text = if i == 0 { tilde_expand(s) } else { s.clone() };
+                let e = expand_dollars(&text)?;
+                plain.push_str(&e);
+                pattern.push_str(&e); // metacharacters stay active
+                if e.contains(['*', '?', '[']) {
+                    globbable = true;
+                }
+            }
+        }
+    }
+
+    if globbable {
+        let matches = crate::glob::glob(&pattern);
+        if !matches.is_empty() {
+            return Ok(matches);
+        }
+    }
+
+    if plain.is_empty() && !quoted {
+        Ok(Vec::new())
     } else {
-        Ok(Some(s))
+        Ok(vec![plain])
+    }
+}
+
+/// Append `s` to a glob pattern, backslash-escaping characters that would
+/// otherwise be metacharacters — used for text that must stay literal.
+fn escape_meta_into(pattern: &mut String, s: &str) {
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '[' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(c);
     }
 }
 
@@ -244,5 +296,24 @@ mod tests {
     fn lone_dollar_is_literal() {
         assert_eq!(one("echo $"), vec!["echo", "$"]);
         assert_eq!(one("echo a$ b"), vec!["echo", "a$", "b"]);
+    }
+
+    // Globbing tests run from the crate root against stable repo fixtures.
+    #[test]
+    fn glob_expands_unquoted_pattern() {
+        let mut got = one("ls Cargo.*");
+        got.sort();
+        assert_eq!(got, vec!["Cargo.lock", "Cargo.toml", "ls"]);
+    }
+
+    #[test]
+    fn quoted_pattern_is_literal() {
+        // The `*` came from a quoted part, so it must not glob.
+        assert_eq!(one("ls \"Cargo.*\""), vec!["ls", "Cargo.*"]);
+    }
+
+    #[test]
+    fn unmatched_glob_stays_literal() {
+        assert_eq!(one("ls no-such-*.zzz"), vec!["ls", "no-such-*.zzz"]);
     }
 }

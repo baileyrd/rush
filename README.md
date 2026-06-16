@@ -5,8 +5,8 @@ A small, bash-compatible shell written in Rust — built to grow into a daily-us
 `rush` reads a command line, lexes and parses it, expands it, then executes the
 resulting pipeline. The current version (`v0`) supports interactive editing with
 persistent history, pipelines, file redirection, the handful of builtins that
-must run inside the shell process, and expansion of variables, `~`, and
-command substitution.
+must run inside the shell process, and expansion of variables, `~`, command
+substitution, and filename globs.
 
 ```
 /home/baileyrd/projects/rust_bash $ ls | grep rs | wc -l
@@ -30,7 +30,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Builtins | ✅ | `cd`, `pwd`, `exit` |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, tilde, command substitution (no word-splitting yet) |
-| Globbing (`*`, `?`) | ⬜ | planned |
+| Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ⬜ | planned |
 | Job control (Ctrl-Z, `fg`/`bg`, signals) | ⬜ | planned (the big one) |
 
@@ -72,7 +72,8 @@ src/
   main.rs       REPL: read → parse → expand → execute loop, history, prompt
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
   parser.rs     grammar: Vec<Token> → RawPipeline of unexpanded Commands
-  expand.rs     expansion: $VAR, ~, $(...) → concrete Pipeline
+  expand.rs     expansion: $VAR, ~, $(...), globs → concrete Pipeline
+  glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
   exec.rs       runtime: spawn processes, wire pipes & redirects
   builtins.rs   in-process commands: cd, pwd, exit
 ```

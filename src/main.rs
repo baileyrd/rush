@@ -4,15 +4,17 @@
 //! (`>`, `>>`, `<`), and the builtins that must run in-process (`cd`, `exit`,
 //! `pwd`). Quoting is handled by a small hand-written lexer so that
 //! `echo "hello world"` is one argument. An expansion stage resolves `$VAR`,
-//! `~`, `$(...)`, and filename globs (`*`, `?`, `[…]`) before a command runs.
-//!
-//! Not yet here (see the roadmap): `&&`/`||`/`;`, background jobs, and
-//! signal/job control. Those come next.
+//! `~`, `$(...)`, and filename globs (`*`, `?`, `[…]`) before a command runs,
+//! and control operators (`&&`, `||`, `;`, `&`) sequence whole jobs. On Unix,
+//! background and stopped jobs are managed with real job control (`fg`/`bg`/
+//! `jobs`, Ctrl-Z); other platforms run foreground-only.
 
 mod builtins;
 mod exec;
 mod expand;
 mod glob;
+#[cfg(unix)]
+mod job;
 mod lexer;
 mod parser;
 
@@ -42,7 +44,15 @@ fn main() -> rustyline::Result<()> {
         let _ = rl.load_history(h);
     }
 
+    // Claim the terminal and set up signal handling for job control.
+    #[cfg(unix)]
+    job::init();
+
     loop {
+        // Report any background jobs that finished or stopped since last prompt.
+        #[cfg(unix)]
+        job::reap_background();
+
         match rl.readline(&prompt()) {
             Ok(line) => {
                 let line = line.trim();

@@ -21,8 +21,8 @@ thread, event loop, or async runtime: the main thread blocks on a line of
 input, transforms it through a series of pure-ish stages, executes it, then
 loops.
 
-The codebase is intentionally small (~490 lines) and split along the stages of
-that pipeline, so each module has a single, well-defined responsibility.
+The codebase is intentionally small and split along the stages of that
+pipeline, so each module has a single, well-defined responsibility.
 
 ```mermaid
 flowchart LR
@@ -31,21 +31,26 @@ flowchart LR
         main["main.rs<br/>REPL loop"]
         lexer["lexer.rs<br/>tokenize"]
         parser["parser.rs<br/>build AST"]
-        exec["exec.rs<br/>run pipeline"]
-        builtins["builtins.rs<br/>cd / pwd / exit"]
+        expand["expand.rs + glob.rs<br/>expand words"]
+        exec["exec.rs<br/>run jobs"]
+        job["job.rs<br/>job control (Unix)"]
+        builtins["builtins.rs<br/>cd / pwd / exit / fg / bg"]
     end
 
     user(["User / TTY"]) -->|line of text| main
     main -->|"&str"| parser
     parser -->|"&str"| lexer
     lexer -->|"Vec&lt;Token&gt;"| parser
-    parser -->|"Pipeline"| exec
+    parser -->|"CommandList"| exec
+    exec -->|"RawPipeline"| expand
+    expand -->|"Pipeline"| exec
     exec -->|"single cmd?"| builtins
+    exec -->|"fg / bg (Unix)"| job
     exec -->|"spawn"| os[["OS processes"]]
     os -->|stdout / stderr| user
 
     classDef mod fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
-    class main,lexer,parser,exec,builtins mod;
+    class main,lexer,parser,expand,exec,job,builtins mod;
 ```
 
 > Note: `parser::parse` is the public entry point; it calls `lexer::lex`
@@ -71,7 +76,7 @@ flowchart TD
     A -->|"lexer::lex"| B
     B -->|"parser::parse"| C
     C -->|"exec::run_list → expand::expand<br/>(per pipeline, left to right)"| F
-    F -->|"spawn + wait"| D
+    F -->|"job::run_foreground / run_background (Unix)<br/>exec::run (other)"| D
     D --> E
 
     A -.->|"empty line → skipped in main"| E
@@ -80,10 +85,10 @@ flowchart TD
 | Stage | Function | Input | Output | Fails on |
 |---|---|---|---|---|
 | Lex | `lexer::lex` | `&str` | `Vec<Token>` | unterminated `"`, unterminated `$(` |
-| Parse | `parser::parse` | `&str` | `CommandList` | dangling `\|`, missing redirect target, empty command, `&` |
+| Parse | `parser::parse` | `&str` | `CommandList` | dangling `\|`, missing redirect target, empty command |
 | Run list | `exec::run_list` | `&CommandList` | `i32` (status) | propagated from expand/exec |
 | Expand | `expand::expand` | `&RawPipeline` | `Pipeline` | unterminated `${`/`$(`, sub-command parse error |
-| Execute | `exec::run` | `&Pipeline` | `(i32, String)` | spawn failure, missing redirect file |
+| Execute (fg) | `job::run_foreground` (Unix) / `exec::run` | `&Pipeline` | `i32` / `(i32, String)` | spawn failure, missing redirect file |
 | Builtin | `builtins::try_run` | `&[String]` | `Option<i32>` | — (errors printed inline) |
 
 Expansion sits deliberately between parse and exec, and runs **lazily, one
@@ -95,9 +100,13 @@ expansion stage resolves `~`, `$VAR`/`${VAR}`, `$(...)`, and filename globs
 a process is spawned. Globbing can turn one word into several arguments, so the
 stage is a flat-map, not a one-to-one map.
 
-The control operators `&&`, `||`, and `;` have equal precedence and associate
-left to right; `run_list` decides whether to run each pipeline from the previous
-one's exit status (`&&` needs `0`, `||` needs non-zero, `;` always runs).
+Control operators form two levels of grouping. `&&` and `||` bind a chain of
+pipelines into one **job** (equal precedence, left-associative); `run_list`
+decides whether to run each pipeline from the previous one's exit status (`&&`
+needs `0`, `||` needs non-zero). Then `;` and `&` separate jobs, with `&`
+marking the preceding job to run in the background. On Unix, foreground and
+background pipelines go through `job` (process groups + terminal control); off
+Unix there is no job control and `&` is an error.
 
 ---
 
@@ -128,23 +137,24 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
 - Lexer errors: an unterminated double quote or an unterminated `$(`.
 
 ### `parser.rs` — grammar
-Consumes tokens into a `CommandList` — a `first` pipeline plus `(Connector,
-pipeline)` pairs, words still unexpanded. The grammar (v0):
+Consumes tokens into a `CommandList` (a `Vec<Job>`), words still unexpanded.
+The grammar (v0):
 ```
-list     := pipeline ( (';' | '&&' | '||') pipeline )* ';'?
+list     := job ( (';' | '&') job )* (';' | '&')?
+job      := pipeline ( ('&&' | '||') pipeline )*
 pipeline := command ( '|' command )*
 command  := word+ redirection*
 redirect := ('<' | '>' | '>>') word
 ```
-- `parse_pipeline` builds one pipeline, stopping (without consuming) at a
-  control operator or end of input.
+- `parse_andor` builds one job's `&&`/`||` chain; `parse_pipeline` builds one
+  pipeline, each stopping (without consuming) at the next operator or end.
 - `Word` tokens append to the current command's `argv` (each a `Vec<WordPart>`).
 - `Pipe` finalizes the current command (erroring if it's empty) and starts a new
   one via `std::mem::replace`.
 - Redirect operators consume the following word as a filename (`expect_word`),
   erroring if it isn't a word.
-- A trailing empty command (`ls |`), an empty pipeline between operators
-  (`a ;; b`), and single `&` (background, not yet supported) are all rejected.
+- A trailing `;`/`&` is allowed; a trailing empty command (`ls |`) and an empty
+  job between operators (`a ;; b`, `&& a`) are rejected.
 
 ### `expand.rs` — expansion
 Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
@@ -176,30 +186,50 @@ A from-scratch globber, no external crate:
 
 ### `exec.rs` — runtime
 Sequences a `CommandList` and turns each pipeline into running processes:
-- `run_list` walks the list left to right, expanding each `RawPipeline` *just
-  before* it runs and using `should_run(connector, prev_status)` to honour
-  `&&`/`||`/`;`. It returns the status of the last pipeline that ran.
-- `capture_list` mirrors that but concatenates each pipeline's stdout into a
-  string — the engine behind `$(...)`.
+- `run_list` runs each job in turn. A foreground job runs its `&&`/`||` chain
+  via `run_andor`, expanding each `RawPipeline` *just before* it runs and using
+  `should_run(connector, prev_status)` to short-circuit. A background job (one
+  pipeline) is handed to `run_background`.
+- `capture_list` runs every job in the foreground with a plain spawn-and-wait
+  and concatenates stdout — the engine behind `$(...)` (the `&` marker is
+  ignored inside a substitution).
 - **Single-command fast path:** if a pipeline is one command, try
-  `builtins::try_run` first so `cd`/`exit` affect the shell process (skipped
-  when capturing, so substitutions see external commands).
-- Otherwise `run` spawns each stage with `std::process::Command`, threading the
-  previous child's stdout into the next child's stdin.
-- Redirection rules per stage: an explicit `< file` / `> file` / `>> file`
-  **wins** over pipe wiring; otherwise non-final stages get a piped stdout and
-  the final stage inherits the terminal (or is captured).
-- After spawning all stages, it waits on each child; the pipeline's status is
-  the last stage's exit code.
+  `builtins::try_run` first so `cd`/`exit`/`jobs` affect the shell process
+  (skipped when capturing, so substitutions see external commands).
+- `build_stage` constructs one stage's `std::process::Command` and stdio.
+  Redirection rules: an explicit `< file` / `> file` / `>> file` **wins** over
+  pipe wiring; otherwise non-final stages (and any stage when capturing) get a
+  piped stdout. It is shared by the plain runner and the Unix job runner.
+- On Unix, foreground/background spawning, terminal control, and waiting live in
+  `job` (below). Off Unix, `run` spawns each stage, threads stdout→stdin, waits,
+  and reports the last stage's exit code as the pipeline status.
+
+### `job.rs` — Unix job control *(compiled only on Unix)*
+Implements the parts that need POSIX process groups and signals, via the `libc`
+crate, following the classic glibc job-control structure:
+- `init` (called once at startup, only when stdin is a tty) ignores the
+  job-control signals (`SIGINT`, `SIGTSTP`, …) in the shell, puts the shell in
+  its own process group, and grabs the terminal.
+- `spawn_pipeline` launches every stage into one new process group; each child
+  resets those signals to default and `setpgid`s before `exec` (via
+  `CommandExt::pre_exec`), so Ctrl-C/Ctrl-Z reach the job, not the shell.
+- `run_foreground` hands the job the terminal (`tcsetpgrp`), waits with
+  `WUNTRACED` (so a Ctrl-Z stop is detected and recorded), then reclaims the
+  terminal. `run_background` records the job and prints `[id] pgid`.
+- A thread-local job table backs `jobs`/`fg`/`bg` and the `reap_background`
+  sweep run before each prompt (a non-blocking `waitpid` that reports finished,
+  stopped, and continued jobs).
 
 ### `builtins.rs` — in-process commands
 `try_run` returns `Some(code)` if `argv[0]` is a builtin, else `None`:
 - `cd [dir]` — changes the shell's own working directory (no arg → `$HOME`).
 - `pwd` — prints the current directory.
 - `exit [code]` — terminates the process (diverges; defaults to `0`).
+- On Unix, `jobs`/`fg`/`bg` are dispatched to `job::builtin`.
 
 These **must** run in-process: a `cd` executed in a child would change the
-child's directory and die with it, leaving the shell where it was.
+child's directory and die with it; `fg`/`bg` must manipulate the shell's own
+job table and terminal.
 
 ---
 
@@ -228,12 +258,18 @@ classDiagram
         Quoted(String)
     }
     class CommandList {
+        +Vec~Job~ jobs
+    }
+    class Job {
+        +AndOrList list
+        +bool background
+    }
+    class AndOrList {
         +RawPipeline first
         +Vec~(Connector, RawPipeline)~ rest
     }
     class Connector {
         <<enum>>
-        Seq
         And
         Or
     }
@@ -258,8 +294,10 @@ classDiagram
     }
 
     Token *-- WordPart
-    CommandList "1" *-- "1..*" RawPipeline
-    CommandList ..> Connector : joins with
+    CommandList "1" *-- "1..*" Job
+    Job "1" *-- "1" AndOrList
+    AndOrList "1" *-- "1..*" RawPipeline
+    AndOrList ..> Connector : joins with
     RawPipeline "1" *-- "1..*" RawCommand
     Pipeline "1" *-- "1..*" Command
     Command "1" *-- "0..*" Redirect
@@ -364,9 +402,15 @@ Input: `cat log.txt | grep ERROR >> errors.txt`
   exec `cd` as an external program (which fails) — documented, not fixed.
 - **Errors never kill the shell** (except `exit`). Parse and exec failures print
   to stderr and the loop continues, matching interactive-shell expectations.
-- **No `nix`/`libc` yet.** Everything uses `std`. Real job control (process
-  groups, `tcsetpgrp`, signal forwarding) will require dropping to `nix`, which
-  is the main architectural change on the horizon.
+- **`libc` only where it's unavoidable.** Everything except job control uses
+  `std`. Job control (process groups, `tcsetpgrp`, `waitpid(WUNTRACED)`, signal
+  handling) needs raw POSIX, so `job.rs` uses `libc` directly and is gated to
+  `#[cfg(unix)]`; `libc` is a `[target.'cfg(unix)'.dependencies]` entry, so
+  Windows builds never pull it. Off Unix the shell degrades to foreground-only.
+- **Job control follows the glibc reference.** The shell ignores the
+  job-control signals and owns the terminal; each child resets them and joins
+  the job's process group before `exec`; the terminal is handed to the
+  foreground job and reclaimed when it stops or exits.
 
 ---
 
@@ -380,7 +424,7 @@ flowchart LR
     e1["Expansion ✅<br/>$VAR · ~ · $(...)"]
     e2["Globbing ✅<br/>* · ? · [..]"]
     e3["Operators ✅<br/>&amp;&amp; · || · ;"]
-    e4["Job control<br/>pgrps · Ctrl-Z · fg/bg · signals"]
+    e4["Job control ✅<br/>pgrps · Ctrl-Z · fg/bg · signals"]
 
     v0 --> e1 --> e2 --> e3 --> e4
 
@@ -390,7 +434,7 @@ flowchart LR
     class e1 done;
     class e2 done;
     class e3 done;
-    class e4 todo;
+    class e4 done;
 ```
 
 | Milestone | Touches | Notes |
@@ -398,4 +442,9 @@ flowchart LR
 | Variable & tilde expansion | ✅ `expand.rs`, between parse and exec | `$VAR`, `${VAR}`, `~`, command substitution `$(...)`; no word-splitting yet |
 | Globbing | ✅ `glob.rs`, driven from the expansion stage | `*`, `?`, `[…]` with ranges/negation, multi-component, dotfile rule |
 | Control operators | ✅ lexer + parser `CommandList` + `exec::run_list` | `&&`, `\|\|`, `;` sequence/short-circuit by exit status |
-| Job control | exec rewrite on `nix` | process groups, terminal control, `Ctrl-Z`/`fg`/`bg`, signal forwarding — the headline feature for daily use |
+| Job control | ✅ `job.rs` (`#[cfg(unix)]`, `libc`) | `&`, process groups, terminal control, `Ctrl-Z`/`fg`/`bg`/`jobs`, signals |
+
+All four roadmap milestones are now in. Beyond the roadmap, natural next steps
+are word-splitting of expansions, `$?`/`$#`/`$@` and variable assignment,
+backgrounding `&&`/`||` lists via a subshell, and more builtins (`export`,
+`echo`, `kill %n`).

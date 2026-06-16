@@ -13,8 +13,19 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "cd" => Some(cd(argv)),
         "pwd" => Some(pwd()),
         "exit" => exit(argv), // diverges on success
-        _ => None,
+        _ => other_builtin(argv),
     }
+}
+
+/// Platform-specific builtins. On Unix this is where `jobs`/`fg`/`bg` live.
+#[cfg(unix)]
+fn other_builtin(argv: &[String]) -> Option<i32> {
+    crate::job::builtin(argv)
+}
+
+#[cfg(not(unix))]
+fn other_builtin(_argv: &[String]) -> Option<i32> {
+    None
 }
 
 fn cd(argv: &[String]) -> i32 {

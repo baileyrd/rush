@@ -255,7 +255,7 @@ mod tests {
 
     fn one(input: &str) -> Vec<String> {
         let list = parser::parse(input).unwrap();
-        let pipeline = expand(&list.first).unwrap();
+        let pipeline = expand(&list.jobs[0].list.first).unwrap();
         pipeline.commands[0].argv.clone()
     }
 

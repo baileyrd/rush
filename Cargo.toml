@@ -5,3 +5,8 @@ edition = "2024"
 
 [dependencies]
 rustyline = "18.0.0"
+
+# Job control (process groups, terminal hand-off, signals) is Unix-only; the
+# raw libc bindings are the most stable surface for it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -33,6 +33,8 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Redirection (`>`, `>>`, `<`) | ✅ | truncate, append, input |
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
+| Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |
+| Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, tilde, command substitution; unquoted results word-split |
 | Arithmetic (`$((...))`) | ✅ | `+ - * / %`, comparisons, `&& \|\| !`, parentheses, variables (`i=$((i+1))`) |
@@ -45,8 +47,10 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 
 ```sh
 cargo build --release
-cargo run            # start the interactive shell
-cargo test           # run the lexer/parser unit tests
+cargo run                       # start the interactive shell
+cargo run -- script.sh a b c    # run a script with positional args
+cargo run -- -c 'echo $1' x y   # run a command string
+cargo test                      # run the unit tests
 ```
 
 Requires a Rust toolchain with **edition 2024** support.

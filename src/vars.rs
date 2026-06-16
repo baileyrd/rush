@@ -29,6 +29,34 @@ thread_local! {
     static LAST_STATUS: RefCell<i32> = const { RefCell::new(0) };
     static VARS: RefCell<HashMap<String, Var>> = RefCell::new(HashMap::new());
     static LOOP_CTL: RefCell<Option<LoopCtl>> = const { RefCell::new(None) };
+    // `$0` (shell/script name) and `$1`, `$2`, … (positional parameters).
+    static SHELL_NAME: RefCell<String> = RefCell::new("rush".to_string());
+    static ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Set `$0` and the positional parameters (`$1`…).
+pub fn set_args(name: String, args: Vec<String>) {
+    SHELL_NAME.with(|n| *n.borrow_mut() = name);
+    ARGS.with(|a| *a.borrow_mut() = args);
+}
+
+/// `$n`: `$0` is the shell/script name, `$1`… the positional parameters.
+pub fn arg(n: usize) -> Option<String> {
+    if n == 0 {
+        Some(SHELL_NAME.with(|s| s.borrow().clone()))
+    } else {
+        ARGS.with(|a| a.borrow().get(n - 1).cloned())
+    }
+}
+
+/// `$#` — the number of positional parameters.
+pub fn arg_count() -> usize {
+    ARGS.with(|a| a.borrow().len())
+}
+
+/// All positional parameters (`$@` / `$*`).
+pub fn args() -> Vec<String> {
+    ARGS.with(|a| a.borrow().clone())
 }
 
 /// Record a pending loop-control request (from the `break`/`continue` builtins).

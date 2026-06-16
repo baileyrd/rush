@@ -114,8 +114,11 @@ Unix there is no job control and `&` is an error.
 
 ## 3. Module reference
 
-### `main.rs` — the REPL
-Owns the read-eval-print loop and all I/O concerns:
+### `main.rs` — entry point & REPL
+Dispatches on argv: `rush -c "cmds" [name args…]` and `rush FILE [args…]` set the
+positional parameters and run a source string/file non-interactively (via
+`run_source`); with no arguments it runs the interactive REPL, which owns the
+read-eval-print loop and all I/O concerns:
 - Builds the prompt from the current working directory (`cwd $ `).
 - Loads `~/.rush_history` at startup and saves it on exit.
 - Translates `rustyline` signals: **Ctrl-C** (`Interrupted`) abandons the line
@@ -172,8 +175,9 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Tilde:** a leading `~` on the first, unquoted part of a word becomes `$HOME`
   (falling back to `$USERPROFILE`); `~user` is left untouched.
 - **Variables:** `$VAR` and `${VAR}` resolve to a shell variable (`vars`) if set,
-  else the environment, else empty. `$?` expands to the last pipeline's exit
-  status. `${...}` also supports the default/alternate operators `:-` `-` `:=`
+  else the environment, else empty. `$?` is the last exit status; `$0`–`$9`/
+  `${10}` the positional parameters; `$#` their count; `$@`/`$*` all of them
+  (a standalone `"$@"` keeps each parameter as its own argument). `${...}` also supports the default/alternate operators `:-` `-` `:=`
   `=` `:+` `+` `:?` `?` (a colon also treats *empty* as unset) and `${#name}`
   for length (`expand_braced`). Leading `NAME=value` words on a command are
   split off as assignments (`expand_command`): with no program word they set

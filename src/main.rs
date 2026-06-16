@@ -40,6 +40,48 @@ fn prompt() -> String {
 }
 
 fn main() -> rustyline::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Non-interactive modes: `rush -c "cmd" [name args…]` and `rush FILE [args…]`.
+    match args.get(1).map(String::as_str) {
+        Some("-c") => {
+            let cmd = args.get(2).cloned().unwrap_or_default();
+            let name = args.get(3).cloned().unwrap_or_else(|| "rush".to_string());
+            vars::set_args(name, args.get(4..).unwrap_or(&[]).to_vec());
+            std::process::exit(run_source(&cmd));
+        }
+        Some(file) => {
+            vars::set_args(file.to_string(), args.get(2..).unwrap_or(&[]).to_vec());
+            match std::fs::read_to_string(file) {
+                Ok(src) => std::process::exit(run_source(&src)),
+                Err(e) => {
+                    eprintln!("rush: {file}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => interactive(),
+    }
+}
+
+/// Parse and run a whole script (or `-c` string), returning an exit status.
+fn run_source(src: &str) -> i32 {
+    match parser::parse(src) {
+        Ok(list) => match exec::run_list(&list) {
+            Ok(status) => status,
+            Err(e) => {
+                eprintln!("rush: {e}");
+                1
+            }
+        },
+        Err(e) => {
+            eprintln!("rush: {e}");
+            2
+        }
+    }
+}
+
+fn interactive() -> rustyline::Result<()> {
     let mut rl = DefaultEditor::new()?;
     let hist = history_path();
     if let Some(ref h) = hist {

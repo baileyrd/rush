@@ -135,6 +135,14 @@ fn assignment_split(word: &Word) -> Option<(String, Word)> {
 /// that is entirely unquoted and empty (e.g. `$UNSET`) drops out; a quoted empty
 /// (`""`) is kept.
 fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
+    // A standalone `"$@"` expands to one argument per positional parameter,
+    // preserving any spaces within each — the common arg-forwarding idiom.
+    if let [WordPart::Quoted(s)] = word.as_slice() {
+        if s == "$@" {
+            return Ok(crate::vars::args());
+        }
+    }
+
     let mut sp = Splitter::default();
 
     for (i, part) in word.iter().enumerate() {
@@ -302,6 +310,23 @@ fn expand_dollars(text: &str) -> Result<String, String> {
                 chars.next();
                 out.push_str(&crate::vars::last_status().to_string());
             }
+            // `$#` — number of positional parameters.
+            Some('#') => {
+                chars.next();
+                out.push_str(&crate::vars::arg_count().to_string());
+            }
+            // `$@` / `$*` — all positional parameters, space-joined here. (A
+            // standalone `"$@"` keeps each parameter separate; see below.)
+            Some('@') | Some('*') => {
+                chars.next();
+                out.push_str(&crate::vars::args().join(" "));
+            }
+            // `$0`–`$9` — positional parameters.
+            Some(&c) if c.is_ascii_digit() => {
+                chars.next();
+                let n = (c as u8 - b'0') as usize;
+                out.push_str(&crate::vars::arg(n).unwrap_or_default());
+            }
             Some('{') => {
                 chars.next(); // consume '{'
                 let mut inner = String::new();
@@ -432,6 +457,17 @@ fn is_valid_name(s: &str) -> bool {
 /// the default/alternate operators `:-` `-` `:=` `=` `:+` `+` `:?` `?`. With a
 /// colon the test is "unset *or* empty"; without, just "unset".
 fn expand_braced(inner: &str) -> Result<String, String> {
+    // Special parameters: `${#}`, `${@}`/`${*}`, and numeric `${10}`.
+    match inner {
+        "#" => return Ok(crate::vars::arg_count().to_string()),
+        "@" | "*" => return Ok(crate::vars::args().join(" ")),
+        _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
+            let n: usize = inner.parse().map_err(|_| format!("${{{inner}}}: bad substitution"))?;
+            return Ok(crate::vars::arg(n).unwrap_or_default());
+        }
+        _ => {}
+    }
+
     if let Some(name) = inner.strip_prefix('#') {
         if !is_valid_name(name) {
             return Err(format!("${{{inner}}}: bad substitution"));

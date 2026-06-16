@@ -43,7 +43,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Control flow | ✅ | `if`/`while`/`until`/`for`, `case … esac`, `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`; brace groups `{ …; }` |
 | Subshells | ✅ | `( … )` isolates cwd and variables (state save/restore, not a fork) |
-| Background & job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
+| Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
 
 ## Build & Run
 

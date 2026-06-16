@@ -221,6 +221,74 @@ pub fn builtin(argv: &[String]) -> Option<i32> {
         "jobs" => Some(jobs_cmd()),
         "fg" => Some(fg_cmd(argv)),
         "bg" => Some(bg_cmd(argv)),
+        "kill" => Some(kill_cmd(argv)),
+        _ => None,
+    }
+}
+
+/// `kill [-SIG] %job|pid …` — signal a job (by `%n`) or process. The default
+/// signal is `TERM`; `-9`, `-KILL`, `-SIGKILL`, etc. are accepted.
+fn kill_cmd(argv: &[String]) -> i32 {
+    let mut sig = libc::SIGTERM;
+    let mut start = 1;
+    if let Some(first) = argv.get(1).and_then(|a| a.strip_prefix('-')) {
+        match parse_signal(first) {
+            Some(s) => {
+                sig = s;
+                start = 2;
+            }
+            None => {
+                eprintln!("kill: {first}: invalid signal specification");
+                return 1;
+            }
+        }
+    }
+    if argv.len() <= start {
+        eprintln!("kill: usage: kill [-signal] %job | pid ...");
+        return 1;
+    }
+
+    let mut status = 0;
+    for target in &argv[start..] {
+        if let Some(spec) = target.strip_prefix('%') {
+            match spec.parse::<usize>().ok().and_then(job_pgid) {
+                Some(pgid) => unsafe {
+                    libc::killpg(pgid, sig);
+                },
+                None => {
+                    eprintln!("kill: %{spec}: no such job");
+                    status = 1;
+                }
+            }
+        } else if let Ok(pid) = target.parse::<pid_t>() {
+            unsafe {
+                libc::kill(pid, sig);
+            }
+        } else {
+            eprintln!("kill: {target}: arguments must be job or process IDs");
+            status = 1;
+        }
+    }
+    status
+}
+
+fn job_pgid(id: usize) -> Option<pid_t> {
+    STATE.with(|s| s.borrow().jobs.iter().find(|j| j.id == id).map(|j| j.pgid))
+}
+
+fn parse_signal(name: &str) -> Option<c_int> {
+    if let Ok(n) = name.parse::<c_int>() {
+        return Some(n);
+    }
+    let upper = name.to_ascii_uppercase();
+    match upper.strip_prefix("SIG").unwrap_or(&upper) {
+        "TERM" => Some(libc::SIGTERM),
+        "KILL" => Some(libc::SIGKILL),
+        "INT" => Some(libc::SIGINT),
+        "HUP" => Some(libc::SIGHUP),
+        "QUIT" => Some(libc::SIGQUIT),
+        "STOP" => Some(libc::SIGSTOP),
+        "CONT" => Some(libc::SIGCONT),
         _ => None,
     }
 }

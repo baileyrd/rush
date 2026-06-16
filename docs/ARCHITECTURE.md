@@ -276,9 +276,10 @@ crate, following the classic glibc job-control structure:
 - `run_foreground` hands the job the terminal (`tcsetpgrp`), waits with
   `WUNTRACED` (so a Ctrl-Z stop is detected and recorded), then reclaims the
   terminal. `run_background` records the job and prints `[id] pgid`.
-- A thread-local job table backs `jobs`/`fg`/`bg` and the `reap_background`
-  sweep run before each prompt (a non-blocking `waitpid` that reports finished,
-  stopped, and continued jobs).
+- A thread-local job table backs `jobs`/`fg`/`bg`/`kill` and the
+  `reap_background` sweep run before each prompt (a non-blocking `waitpid` that
+  reports finished, stopped, and continued jobs). `kill [-SIG] %n|pid` signals a
+  job's process group (via `killpg`) or a process.
 
 ### `builtins.rs` — in-process commands
 `try_run` returns `Some(code)` if `argv[0]` is a builtin, else `None`:
@@ -540,5 +541,5 @@ more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
 
 With `test`/`[`, `$((…))`, and control flow, real scripts work — e.g. a
 counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`, and recursive functions.
-Natural next steps: command substitution / backgrounding of compound commands,
-here-documents (`<<`), and `kill %n`.
+Natural next steps: here-documents (`<<`), command substitution / backgrounding
+of compound commands, and arrays.

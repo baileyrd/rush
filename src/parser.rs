@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use crate::lexer::{self, Token, Word, WordPart};
+use crate::lexer::{self, RedirOp, Token, Word, WordPart};
 
 /// A list: jobs separated by `;`/`&`/newline.
 #[derive(Debug, Clone)]
@@ -72,10 +72,19 @@ pub struct RawSimple {
 
 #[derive(Debug, Clone)]
 pub enum RawRedirect {
-    /// `< file`
-    Stdin(Word),
-    /// `> file` (truncate) or `>> file` (append)
-    Stdout { file: Word, append: bool },
+    /// `[fd]< file` / `[fd]> file` / `[fd]>> file`.
+    File { fd: u32, file: Word, mode: RedirMode },
+    /// `&> file` / `&>> file` — stdout and stderr to one file.
+    Both { file: Word, append: bool },
+    /// `fd>&target` — `fd` duplicates `target` (e.g. `2>&1`).
+    Dup { fd: u32, target: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirMode {
+    Read,
+    Write,
+    Append,
 }
 
 /// A compound command. Each body is itself a list, run by the executor.
@@ -302,22 +311,35 @@ impl Parser {
                     };
                     argv.push(w);
                 }
-                Some(Token::Less) => {
-                    self.pos += 1;
-                    redirects.push(RawRedirect::Stdin(self.expect_word("<")?));
-                }
-                Some(Token::Great) => {
-                    self.pos += 1;
-                    redirects.push(RawRedirect::Stdout {
-                        file: self.expect_word(">")?,
-                        append: false,
-                    });
-                }
-                Some(Token::DGreat) => {
-                    self.pos += 1;
-                    redirects.push(RawRedirect::Stdout {
-                        file: self.expect_word(">>")?,
-                        append: true,
+                Some(Token::Redirect(_)) => {
+                    let Some(Token::Redirect(r)) = self.advance() else {
+                        unreachable!()
+                    };
+                    redirects.push(match r.op {
+                        RedirOp::Read => RawRedirect::File {
+                            fd: r.fd,
+                            file: self.expect_word("<")?,
+                            mode: RedirMode::Read,
+                        },
+                        RedirOp::Write => RawRedirect::File {
+                            fd: r.fd,
+                            file: self.expect_word(">")?,
+                            mode: RedirMode::Write,
+                        },
+                        RedirOp::Append => RawRedirect::File {
+                            fd: r.fd,
+                            file: self.expect_word(">>")?,
+                            mode: RedirMode::Append,
+                        },
+                        RedirOp::Both => RawRedirect::Both {
+                            file: self.expect_word("&>")?,
+                            append: false,
+                        },
+                        RedirOp::BothAppend => RawRedirect::Both {
+                            file: self.expect_word("&>>")?,
+                            append: true,
+                        },
+                        RedirOp::Dup(target) => RawRedirect::Dup { fd: r.fd, target },
                     });
                 }
                 _ => break,
@@ -521,9 +543,7 @@ fn describe(tok: &Token) -> String {
         Token::DSemi => ";;".into(),
         Token::LParen => "(".into(),
         Token::RParen => ")".into(),
-        Token::Less => "<".into(),
-        Token::Great => ">".into(),
-        Token::DGreat => ">>".into(),
+        Token::Redirect(_) => "redirection".into(),
         Token::Newline => "newline".into(),
     }
 }
@@ -579,6 +599,25 @@ mod tests {
         let p = parse_ok("sort < in.txt >> out.txt");
         match first_cmd(&p) {
             RawCommand::Simple(s) => assert_eq!(s.redirects.len(), 2),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn fd_redirects_parse() {
+        let p = parse_ok("cmd 2> err > out");
+        match first_cmd(&p) {
+            RawCommand::Simple(s) => {
+                assert_eq!(s.redirects.len(), 2);
+                assert!(matches!(s.redirects[0], RawRedirect::File { fd: 2, .. }));
+                assert!(matches!(s.redirects[1], RawRedirect::File { fd: 1, .. }));
+            }
+            _ => panic!(),
+        }
+        match first_cmd(&parse_ok("cmd > f 2>&1")) {
+            RawCommand::Simple(s) => {
+                assert!(matches!(s.redirects[1], RawRedirect::Dup { fd: 2, target: 1 }));
+            }
             _ => panic!(),
         }
     }

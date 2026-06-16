@@ -32,18 +32,35 @@ pub enum WordPart {
 pub enum Token {
     /// A word, ready for the expansion stage.
     Word(Word),
-    Pipe,    // |
-    Less,    // <
-    Great,   // >
-    DGreat,  // >>
-    Semi,    // ;
-    DSemi,   // ;; (case item terminator)
-    And,     // &&
-    Or,      // ||
-    Amp,     // & (single — background)
-    LParen,  // (
-    RParen,  // )
-    Newline, // a line break (a separator that also lets `&&`/`|` continue)
+    Pipe,             // |
+    Redirect(Redir),  // < > >> 2> 2>> 2>&1 &> …
+    Semi,             // ;
+    DSemi,            // ;; (case item terminator)
+    And,              // &&
+    Or,               // ||
+    Amp,              // & (single — background)
+    LParen,           // (
+    RParen,           // )
+    Newline,          // a line break (also lets `&&`/`|` continue)
+}
+
+/// A redirection operator. `fd` is the file descriptor being redirected (e.g.
+/// `0` for `<`, `1` for `>`, `2` for `2>`); the filename, if any, is the next
+/// `Word` token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redir {
+    pub fd: u32,
+    pub op: RedirOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedirOp {
+    Read,        // `<`        — fd from a file
+    Write,       // `>`        — fd to a file (truncate)
+    Append,      // `>>`       — fd to a file (append)
+    Both,        // `&>`       — stdout+stderr to a file (truncate)
+    BothAppend,  // `&>>`      — stdout+stderr to a file (append)
+    Dup(u32),    // `>&n`/`<&n`— fd duplicates fd n
 }
 
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
@@ -78,11 +95,23 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             }
             '&' => {
                 chars.next();
-                if chars.peek() == Some(&'&') {
-                    chars.next();
-                    tokens.push(Token::And);
-                } else {
-                    tokens.push(Token::Amp);
+                match chars.peek() {
+                    Some('&') => {
+                        chars.next();
+                        tokens.push(Token::And);
+                    }
+                    // `&>` / `&>>` — redirect both stdout and stderr to a file.
+                    Some('>') => {
+                        chars.next();
+                        let op = if chars.peek() == Some(&'>') {
+                            chars.next();
+                            RedirOp::BothAppend
+                        } else {
+                            RedirOp::Both
+                        };
+                        tokens.push(Token::Redirect(Redir { fd: 1, op }));
+                    }
+                    _ => tokens.push(Token::Amp),
                 }
             }
             ';' => {
@@ -105,21 +134,31 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 chars.next();
                 tokens.push(Token::RParen);
             }
-            '<' => {
-                chars.next();
-                tokens.push(Token::Less);
+            '<' | '>' => {
+                tokens.push(Token::Redirect(lex_redirect(&mut chars, None)?));
             }
-            '>' => {
-                chars.next();
-                if chars.peek() == Some(&'>') {
-                    chars.next();
-                    tokens.push(Token::DGreat);
+            // A digit run immediately before `<`/`>` is an explicit fd (`2>`);
+            // otherwise it's the start of a word.
+            c if c.is_ascii_digit() => {
+                let mut digits = String::new();
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        digits.push(d);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if matches!(chars.peek(), Some('<') | Some('>')) {
+                    let fd = digits.parse().map_err(|_| "invalid file descriptor".to_string())?;
+                    tokens.push(Token::Redirect(lex_redirect(&mut chars, Some(fd))?));
                 } else {
-                    tokens.push(Token::Great);
+                    let word = lex_word(&mut chars, Some(digits))?;
+                    tokens.push(Token::Word(word));
                 }
             }
             _ => {
-                let word = lex_word(&mut chars)?;
+                let word = lex_word(&mut chars, None)?;
                 tokens.push(Token::Word(word));
             }
         }
@@ -128,10 +167,47 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
+/// Read a redirection operator with the cursor on `<` or `>`. `explicit_fd` is
+/// a leading file-descriptor number (`2>`), if one was lexed.
+fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, String> {
+    match chars.next() {
+        Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: RedirOp::Read }),
+        Some('>') => {
+            let fd = explicit_fd.unwrap_or(1);
+            let op = match chars.peek() {
+                Some('>') => {
+                    chars.next();
+                    RedirOp::Append
+                }
+                Some('&') => {
+                    chars.next();
+                    let mut target = String::new();
+                    while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                        target.push(chars.next().unwrap());
+                    }
+                    let t = target
+                        .parse()
+                        .map_err(|_| "expected a file descriptor after `>&`".to_string())?;
+                    RedirOp::Dup(t)
+                }
+                _ => RedirOp::Write,
+            };
+            Ok(Redir { fd, op })
+        }
+        _ => unreachable!("lex_redirect called off a redirection"),
+    }
+}
+
 /// Accumulate a single word, honoring single quotes, double quotes, escapes,
 /// and keeping a `$(...)` substitution together even across spaces/operators.
-fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
+/// `seed` is optional leading text (e.g. a digit run that wasn't an fd).
+fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, String> {
     let mut parts: Word = Vec::new();
+    if let Some(s) = seed {
+        if !s.is_empty() {
+            parts.push(WordPart::Unquoted(s));
+        }
+    }
 
     loop {
         match chars.peek() {
@@ -387,10 +463,25 @@ mod tests {
                 Token::Pipe,
                 bare("grep"),
                 bare("x"),
-                Token::Great,
+                Token::Redirect(Redir { fd: 1, op: RedirOp::Write }),
                 bare("out"),
             ]
         );
+    }
+
+    #[test]
+    fn fd_aware_redirects() {
+        use RedirOp::*;
+        let r = |fd, op| Token::Redirect(Redir { fd, op });
+        assert_eq!(lex("> f").unwrap(), vec![r(1, Write), bare("f")]);
+        assert_eq!(lex(">> f").unwrap(), vec![r(1, Append), bare("f")]);
+        assert_eq!(lex("< f").unwrap(), vec![r(0, Read), bare("f")]);
+        assert_eq!(lex("2> f").unwrap(), vec![r(2, Write), bare("f")]);
+        assert_eq!(lex("2>> f").unwrap(), vec![r(2, Append), bare("f")]);
+        assert_eq!(lex("2>&1").unwrap(), vec![r(2, Dup(1))]);
+        assert_eq!(lex("&> f").unwrap(), vec![r(1, Both), bare("f")]);
+        // A digit not before a redirect is just a word.
+        assert_eq!(lex("echo 2").unwrap(), vec![bare("echo"), bare("2")]);
     }
 
     #[test]

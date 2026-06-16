@@ -137,9 +137,11 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
 - Bare text becomes `Unquoted` parts (eligible for `~`, `$`, and later glob).
 - A `$(...)` substitution is swallowed whole — balanced parens, quotes and all —
   so inner spaces and `|` don't split the word.
-- Operators `|`, `<`, `>`, `>>`, `&`, `&&`, `||`, `;`, `;;`, `(`, `)` become
-  distinct tokens. (Bare parens are operators — for `case`/future subshells —
-  so a literal paren in a command must be quoted.)
+- Operators `|`, `&`, `&&`, `||`, `;`, `;;`, `(`, `)` become distinct tokens, as
+  do redirections — `<`, `>`, `>>`, an optional leading fd (`2>`), `>&n`
+  (`2>&1`), and `&>`/`&>>` — carried in a `Redirect { fd, op }` token. (Bare
+  parens are operators — for `case`/future subshells — so a literal paren in a
+  command must be quoted.)
 - A `#` at a word boundary starts a comment: lexing stops for the rest of the
   line. Mid-word (`foo#bar`) or quoted, `#` is an ordinary character.
 - Lexer errors: an unterminated double quote or an unterminated `$(`.
@@ -239,10 +241,13 @@ Sequences a `CommandList` and turns each pipeline into running processes:
 - **Single-command fast path:** if a pipeline is one command, try
   `builtins::try_run` first so `cd`/`exit`/`jobs` affect the shell process
   (skipped when capturing, so substitutions see external commands).
-- `build_stage` constructs one stage's `std::process::Command` and stdio.
-  Redirection rules: an explicit `< file` / `> file` / `>> file` **wins** over
-  pipe wiring; otherwise non-final stages (and any stage when capturing) get a
-  piped stdout. It is shared by the plain runner and the Unix job runner.
+- `build_stage` constructs one stage's `std::process::Command` and stdio. It
+  resolves fd 0/1/2 to `Sink`s (inherit / pipe / file), applying redirects in
+  source order — so `> f 2>&1` sends both to `f` (the dup `try_clone`s the file
+  handle) while `2>&1 > f` leaves stderr on the terminal. A non-final stage (or
+  any stage when capturing) defaults fd 1 to a pipe. Shared by the plain runner
+  and the Unix job runner. (Duping a *piped* fd can't be shared with `std`
+  pre-spawn, so `cmd 2>&1 | next` leaves stderr inherited — a known limitation.)
 - On Unix, foreground/background spawning, terminal control, and waiting live in
   `job` (below). Off Unix, `run` spawns each stage, threads stdout→stdin, waits,
   and reports the last stage's exit code as the pipeline status.
@@ -367,8 +372,9 @@ classDiagram
     }
     class Redirect {
         <<enum>>
-        Stdin(String)
-        Stdout(file, append)
+        File(fd, file, mode)
+        Both(file, append)
+        Dup(fd, target)
     }
 
     Token *-- WordPart
@@ -458,7 +464,7 @@ Input: `cat log.txt | grep ERROR >> errors.txt`
    `[Word("cat"), Word("log.txt"), Pipe, Word("grep"), Word("ERROR"), DGreat, Word("errors.txt")]`
 2. **Parse** → one job, one and-or, one `RawPipeline { commands: [`
    - `Simple(RawSimple { argv: [["cat"], ["log.txt"]], redirects: [] })`,
-   - `Simple(RawSimple { argv: [["grep"], ["ERROR"]], redirects: [Stdout { "errors.txt", append: true }] })`
+   - `Simple(RawSimple { argv: [["grep"], ["ERROR"]], redirects: [File { fd: 1, "errors.txt", Append }] })`
    `] }` (no operators or compounds)
 3. **Run list / Expand** → the single pipeline is expanded (here a no-op — no
    `$`, `~`, or globs) into the concrete `Pipeline` of `String` argv.

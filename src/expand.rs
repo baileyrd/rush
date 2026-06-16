@@ -90,10 +90,13 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     let mut redirects = Vec::with_capacity(rc.redirects.len());
     for r in &rc.redirects {
         redirects.push(match r {
-            RawRedirect::Stdin(w) => Redirect::Stdin(expand_word(w)?),
-            RawRedirect::Stdout { file, append } => {
-                Redirect::Stdout { file: expand_word(file)?, append: *append }
+            RawRedirect::File { fd, file, mode } => {
+                Redirect::File { fd: *fd, file: expand_word(file)?, mode: *mode }
             }
+            RawRedirect::Both { file, append } => {
+                Redirect::Both { file: expand_word(file)?, append: *append }
+            }
+            RawRedirect::Dup { fd, target } => Redirect::Dup { fd: *fd, target: *target },
         });
     }
 

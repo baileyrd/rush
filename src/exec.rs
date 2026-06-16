@@ -32,11 +32,15 @@ pub struct Command {
 
 #[derive(Debug, Clone)]
 pub enum Redirect {
-    /// `< file`
-    Stdin(String),
-    /// `> file` (truncate) or `>> file` (append)
-    Stdout { file: String, append: bool },
+    /// `[fd]< file` / `[fd]> file` / `[fd]>> file`.
+    File { fd: u32, file: String, mode: RedirMode },
+    /// `&> file` / `&>> file`.
+    Both { file: String, append: bool },
+    /// `fd>&target` (e.g. `2>&1`).
+    Dup { fd: u32, target: u32 },
 }
+
+pub use crate::parser::RedirMode;
 
 #[derive(Debug, Clone)]
 pub struct Pipeline {
@@ -372,29 +376,97 @@ pub(crate) fn build_stage(
     command.envs(crate::vars::exported());
     command.envs(cmd.assignments.iter().map(|(k, v)| (k, v)));
 
-    // stdin: explicit `< file` wins, else the previous pipe, else inherit.
-    if let Some(file) = stdin_redirect(&cmd.redirects) {
-        let f = File::open(file).map_err(|e| format!("{file}: {e}"))?;
-        command.stdin(Stdio::from(f));
-    } else if let Some(src) = stdin_src {
-        command.stdin(src);
+    // Resolve the three standard descriptors. fd1 defaults to a pipe when this
+    // stage feeds another (or is being captured); the redirects below override
+    // in source order, so `> f 2>&1` sends both to `f`.
+    let mut stdin_sink: Option<Stdio> = stdin_src;
+    let mut stdout_sink = if !is_last || capture { Sink::Pipe } else { Sink::Inherit };
+    let mut stderr_sink = Sink::Inherit;
+
+    for r in &cmd.redirects {
+        match r {
+            Redirect::File { fd, file, mode } => match mode {
+                RedirMode::Read => {
+                    let f = File::open(file).map_err(|e| format!("{file}: {e}"))?;
+                    if *fd == 0 {
+                        stdin_sink = Some(Stdio::from(f));
+                    }
+                }
+                RedirMode::Write | RedirMode::Append => {
+                    let f = open_write(file, *mode == RedirMode::Append)?;
+                    match fd {
+                        0 => stdin_sink = Some(Stdio::from(f)),
+                        2 => stderr_sink = Sink::File(f),
+                        _ => stdout_sink = Sink::File(f),
+                    }
+                }
+            },
+            Redirect::Both { file, append } => {
+                let f = open_write(file, *append)?;
+                let g = f.try_clone().map_err(|e| e.to_string())?;
+                stdout_sink = Sink::File(f);
+                stderr_sink = Sink::File(g);
+            }
+            Redirect::Dup { fd, target } => {
+                let cloned = clone_sink(*target, &stdout_sink, &stderr_sink)?;
+                match fd {
+                    2 => stderr_sink = cloned,
+                    _ => stdout_sink = cloned,
+                }
+            }
+        }
     }
 
-    // stdout: explicit `>`/`>>` wins; else pipe to the next stage / capture buffer.
-    if let Some((file, append)) = stdout_redirect(&cmd.redirects) {
-        let f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .append(append)
-            .truncate(!append)
-            .open(file)
-            .map_err(|e| format!("{file}: {e}"))?;
-        command.stdout(Stdio::from(f));
-    } else if !is_last || capture {
-        command.stdout(Stdio::piped());
+    if let Some(s) = stdin_sink {
+        command.stdin(s);
+    }
+    if let Some(s) = stdout_sink.into_stdio()? {
+        command.stdout(s);
+    }
+    if let Some(s) = stderr_sink.into_stdio()? {
+        command.stderr(s);
     }
 
     Ok(command)
+}
+
+/// Where one descriptor is routed. Files are kept as handles so `2>&1` can
+/// `try_clone` them.
+enum Sink {
+    Inherit,
+    Pipe,
+    File(File),
+}
+
+impl Sink {
+    /// `None` means "leave inherited".
+    fn into_stdio(self) -> Result<Option<Stdio>, String> {
+        Ok(match self {
+            Sink::Inherit => None,
+            Sink::Pipe => Some(Stdio::piped()),
+            Sink::File(f) => Some(Stdio::from(f)),
+        })
+    }
+}
+
+/// Clone the sink currently bound to `target` (for `fd>&target`). A pipe can't
+/// be shared with `std` before spawn, so duping a piped fd falls back to inherit.
+fn clone_sink(target: u32, stdout: &Sink, stderr: &Sink) -> Result<Sink, String> {
+    let src = if target == 2 { stderr } else { stdout };
+    Ok(match src {
+        Sink::Inherit | Sink::Pipe => Sink::Inherit,
+        Sink::File(f) => Sink::File(f.try_clone().map_err(|e| e.to_string())?),
+    })
+}
+
+fn open_write(file: &str, append: bool) -> Result<File, String> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(file)
+        .map_err(|e| format!("{file}: {e}"))
 }
 
 /// A human-readable rendering of a pipeline, for the `jobs` listing. Only the
@@ -407,18 +479,4 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
         .map(|c| c.argv.join(" "))
         .collect::<Vec<_>>()
         .join(" | ")
-}
-
-fn stdin_redirect(redirects: &[Redirect]) -> Option<&str> {
-    redirects.iter().rev().find_map(|r| match r {
-        Redirect::Stdin(f) => Some(f.as_str()),
-        _ => None,
-    })
-}
-
-fn stdout_redirect(redirects: &[Redirect]) -> Option<(&str, bool)> {
-    redirects.iter().rev().find_map(|r| match r {
-        Redirect::Stdout { file, append } => Some((file.as_str(), *append)),
-        _ => None,
-    })
 }

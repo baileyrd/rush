@@ -132,8 +132,9 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
 - Bare text becomes `Unquoted` parts (eligible for `~`, `$`, and later glob).
 - A `$(...)` substitution is swallowed whole — balanced parens, quotes and all —
   so inner spaces and `|` don't split the word.
-- Operators `|`, `<`, `>`, `>>` become distinct tokens; `>>` is detected by
-  peeking after `>`.
+- Operators `|`, `<`, `>`, `>>`, `&`, `&&`, `||`, `;` become distinct tokens.
+- A `#` at a word boundary starts a comment: lexing stops for the rest of the
+  line. Mid-word (`foo#bar`) or quoted, `#` is an ordinary character.
 - Lexer errors: an unterminated double quote or an unterminated `$(`.
 
 ### `parser.rs` — grammar

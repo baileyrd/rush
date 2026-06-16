@@ -28,6 +28,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | REPL with line editing | ✅ | via [`rustyline`](https://crates.io/crates/rustyline) |
 | Persistent history | ✅ | stored in `~/.rush_history` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
+| Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`) | ✅ | truncate, append, input |
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |

@@ -70,6 +70,10 @@ pub struct RawPipeline {
 
 pub fn parse(input: &str) -> Result<CommandList, String> {
     let tokens = lexer::lex(input)?;
+    // Nothing but whitespace or a comment: a no-op (empty job list).
+    if tokens.is_empty() {
+        return Ok(CommandList { jobs: Vec::new() });
+    }
     let mut iter = tokens.into_iter().peekable();
 
     let mut jobs = Vec::new();
@@ -261,5 +265,13 @@ mod tests {
         assert!(parse("a ;; b").is_err());
         assert!(parse("&& a").is_err());
         assert!(parse("a && && b").is_err());
+    }
+
+    #[test]
+    fn comment_only_is_a_noop() {
+        assert!(parse("# just a comment").unwrap().jobs.is_empty());
+        assert!(parse("   ").unwrap().jobs.is_empty());
+        // A trailing comment doesn't change the command.
+        assert_eq!(parse("ls -l  # list").unwrap().jobs.len(), 1);
     }
 }

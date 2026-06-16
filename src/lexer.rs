@@ -51,6 +51,10 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             ' ' | '\t' => {
                 chars.next();
             }
+            // A `#` at a word boundary starts a comment to end of line. Mid-word
+            // (`foo#bar`) it's consumed literally by `lex_word`, never reaching
+            // here; quoted, it's handled inside `lex_word` too.
+            '#' => break,
             '|' => {
                 chars.next();
                 if chars.peek() == Some(&'|') {
@@ -331,6 +335,23 @@ mod tests {
         assert_eq!(
             lex("a|b||c").unwrap(),
             vec![bare("a"), Token::Pipe, bare("b"), Token::Or, bare("c")]
+        );
+    }
+
+    #[test]
+    fn comment_to_end_of_line() {
+        assert_eq!(lex("echo hi # a comment").unwrap(), vec![bare("echo"), bare("hi")]);
+        assert!(lex("# whole line").unwrap().is_empty());
+    }
+
+    #[test]
+    fn hash_is_literal_mid_word_or_quoted() {
+        // Mid-word `#` is part of the word.
+        assert_eq!(lex("echo foo#bar").unwrap(), vec![bare("echo"), bare("foo#bar")]);
+        // Quoted `#` is literal too.
+        assert_eq!(
+            lex("echo '# x'").unwrap(),
+            vec![bare("echo"), Token::Word(vec![WordPart::Literal("# x".into())])]
         );
     }
 

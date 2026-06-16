@@ -29,6 +29,7 @@ thread_local! {
     static LAST_STATUS: RefCell<i32> = const { RefCell::new(0) };
     static VARS: RefCell<HashMap<String, Var>> = RefCell::new(HashMap::new());
     static LOOP_CTL: RefCell<Option<LoopCtl>> = const { RefCell::new(None) };
+    static RETURNING: RefCell<Option<i32>> = const { RefCell::new(None) };
     // `$0` (shell/script name) and `$1`, `$2`, … (positional parameters).
     static SHELL_NAME: RefCell<String> = RefCell::new("rush".to_string());
     static ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -67,6 +68,22 @@ pub fn set_loop_ctl(ctl: Option<LoopCtl>) {
 /// The pending loop-control request, if any.
 pub fn loop_ctl() -> Option<LoopCtl> {
     LOOP_CTL.with(|c| *c.borrow())
+}
+
+/// Record a pending `return` (from the `return` builtin) with its exit code.
+pub fn set_returning(code: Option<i32>) {
+    RETURNING.with(|r| *r.borrow_mut() = code);
+}
+
+/// The pending `return` code, if a function should unwind.
+pub fn returning() -> Option<i32> {
+    RETURNING.with(|r| *r.borrow())
+}
+
+/// Whether any non-local control flow (`break`/`continue`/`return`) is pending,
+/// so a list should stop running further commands.
+pub fn flow_pending() -> bool {
+    loop_ctl().is_some() || returning().is_some()
 }
 
 /// The exit status of the most recently completed pipeline — exposed as `$?`.

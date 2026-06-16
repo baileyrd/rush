@@ -103,6 +103,10 @@ pub enum Compound {
         word: Word,
         items: Vec<(Vec<Word>, CommandList)>,
     },
+    /// A brace group `{ list; }` — runs the list in the current shell.
+    Group(CommandList),
+    /// A function definition `name() { list; }`.
+    FuncDef { name: String, body: CommandList },
 }
 
 /// A parse failure. `Incomplete` means the input is a valid prefix that needs
@@ -124,7 +128,7 @@ impl fmt::Display for ParseError {
 
 const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case",
-    "esac",
+    "esac", "{", "}",
 ];
 
 pub fn parse(input: &str) -> Result<CommandList, ParseError> {
@@ -237,16 +241,51 @@ impl Parser {
     }
 
     fn parse_command(&mut self) -> Result<RawCommand, ParseError> {
+        // `name ( )` in command position is a function definition.
+        if self.is_funcdef_ahead() {
+            return self.parse_funcdef();
+        }
         match self.peek_keyword() {
             Some("if") => self.parse_if(),
             Some("while") => self.parse_loop(false),
             Some("until") => self.parse_loop(true),
             Some("for") => self.parse_for(),
             Some("case") => self.parse_case(),
+            Some("{") => self.parse_group(),
             // A closing keyword here means a body was empty (e.g. `if; then`).
             Some(kw) => Err(ParseError::Syntax(format!("unexpected `{kw}`"))),
             None => self.parse_simple(),
         }
+    }
+
+    /// True if the cursor is at `NAME ( )` — a function definition.
+    fn is_funcdef_ahead(&self) -> bool {
+        let is_name_word = matches!(self.toks.get(self.pos),
+            Some(Token::Word(parts)) if matches!(parts.as_slice(), [WordPart::Unquoted(s)] if is_name(s)));
+        is_name_word
+            && matches!(self.toks.get(self.pos + 1), Some(Token::LParen))
+            && matches!(self.toks.get(self.pos + 2), Some(Token::RParen))
+    }
+
+    fn parse_funcdef(&mut self) -> Result<RawCommand, ParseError> {
+        let name = self.expect_name()?;
+        self.pos += 2; // `(` `)` — guaranteed by is_funcdef_ahead
+        self.skip_newlines();
+        let body = self.parse_brace_body()?;
+        Ok(RawCommand::Compound(Box::new(Compound::FuncDef { name, body })))
+    }
+
+    fn parse_group(&mut self) -> Result<RawCommand, ParseError> {
+        let list = self.parse_brace_body()?;
+        Ok(RawCommand::Compound(Box::new(Compound::Group(list))))
+    }
+
+    /// Parse `{ list; }`.
+    fn parse_brace_body(&mut self) -> Result<CommandList, ParseError> {
+        self.expect_keyword("{")?;
+        let list = self.parse_list()?;
+        self.expect_keyword("}")?;
+        Ok(list)
     }
 
     fn parse_simple(&mut self) -> Result<RawCommand, ParseError> {
@@ -462,7 +501,7 @@ fn as_keyword(tok: &Token) -> Option<&'static str> {
 
 /// Reserved words that begin a command (vs. ones that close a construct).
 fn is_command_start(kw: &str) -> bool {
-    matches!(kw, "if" | "while" | "until" | "for" | "case")
+    matches!(kw, "if" | "while" | "until" | "for" | "case" | "{")
 }
 
 fn is_name(s: &str) -> bool {
@@ -650,6 +689,23 @@ mod tests {
             first_cmd(&parse_ok("case x in\n  y) ;;\n  *) echo z ;;\nesac")),
             RawCommand::Compound(_)
         ));
+    }
+
+    #[test]
+    fn function_and_group() {
+        match first_cmd(&parse_ok("greet() { echo hi; }")) {
+            RawCommand::Compound(c) => match c.as_ref() {
+                Compound::FuncDef { name, .. } => assert_eq!(name, "greet"),
+                _ => panic!("expected funcdef"),
+            },
+            _ => panic!("expected compound"),
+        }
+        assert!(matches!(
+            first_cmd(&parse_ok("{ echo a; echo b; }")),
+            RawCommand::Compound(_)
+        ));
+        // `name` is a plain word when not followed by `()`.
+        assert_eq!(argv_text(first_cmd(&parse_ok("greet hi"))), vec!["greet", "hi"]);
     }
 
     #[test]

@@ -152,12 +152,16 @@ list     := and_or ( sep and_or )* sep?          sep = ; | & | newline
 and_or   := pipeline ( ('&&' | '||') pipeline )*
 pipeline := command ( '|' command )*
 command  := compound | simple
-compound := if_clause | loop_clause | for_clause | case_clause
+compound := if_clause | loop_clause | for_clause | case_clause | group | funcdef
 simple   := (word | redirect)+
 redirect := ('<' | '>' | '>>') word
 
 case_clause := 'case' word 'in' ( '('? pattern ('|' pattern)* ')' list ';;' )* 'esac'
+group       := '{' list '}'
+funcdef     := NAME '(' ')' group
 ```
+`{` and `}` are reserved words recognised in command position (so a literal
+brace must be quoted or attached to a word, e.g. `{a,b}` is a plain word).
 - `parse_command` dispatches on a **reserved word** in command position (`if`,
   `while`, `until`, `for`) to a compound parser; otherwise `parse_simple` reads
   words and redirects. After the first word, reserved words are ordinary
@@ -201,6 +205,13 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Emptiness:** a field that is entirely unquoted and empty (e.g. `$UNSET`)
   drops out, mirroring shell field-splitting; a quoted empty (`""`) is kept.
 
+### `func.rs` — shell functions
+A thread-local `name → CommandList` registry. A `FuncDef` compound stores its
+body here; a simple command whose name matches a function (checked before
+builtins/spawn) is run by `exec::call_function`, which swaps in the call's
+arguments as `$1`… (keeping `$0`), runs the body, consumes any pending `return`,
+and restores the previous positional parameters. Functions may recurse.
+
 ### `arith.rs` — integer arithmetic
 A self-contained tokenizer + recursive-descent evaluator over `i64` for
 `$((...))`: `+ - * / %`, unary `+ - !`, comparisons, `&&`/`||`, parentheses, and
@@ -241,10 +252,11 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   (`if`/`while` branch on a list's exit status; `for` expands its word list via
   `expand::expand_words` and sets the loop variable each iteration; `case`
   matches the subject against each pattern with `glob::match_component`).
-- **`break`/`continue`:** those builtins set a thread-local request in `vars`;
-  `exec_list` and `run_andor` stop early when one is pending, and each loop's
-  `loop_step` consumes one level (so `break 2` escapes two loops). The public
-  `run_list` clears any request that escapes every loop.
+- **`break`/`continue`/`return`:** those builtins set a thread-local request in
+  `vars`; `exec_list`/`run_andor` stop early when `flow_pending()` is true. Each
+  loop's `loop_step` consumes one `break`/`continue` level (so `break 2` escapes
+  two loops) and lets `return` pass through; `call_function` consumes `return`.
+  The public `run_list` clears anything that escapes every loop and function.
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 Implements the parts that need POSIX process groups and signals, via the `libc`
@@ -274,6 +286,7 @@ crate, following the classic glibc job-control structure:
 - `true` / `:` (status `0`) and `false` (status `1`).
 - `break [n]` / `continue [n]` — record a loop-control request (via `vars`)
   that `exec::run_compound` consumes one level at a time.
+- `return [n]` — unwind the current function (default status `$?`).
 - `exit [code]` — terminates the process (diverges; defaults to `0`).
 - On Unix, `jobs`/`fg`/`bg` are dispatched to `job::builtin`.
 
@@ -341,6 +354,8 @@ classDiagram
         Loop(until, cond, body)
         For(var, words, body)
         Case(word, items)
+        Group(list)
+        FuncDef(name, body)
     }
     class Pipeline {
         +Vec~Command~ commands
@@ -516,7 +531,6 @@ more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
 `for`, single- or multi-line).
 
 With `test`/`[`, `$((…))`, and control flow, real scripts work — e.g. a
-counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`. Natural next steps:
-positional parameters (`$1`/`$@`) with a script-file mode (`rush script.sh`),
-command substitution / backgrounding of compound commands (needs a subshell),
-shell functions, and `kill %n`.
+counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`, and recursive functions.
+Natural next steps: `( subshells )`, command substitution / backgrounding of
+compound commands, here-documents (`<<`), `2>`/`2>&1` redirection, and `kill %n`.

@@ -19,6 +19,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "[" => Some(test_dispatch(argv, true)),
         "break" => Some(loop_ctl(argv, true)),
         "continue" => Some(loop_ctl(argv, false)),
+        "return" => Some(return_cmd(argv)),
         // POSIX no-op (`:`) and the canonical true/false.
         "true" | ":" => Some(0),
         "false" => Some(1),
@@ -184,6 +185,17 @@ fn loop_ctl(argv: &[String], is_break: bool) -> i32 {
     };
     crate::vars::set_loop_ctl(Some(ctl));
     0
+}
+
+/// `return [n]` — unwind the current function with status `n` (default `$?`).
+/// The executor's `call_function` consumes the request.
+fn return_cmd(argv: &[String]) -> i32 {
+    let code = argv
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(crate::vars::last_status);
+    crate::vars::set_returning(Some(code));
+    code
 }
 
 /// `unset NAME...` — remove shell variables.

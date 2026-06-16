@@ -293,9 +293,11 @@ fn expand_dollars(text: &str) -> Result<String, String> {
             Some('(') => {
                 chars.next(); // consume the first '('
                 if chars.peek() == Some(&'(') {
-                    // `$((expr))` — arithmetic.
+                    // `$((expr))` — arithmetic. `$`-references inside (e.g. `$1`,
+                    // `$x`) are expanded first, then the result is evaluated.
                     chars.next();
                     let expr = take_arith(&mut chars)?;
+                    let expr = expand_dollars(&expr)?;
                     out.push_str(&crate::arith::eval(&expr)?.to_string());
                 } else {
                     // `$(...)` — command substitution. Drops trailing newlines

@@ -13,6 +13,7 @@ mod arith;
 mod builtins;
 mod exec;
 mod expand;
+mod func;
 mod glob;
 #[cfg(unix)]
 mod job;

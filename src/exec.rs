@@ -47,17 +47,19 @@ pub struct Pipeline {
 /// job that ran. A `break`/`continue` that escapes all loops is discarded here.
 pub fn run_list(list: &CommandList) -> Result<i32, String> {
     let status = exec_list(list)?;
+    // Any break/continue/return that escaped to the top level is discarded.
     crate::vars::set_loop_ctl(None);
+    crate::vars::set_returning(None);
     Ok(status)
 }
 
-/// Run a list, stopping early if a `break`/`continue` becomes pending — used for
-/// both the top level and the bodies of compound commands.
+/// Run a list, stopping early if `break`/`continue`/`return` becomes pending —
+/// used for both the top level and the bodies of compound commands.
 fn exec_list(list: &CommandList) -> Result<i32, String> {
     let mut status = 0;
     for job in &list.jobs {
         status = run_job(job)?;
-        if crate::vars::loop_ctl().is_some() {
+        if crate::vars::flow_pending() {
             break;
         }
     }
@@ -85,14 +87,14 @@ fn run_andor(list: &AndOrList) -> Result<i32, String> {
     // it (e.g. `false || echo $?`).
     let mut status = run_pipeline_node(&list.first)?;
     crate::vars::set_last_status(status);
-    if crate::vars::loop_ctl().is_some() {
+    if crate::vars::flow_pending() {
         return Ok(status);
     }
     for (connector, raw) in &list.rest {
         if should_run(*connector, status) {
             status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
-            if crate::vars::loop_ctl().is_some() {
+            if crate::vars::flow_pending() {
                 break;
             }
         }
@@ -158,13 +160,41 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
             }
             Ok(0)
         }
+        Compound::Group(list) => exec_list(list),
+        Compound::FuncDef { name, body } => {
+            crate::func::define(name, body.clone());
+            Ok(0)
+        }
     }
+}
+
+/// Run a defined function: swap in the call's arguments as `$1`…, run the body
+/// (a `return` ends it), then restore the previous positional parameters.
+fn call_function(argv: &[String]) -> Result<i32, String> {
+    let body = crate::func::get(&argv[0]).expect("function is defined");
+
+    let name0 = crate::vars::arg(0).unwrap_or_else(|| "rush".to_string());
+    let saved = crate::vars::args();
+    crate::vars::set_args(name0.clone(), argv[1..].to_vec());
+
+    let result = exec_list(&body);
+
+    let returned = crate::vars::returning();
+    crate::vars::set_returning(None);
+    crate::vars::set_args(name0, saved);
+
+    Ok(returned.unwrap_or(result?))
 }
 
 /// After running a loop body, consume one level of any pending `break`/
 /// `continue`. Returns `true` if this loop should stop iterating.
 fn loop_step() -> Result<bool, String> {
     use crate::vars::LoopCtl;
+    // A pending `return` unwinds straight through the loop (left for the
+    // enclosing function call to consume).
+    if crate::vars::returning().is_some() {
+        return Ok(true);
+    }
     match crate::vars::loop_ctl() {
         None => Ok(false),
         Some(LoopCtl::Continue(1)) => {
@@ -219,7 +249,12 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     }
 
     if pipeline.commands.len() == 1 {
-        if let Some(code) = builtins::try_run(&pipeline.commands[0].argv) {
+        let argv = &pipeline.commands[0].argv;
+        // A defined function shadows external commands (but not builtins).
+        if argv.first().is_some_and(|name| crate::func::exists(name)) {
+            return call_function(argv);
+        }
+        if let Some(code) = builtins::try_run(argv) {
             return Ok(code);
         }
     }

@@ -41,6 +41,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
 | Control flow | ✅ | `if`/`while`/`until`/`for`, `case … esac`, `break`/`continue [n]`; single- or multi-line |
+| Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`; brace groups `{ …; }` |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
 
 ## Build & Run
@@ -99,6 +100,7 @@ src/
   parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for)
   expand.rs     expansion: $VAR, ~, $(...), $((...)), globs → concrete Pipeline
   arith.rs      integer arithmetic evaluator for $((...))
+  func.rs       shell function registry (name() { ... })
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
   vars.rs       shell state that outlives a command: $?, shell variables, export
   exec.rs       runtime: sequence the list, spawn processes, wire pipes & redirects

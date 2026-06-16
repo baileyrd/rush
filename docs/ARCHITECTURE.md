@@ -61,17 +61,17 @@ reports without crashing the shell.
 
 ```mermaid
 flowchart TD
-    A["Raw line<br/><code>echo $HOME | wc -c</code>"]
+    A["Raw line<br/><code>mkdir d && ls *.rs</code>"]
     B["Tokens<br/>words carry quoting as WordParts"]
-    C["RawPipeline (AST)<br/>unexpanded words"]
+    C["CommandList (AST)<br/>pipelines joined by &amp;&amp; || ;"]
     F["Pipeline<br/>concrete argv + redirects"]
     D["Spawned processes<br/>+ wired fds"]
     E["Exit / output"]
 
     A -->|"lexer::lex"| B
     B -->|"parser::parse"| C
-    C -->|"expand::expand"| F
-    F -->|"exec::run_pipeline"| D
+    C -->|"exec::run_list → expand::expand<br/>(per pipeline, left to right)"| F
+    F -->|"spawn + wait"| D
     D --> E
 
     A -.->|"empty line → skipped in main"| E
@@ -80,17 +80,24 @@ flowchart TD
 | Stage | Function | Input | Output | Fails on |
 |---|---|---|---|---|
 | Lex | `lexer::lex` | `&str` | `Vec<Token>` | unterminated `"`, unterminated `$(` |
-| Parse | `parser::parse` | `&str` | `RawPipeline` | dangling `\|`, missing redirect target, empty command |
-| Expand | `expand::expand` | `RawPipeline` | `Pipeline` | unterminated `${`/`$(`, sub-command parse error |
-| Execute | `exec::run_pipeline` | `&Pipeline` | `()` | spawn failure, missing redirect file |
+| Parse | `parser::parse` | `&str` | `CommandList` | dangling `\|`, missing redirect target, empty command, `&` |
+| Run list | `exec::run_list` | `&CommandList` | `i32` (status) | propagated from expand/exec |
+| Expand | `expand::expand` | `&RawPipeline` | `Pipeline` | unterminated `${`/`$(`, sub-command parse error |
+| Execute | `exec::run` | `&Pipeline` | `(i32, String)` | spawn failure, missing redirect file |
 | Builtin | `builtins::try_run` | `&[String]` | `Option<i32>` | — (errors printed inline) |
 
-Expansion sits deliberately between parse and exec: the parser preserves each
-word's quoting (single-quoted text is literal, double-quoted and bare text may
-expand), and the expansion stage resolves `~`, `$VAR`/`${VAR}`, `$(...)`, and
-filename globs (`*`, `?`, `[…]`) against the environment, sub-shells, and the
-filesystem before any process is spawned. Globbing can turn one word into
-several arguments, so the stage is a flat-map, not a one-to-one map.
+Expansion sits deliberately between parse and exec, and runs **lazily, one
+pipeline at a time** as `run_list` walks the list left to right — so `cd d &&
+ls *` globs in the new directory. The parser preserves each word's quoting
+(single-quoted text is literal, double-quoted and bare text may expand), and the
+expansion stage resolves `~`, `$VAR`/`${VAR}`, `$(...)`, and filename globs
+(`*`, `?`, `[…]`) against the environment, sub-shells, and the filesystem before
+a process is spawned. Globbing can turn one word into several arguments, so the
+stage is a flat-map, not a one-to-one map.
+
+The control operators `&&`, `||`, and `;` have equal precedence and associate
+left to right; `run_list` decides whether to run each pipeline from the previous
+one's exit status (`&&` needs `0`, `||` needs non-zero, `;` always runs).
 
 ---
 
@@ -121,18 +128,23 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
 - Lexer errors: an unterminated double quote or an unterminated `$(`.
 
 ### `parser.rs` — grammar
-Consumes tokens into a `RawPipeline` (words still unexpanded). The grammar (v0):
+Consumes tokens into a `CommandList` — a `first` pipeline plus `(Connector,
+pipeline)` pairs, words still unexpanded. The grammar (v0):
 ```
+list     := pipeline ( (';' | '&&' | '||') pipeline )* ';'?
 pipeline := command ( '|' command )*
 command  := word+ redirection*
 redirect := ('<' | '>' | '>>') word
 ```
+- `parse_pipeline` builds one pipeline, stopping (without consuming) at a
+  control operator or end of input.
 - `Word` tokens append to the current command's `argv` (each a `Vec<WordPart>`).
 - `Pipe` finalizes the current command (erroring if it's empty) and starts a new
   one via `std::mem::replace`.
 - Redirect operators consume the following word as a filename (`expect_word`),
   erroring if it isn't a word.
-- A trailing empty command (e.g. `ls |`) is rejected.
+- A trailing empty command (`ls |`), an empty pipeline between operators
+  (`a ;; b`), and single `&` (background, not yet supported) are all rejected.
 
 ### `expand.rs` — expansion
 Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
@@ -163,18 +175,22 @@ A from-scratch globber, no external crate:
   the pattern component begins with a literal `.`, so `*` skips dotfiles.
 
 ### `exec.rs` — runtime
-Turns a `Pipeline` into running processes:
-- **Single-command fast path:** if the pipeline is one command, try
-  `builtins::try_run` first so `cd`/`exit` affect the shell process.
-- Otherwise spawn each stage with `std::process::Command`, threading the
+Sequences a `CommandList` and turns each pipeline into running processes:
+- `run_list` walks the list left to right, expanding each `RawPipeline` *just
+  before* it runs and using `should_run(connector, prev_status)` to honour
+  `&&`/`||`/`;`. It returns the status of the last pipeline that ran.
+- `capture_list` mirrors that but concatenates each pipeline's stdout into a
+  string — the engine behind `$(...)`.
+- **Single-command fast path:** if a pipeline is one command, try
+  `builtins::try_run` first so `cd`/`exit` affect the shell process (skipped
+  when capturing, so substitutions see external commands).
+- Otherwise `run` spawns each stage with `std::process::Command`, threading the
   previous child's stdout into the next child's stdin.
 - Redirection rules per stage: an explicit `< file` / `> file` / `>> file`
   **wins** over pipe wiring; otherwise non-final stages get a piped stdout and
-  the final stage inherits the terminal.
-- `capture` runs the same wiring but pipes the final stage's stdout into a
-  string — the engine behind `$(...)`.
-- After spawning all stages, it waits on each child and reports a non-zero exit
-  status of the last stage (non-fatal — the shell keeps running).
+  the final stage inherits the terminal (or is captured).
+- After spawning all stages, it waits on each child; the pipeline's status is
+  the last stage's exit code.
 
 ### `builtins.rs` — in-process commands
 `try_run` returns `Some(code)` if `argv[0]` is a builtin, else `None`:
@@ -211,6 +227,16 @@ classDiagram
         Unquoted(String)
         Quoted(String)
     }
+    class CommandList {
+        +RawPipeline first
+        +Vec~(Connector, RawPipeline)~ rest
+    }
+    class Connector {
+        <<enum>>
+        Seq
+        And
+        Or
+    }
     class RawPipeline {
         +Vec~RawCommand~ commands
     }
@@ -232,6 +258,8 @@ classDiagram
     }
 
     Token *-- WordPart
+    CommandList "1" *-- "1..*" RawPipeline
+    CommandList ..> Connector : joins with
     RawPipeline "1" *-- "1..*" RawCommand
     Pipeline "1" *-- "1..*" Command
     Command "1" *-- "0..*" Redirect
@@ -282,7 +310,7 @@ Pipe wiring across two stages looks like this:
 
 ```mermaid
 sequenceDiagram
-    participant E as exec::run_pipeline
+    participant E as exec::run
     participant P1 as Child: ls
     participant P2 as Child: grep
 
@@ -292,14 +320,14 @@ sequenceDiagram
     Note over P1,P2: ls writes → kernel pipe → grep reads
     E->>P1: wait()
     E->>P2: wait()
-    P2-->>E: exit status (reported if non-zero)
+    P2-->>E: exit status (becomes the pipeline's status)
 ```
 
 Key properties:
 - All stages are spawned **before** any `wait()`, so they run concurrently and
   the kernel pipe buffer provides back-pressure — exactly like a real shell.
-- Only the **last** stage's non-zero exit status is surfaced (and only as a
-  message; v0 does not yet track `$?`).
+- The **last** stage's exit code is the pipeline's status, which feeds the
+  `&&`/`||` decision in `run_list`. (v0 does not yet expose it as `$?`.)
 
 ---
 
@@ -309,16 +337,19 @@ Input: `cat log.txt | grep ERROR >> errors.txt`
 
 1. **Lex** →
    `[Word("cat"), Word("log.txt"), Pipe, Word("grep"), Word("ERROR"), DGreat, Word("errors.txt")]`
-2. **Parse** → `Pipeline { commands: [`
-   - `Command { argv: ["cat", "log.txt"], redirects: [] }`,
-   - `Command { argv: ["grep", "ERROR"], redirects: [Stdout { file: "errors.txt", append: true }] }`
-   `] }`
-3. **Execute**
+2. **Parse** → `CommandList { first: Pipeline { commands: [`
+   - `RawCommand { argv: [["cat"], ["log.txt"]], redirects: [] }`,
+   - `RawCommand { argv: [["grep"], ["ERROR"]], redirects: [Stdout { "errors.txt", append: true }] }`
+   `] }, rest: [] }` (one pipeline, no operators)
+3. **Run list / Expand** → the single pipeline is expanded (here a no-op — no
+   `$`, `~`, or globs) into the concrete `Pipeline` of `String` argv.
+4. **Execute**
    - Not a single command → skip builtins.
    - Stage 0 `cat log.txt`: stdin inherits, stdout = piped (not last).
    - Stage 1 `grep ERROR`: stdin = stage 0's pipe, stdout = `errors.txt` opened
      with `append=true, truncate=false` (explicit redirect beats pipe-to-next).
-   - Wait on both; report if `grep` exits non-zero.
+   - Wait on both; `grep`'s exit code becomes the pipeline's (and the list's)
+     status.
 
 ---
 
@@ -348,7 +379,7 @@ flowchart LR
     v0["v0 ✅<br/>REPL · lex · parse<br/>pipes · redirects · builtins"]
     e1["Expansion ✅<br/>$VAR · ~ · $(...)"]
     e2["Globbing ✅<br/>* · ? · [..]"]
-    e3["Operators<br/>&amp;&amp; · || · ;"]
+    e3["Operators ✅<br/>&amp;&amp; · || · ;"]
     e4["Job control<br/>pgrps · Ctrl-Z · fg/bg · signals"]
 
     v0 --> e1 --> e2 --> e3 --> e4
@@ -358,12 +389,13 @@ flowchart LR
     class v0 done;
     class e1 done;
     class e2 done;
-    class e3,e4 todo;
+    class e3 done;
+    class e4 todo;
 ```
 
 | Milestone | Touches | Notes |
 |---|---|---|
 | Variable & tilde expansion | ✅ `expand.rs`, between parse and exec | `$VAR`, `${VAR}`, `~`, command substitution `$(...)`; no word-splitting yet |
 | Globbing | ✅ `glob.rs`, driven from the expansion stage | `*`, `?`, `[…]` with ranges/negation, multi-component, dotfile rule |
-| Control operators | lexer + parser + a new AST node | `&&`, `\|\|`, `;` sequence/short-circuit |
+| Control operators | ✅ lexer + parser `CommandList` + `exec::run_list` | `&&`, `\|\|`, `;` sequence/short-circuit by exit status |
 | Job control | exec rewrite on `nix` | process groups, terminal control, `Ctrl-Z`/`fg`/`bg`, signal forwarding — the headline feature for daily use |

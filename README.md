@@ -31,7 +31,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, tilde, command substitution (no word-splitting yet) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
-| Operators (`&&`, `\|\|`, `;`) | ⬜ | planned |
+| Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting; single `&` (background) not yet |
 | Job control (Ctrl-Z, `fg`/`bg`, signals) | ⬜ | planned (the big one) |
 
 ## Build & Run
@@ -54,6 +54,10 @@ pwd                           # builtin
 echo 'single $quoted'         # single quotes are literal
 echo "double quoted"          # double quotes group words, allow \" and \\
 cat file.txt | grep foo > matches.txt   # pipeline + redirection
+echo ~ has $(ls *.rs | wc -l) files      # tilde, command sub, glob
+mkdir build && cd build       # && runs only if mkdir succeeds
+test -f x || echo "missing"   # || runs only if test fails
+a ; b ; c                     # ; runs each in turn
 exit 0                        # leave the shell
 ```
 
@@ -69,11 +73,11 @@ data-flow diagrams, module reference, and roadmap.
 
 ```
 src/
-  main.rs       REPL: read → parse → expand → execute loop, history, prompt
+  main.rs       REPL: read → parse → run loop, history, prompt
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
-  parser.rs     grammar: Vec<Token> → RawPipeline of unexpanded Commands
+  parser.rs     grammar: Vec<Token> → CommandList (pipelines + &&/||/; )
   expand.rs     expansion: $VAR, ~, $(...), globs → concrete Pipeline
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
-  exec.rs       runtime: spawn processes, wire pipes & redirects
+  exec.rs       runtime: sequence the list, spawn processes, wire pipes & redirects
   builtins.rs   in-process commands: cd, pwd, exit
 ```

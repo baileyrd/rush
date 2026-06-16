@@ -1,17 +1,21 @@
-//! Execute an expanded pipeline.
+//! Execute a parsed command list.
 //!
-//! A [`Pipeline`] here is fully resolved: every word has already been expanded
-//! into a concrete string by the expansion stage. Builtins only run in-process
-//! when the pipeline is a single command — a builtin in the middle of a pipe
-//! (`echo hi | cd`) is a rare case we punt on for now. Everything else is
-//! spawned with `std::process::Command`, wiring each stage's stdout into the
-//! next stage's stdin.
+//! A [`CommandList`] is a sequence of pipelines joined by `;`/`&&`/`||`. Each
+//! pipeline is expanded (variables, globs, …) *just before it runs*, left to
+//! right, so a `cd` or future assignment takes effect for later pipelines. The
+//! connector and the previous pipeline's exit status decide what runs next.
+//!
+//! Within a pipeline, builtins only run in-process when the pipeline is a
+//! single command — a builtin in the middle of a pipe (`echo hi | cd`) is a
+//! rare case we punt on for now. Everything else is spawned with
+//! `std::process::Command`, wiring each stage's stdout into the next's stdin.
 
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::process::{Child, Command as OsCommand, Stdio};
 
 use crate::builtins;
+use crate::parser::{CommandList, Connector, RawPipeline};
 
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -32,26 +36,60 @@ pub struct Pipeline {
     pub commands: Vec<Command>,
 }
 
-/// Run a pipeline connected to the shell's own stdio.
-pub fn run_pipeline(pipeline: &Pipeline) -> Result<(), String> {
-    // Single-command fast path: lets builtins run in the shell process.
-    if pipeline.commands.len() == 1 {
-        if builtins::try_run(&pipeline.commands[0].argv).is_some() {
-            return Ok(());
+/// Run a command list against the shell's own stdio, returning the exit status
+/// of the last pipeline that actually ran.
+pub fn run_list(list: &CommandList) -> Result<i32, String> {
+    let mut status = run_one(&list.first, false)?.0;
+    for (connector, raw) in &list.rest {
+        if should_run(*connector, status) {
+            status = run_one(raw, false)?.0;
+        }
+    }
+    Ok(status)
+}
+
+/// Run a command list and return its stdout as a string — the engine behind
+/// `$(...)` command substitution. The connector logic mirrors [`run_list`]; the
+/// stdout of every pipeline that runs is concatenated.
+pub fn capture_list(list: &CommandList) -> Result<String, String> {
+    let mut out = String::new();
+    let (mut status, s) = run_one(&list.first, true)?;
+    out.push_str(&s);
+    for (connector, raw) in &list.rest {
+        if should_run(*connector, status) {
+            let (st, s) = run_one(raw, true)?;
+            status = st;
+            out.push_str(&s);
+        }
+    }
+    Ok(out)
+}
+
+fn should_run(connector: Connector, prev_status: i32) -> bool {
+    match connector {
+        Connector::Seq => true,
+        Connector::And => prev_status == 0,
+        Connector::Or => prev_status != 0,
+    }
+}
+
+/// Expand a raw pipeline and run it, returning `(exit status, captured stdout)`.
+/// The captured string is empty unless `capture` is set.
+fn run_one(raw: &RawPipeline, capture: bool) -> Result<(i32, String), String> {
+    let pipeline = crate::expand::expand(raw)?;
+
+    // Single-command fast path: lets builtins run in the shell process. Builtins
+    // are not specialised for capture, so a substitution sees external commands.
+    if !capture && pipeline.commands.len() == 1 {
+        if let Some(code) = builtins::try_run(&pipeline.commands[0].argv) {
+            return Ok((code, String::new()));
         }
     }
 
-    run(pipeline, false).map(|_| ())
+    run(&pipeline, capture)
 }
 
-/// Run a pipeline and return its stdout as a string — the engine behind
-/// `$(...)` command substitution. Builtins are not specialised here, so a
-/// substitution captures external commands (the common case).
-pub fn capture(pipeline: &Pipeline) -> Result<String, String> {
-    Ok(run(pipeline, true)?.unwrap_or_default())
-}
-
-fn run(pipeline: &Pipeline, capture: bool) -> Result<Option<String>, String> {
+fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
     let n = pipeline.commands.len();
     let mut children: Vec<Child> = Vec::with_capacity(n);
     // Stdin for the next stage: the read end of the previous stage's pipe.
@@ -107,20 +145,16 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<Option<String>, String> {
         children.push(child);
     }
 
-    // Wait for every stage; report the last command's failure if any.
+    // Wait for every stage; the pipeline's status is the last stage's.
+    let mut status = 0;
     for (i, mut child) in children.into_iter().enumerate() {
-        let status = child.wait().map_err(|e| e.to_string())?;
-        if i == n - 1 && !status.success() {
-            if let Some(code) = status.code() {
-                if code != 0 && !capture {
-                    // Non-fatal: shells just record the exit status.
-                    eprintln!("rush: command exited with status {code}");
-                }
-            }
+        let exit = child.wait().map_err(|e| e.to_string())?;
+        if i == n - 1 {
+            status = exit.code().unwrap_or(1);
         }
     }
 
-    Ok(if capture { Some(captured) } else { None })
+    Ok((status, captured))
 }
 
 fn stdin_redirect(redirects: &[Redirect]) -> Option<&str> {

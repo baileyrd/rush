@@ -32,10 +32,14 @@ pub enum WordPart {
 pub enum Token {
     /// A word, ready for the expansion stage.
     Word(Word),
-    Pipe,  // |
-    Less,  // <
-    Great, // >
+    Pipe,   // |
+    Less,   // <
+    Great,  // >
     DGreat, // >>
+    Semi,   // ;
+    And,    // &&
+    Or,     // ||
+    Amp,    // & (single — background, not yet supported)
 }
 
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
@@ -49,7 +53,25 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             }
             '|' => {
                 chars.next();
-                tokens.push(Token::Pipe);
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    tokens.push(Token::Or);
+                } else {
+                    tokens.push(Token::Pipe);
+                }
+            }
+            '&' => {
+                chars.next();
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    tokens.push(Token::And);
+                } else {
+                    tokens.push(Token::Amp);
+                }
+            }
+            ';' => {
+                chars.next();
+                tokens.push(Token::Semi);
             }
             '<' => {
                 chars.next();
@@ -82,7 +104,7 @@ fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
     loop {
         match chars.peek() {
             None => break,
-            Some(&c) if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>') => break,
+            Some(&c) if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>' | '&' | ';') => break,
             Some(&'\'') => {
                 chars.next();
                 let mut s = String::new();
@@ -284,6 +306,31 @@ mod tests {
                 Token::Great,
                 bare("out"),
             ]
+        );
+    }
+
+    #[test]
+    fn control_operators() {
+        assert_eq!(
+            lex("a && b || c ; d &").unwrap(),
+            vec![
+                bare("a"),
+                Token::And,
+                bare("b"),
+                Token::Or,
+                bare("c"),
+                Token::Semi,
+                bare("d"),
+                Token::Amp,
+            ]
+        );
+    }
+
+    #[test]
+    fn pipe_vs_or() {
+        assert_eq!(
+            lex("a|b||c").unwrap(),
+            vec![bare("a"), Token::Pipe, bare("b"), Token::Or, bare("c")]
         );
     }
 

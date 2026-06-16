@@ -51,9 +51,9 @@ fn main() -> rustyline::Result<()> {
                 }
                 rl.add_history_entry(line)?;
 
-                match parser::parse(line).and_then(expand::expand) {
-                    Ok(pipeline) => {
-                        if let Err(e) = exec::run_pipeline(&pipeline) {
+                match parser::parse(line) {
+                    Ok(list) => {
+                        if let Err(e) = exec::run_list(&list) {
                             eprintln!("rush: {e}");
                         }
                     }

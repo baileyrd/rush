@@ -22,26 +22,26 @@ use crate::exec::{Command, Pipeline, Redirect};
 use crate::lexer::{Word, WordPart};
 use crate::parser::{self, RawCommand, RawPipeline, RawRedirect};
 
-pub fn expand(raw: RawPipeline) -> Result<Pipeline, String> {
+pub fn expand(raw: &RawPipeline) -> Result<Pipeline, String> {
     let mut commands = Vec::with_capacity(raw.commands.len());
-    for rc in raw.commands {
+    for rc in &raw.commands {
         commands.push(expand_command(rc)?);
     }
     Ok(Pipeline { commands })
 }
 
-fn expand_command(rc: RawCommand) -> Result<Command, String> {
+fn expand_command(rc: &RawCommand) -> Result<Command, String> {
     let mut argv = Vec::new();
     for word in &rc.argv {
         argv.extend(expand_argv_word(word)?);
     }
 
     let mut redirects = Vec::with_capacity(rc.redirects.len());
-    for r in rc.redirects {
+    for r in &rc.redirects {
         redirects.push(match r {
-            RawRedirect::Stdin(w) => Redirect::Stdin(expand_word(&w)?),
+            RawRedirect::Stdin(w) => Redirect::Stdin(expand_word(w)?),
             RawRedirect::Stdout { file, append } => {
-                Redirect::Stdout { file: expand_word(&file)?, append }
+                Redirect::Stdout { file: expand_word(file)?, append: *append }
             }
         });
     }
@@ -233,11 +233,10 @@ fn take_balanced_paren(chars: &mut Peekable<Chars>) -> Result<String, String> {
     Err("unterminated `$(`".into())
 }
 
-/// Run `src` as its own command line and capture its stdout.
+/// Run `src` as its own command line (operators and all) and capture its stdout.
 fn command_substitute(src: &str) -> Result<String, String> {
-    let raw = parser::parse(src)?;
-    let pipeline = expand(raw)?;
-    crate::exec::capture(&pipeline)
+    let list = parser::parse(src)?;
+    crate::exec::capture_list(&list)
 }
 
 fn var_lookup(name: &str) -> String {
@@ -255,8 +254,8 @@ mod tests {
     use super::*;
 
     fn one(input: &str) -> Vec<String> {
-        let raw = parser::parse(input).unwrap();
-        let pipeline = expand(raw).unwrap();
+        let list = parser::parse(input).unwrap();
+        let pipeline = expand(&list.first).unwrap();
         pipeline.commands[0].argv.clone()
     }
 

@@ -14,6 +14,10 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "pwd" => Some(pwd()),
         "echo" => Some(echo(argv)),
         "export" => Some(export(argv)),
+        "unset" => Some(unset(argv)),
+        // POSIX no-op (`:`) and the canonical true/false.
+        "true" | ":" => Some(0),
+        "false" => Some(1),
         "exit" => exit(argv), // diverges on success
         _ => other_builtin(argv),
     }
@@ -91,6 +95,14 @@ fn export(argv: &[String]) -> i32 {
             Some((name, value)) => crate::vars::set_exported(name, value),
             None => crate::vars::export(arg),
         }
+    }
+    0
+}
+
+/// `unset NAME...` — remove shell variables.
+fn unset(argv: &[String]) -> i32 {
+    for name in &argv[1..] {
+        crate::vars::unset(name);
     }
     0
 }

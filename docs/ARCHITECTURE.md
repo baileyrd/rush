@@ -233,6 +233,8 @@ crate, following the classic glibc job-control structure:
 - `pwd` — prints the current directory.
 - `echo [-n] [args…]` — joins args with spaces (no `-e` escapes).
 - `export NAME[=value]` — marks a shell variable exported (see `vars`).
+- `unset NAME…` — removes shell variables.
+- `true` / `:` (status `0`) and `false` (status `1`).
 - `exit [code]` — terminates the process (diverges; defaults to `0`).
 - On Unix, `jobs`/`fg`/`bg` are dispatched to `job::builtin`.
 

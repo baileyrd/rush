@@ -31,7 +31,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`) | ✅ | truncate, append, input |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `true`, `false`, `:`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, tilde, command substitution; unquoted results word-split on whitespace |

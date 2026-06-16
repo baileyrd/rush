@@ -36,6 +36,13 @@ pub fn get(name: &str) -> Option<String> {
     VARS.with(|v| v.borrow().get(name).map(|x| x.value.clone()))
 }
 
+/// Remove a shell variable (`unset NAME`).
+pub fn unset(name: &str) {
+    VARS.with(|v| {
+        v.borrow_mut().remove(name);
+    });
+}
+
 /// Set a variable, preserving its exported flag if it already existed.
 pub fn set(name: &str, value: &str) {
     VARS.with(|v| {
@@ -74,4 +81,26 @@ pub fn exported() -> Vec<(String, String)> {
             .map(|(k, x)| (k.clone(), x.value.clone()))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_get_unset_and_export() {
+        set("RUSH_V", "1");
+        assert_eq!(get("RUSH_V").as_deref(), Some("1"));
+        assert!(!exported().iter().any(|(k, _)| k == "RUSH_V"));
+
+        export("RUSH_V");
+        assert!(exported().iter().any(|(k, v)| k == "RUSH_V" && v == "1"));
+
+        // Re-setting keeps the exported flag.
+        set("RUSH_V", "2");
+        assert!(exported().iter().any(|(k, v)| k == "RUSH_V" && v == "2"));
+
+        unset("RUSH_V");
+        assert_eq!(get("RUSH_V"), None);
+    }
 }

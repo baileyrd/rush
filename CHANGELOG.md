@@ -1,0 +1,73 @@
+# Changelog
+
+All notable changes to **rush** are documented here. The format is loosely based
+on [Keep a Changelog](https://keepachangelog.com/); the project predates a
+tagged release, so everything lives under a single development heading.
+
+## [Unreleased] — 0.1.0 (2026-06-16)
+
+The shell grew from a foundation (REPL, pipelines, redirection, three builtins)
+into a near-complete POSIX-style shell. Work is grouped by area below; see the
+git history for the commit-by-commit narrative.
+
+### Expansion
+- **Variables** — `$VAR`, `${VAR}`; shell variables shadow the environment.
+- **`${…}` operators** — `:-`/`-`, `:=`/`=`, `:+`/`+`, `:?`/`?`, and `${#name}`
+  (length); the default/alternate word is itself expanded.
+- **Special parameters** — `$?` (last exit status), `$0`–`$9`, `${10}`, `$#`,
+  `$*`, and `$@` (with a standalone `"$@"` keeping each parameter separate).
+- **Tilde** — `~` / `~/path` → `$HOME` (falls back to `$USERPROFILE`).
+- **Command substitution** — `$(...)`, supporting operators and compounds inside.
+- **Arithmetic** — `$((expr))`: `+ - * / %`, comparisons, `&& || !`, parentheses,
+  and variables; `$`-references are expanded first (`$(( $1 + $2 ))`).
+- **Globbing** — a hand-rolled matcher: `*`, `?`, `[…]` with ranges and `[!…]`,
+  multi-component patterns (`src/*.rs`), and the POSIX leading-dot rule.
+- **Word-splitting** — unquoted expansions split on whitespace; quotes suppress it.
+
+### Grammar & control flow
+- Recursive-descent parser producing a nestable AST.
+- **Operators** — `&&`, `||`, `;`, and `&` (background), with exit-status
+  short-circuiting.
+- **Control flow** — `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`,
+  `for … in … do … done`, `case … esac`, and `break`/`continue [n]`.
+- **Functions** — `name() { … }` with recursion, own positional parameters, and
+  `return [n]`; brace groups `{ …; }`.
+- **Subshells** — `( … )` isolating the working directory and variables.
+- **Comments** — `#` to end of line.
+- **Multi-line input** — a `> ` continuation prompt; unfinished quotes, `$(`,
+  `${`, and here-docs all keep reading.
+
+### Redirection & I/O
+- File redirection per fd: `<`, `>`, `>>`, `2>`, `2>>`.
+- **fd duplication** — `2>&1` / `n>&m` (`> f 2>&1` sends both to one file).
+- **Both streams** — `&>` / `&>>`.
+- **Here-documents** — `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion).
+
+### Builtins
+- `cd`, `pwd`, `echo`, `export`, `unset`, `test` / `[ ]`, `true`, `false`, `:`,
+  `break`, `continue`, `return`, `exit`.
+- Unix job control: `jobs`, `fg`, `bg`, `kill [-SIG] %job|pid`.
+
+### Job control (Unix)
+- Background jobs (`&`), process groups, terminal hand-off (`tcsetpgrp`), and
+  signal handling following the glibc reference.
+- Ctrl-Z stop detection, `fg`/`bg` resume, and a job table reaped at each prompt.
+- Gated behind `#[cfg(unix)]` (uses `libc`); other platforms run foreground-only.
+
+### Execution modes
+- Interactive REPL with line editing and persistent history (`~/.rush_history`).
+- Script files: `rush script.sh args…` (sets `$0`, `$1`…).
+- Command strings: `rush -c "cmds" [name args…]`.
+
+### Tooling & docs
+- GitHub Actions CI: build + test on Linux and Windows, plus clippy on Linux.
+- `.gitattributes` normalizing line endings to LF.
+- README feature matrix and `docs/ARCHITECTURE.md` kept current throughout.
+
+### Notes & known limitations
+- Subshells isolate state rather than forking, so `exit` inside one exits the
+  whole shell.
+- Duping a *piped* fd can't be shared with `std` before spawn, so
+  `cmd 2>&1 | next` leaves stderr on the terminal.
+- Compound commands can't yet be placed inside a pipeline or command
+  substitution (no real fork).

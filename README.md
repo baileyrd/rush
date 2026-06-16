@@ -5,11 +5,14 @@
 A small, bash-compatible shell written in Rust — built to grow into a daily-use tool.
 
 `rush` reads a command line, lexes and parses it, expands it, then executes the
-resulting pipeline. The current version (`v0`) supports interactive editing with
-persistent history, pipelines, file redirection, the handful of builtins that
-must run inside the shell process, expansion of variables, `~`, command
-substitution and filename globs, the control operators `&&`/`||`/`;`, and — on
-Unix — background jobs with real job control.
+result. It covers most of the core POSIX shell language: pipelines and
+redirection (including `2>`/`2>&1` and here-documents), the full set of
+expansions (variables, `${…}` operators, `$?`, positional parameters, command
+substitution, arithmetic `$((…))`, globbing, and tilde), control flow
+(`if`/`while`/`for`/`case`, `break`/`continue`), shell functions with recursion,
+subshells, and — on Unix — background jobs with real job control. It runs
+interactively (with multi-line continuation and history) or as a script
+(`rush script.sh args`).
 
 ```
 /home/baileyrd/projects/rust_bash $ ls | grep rs | wc -l
@@ -32,7 +35,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit` (+ `jobs`/`fg`/`bg`/`kill` on Unix) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
@@ -90,22 +93,23 @@ commands only and `&` is rejected.
 
 ## Documentation
 
-See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the full architecture,
-data-flow diagrams, module reference, and roadmap.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture, data-flow
+  diagrams, module reference, and roadmap.
+- **[CHANGELOG.md](CHANGELOG.md)** — what's been built, by area.
 
 ## Project Layout
 
 ```
 src/
-  main.rs       REPL: read → parse → run loop, history, prompt
+  main.rs       entry point: argv dispatch (script / -c / REPL), read→parse→run loop
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
-  parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for)
-  expand.rs     expansion: $VAR, ~, $(...), $((...)), globs → concrete Pipeline
+  parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for/case/functions)
+  expand.rs     expansion: $VAR, ${…}, ~, $(...), $((...)), word-split, globs → concrete Pipeline
   arith.rs      integer arithmetic evaluator for $((...))
   func.rs       shell function registry (name() { ... })
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
-  vars.rs       shell state that outlives a command: $?, shell variables, export
-  exec.rs       runtime: sequence the list, spawn processes, wire pipes & redirects
-  job.rs        Unix job control: process groups, terminal, signals, fg/bg/jobs
-  builtins.rs   in-process commands: cd, pwd, exit (+ jobs/fg/bg on Unix)
+  vars.rs       shell state outliving a command: $?, variables, positional params, flow control
+  exec.rs       runtime: sequence the list, run compounds, spawn processes, wire fds
+  job.rs        Unix job control: process groups, terminal, signals, fg/bg/jobs/kill
+  builtins.rs   in-process commands: cd, pwd, echo, export, test, … (+ jobs/fg/bg/kill on Unix)
 ```

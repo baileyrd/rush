@@ -16,10 +16,10 @@ from your keyboard to a running process and back.
 
 ## 1. Overview
 
-`rush` is a classic **read → parse → execute** shell. There is no background
-thread, event loop, or async runtime: the main thread blocks on a line of
-input, transforms it through a series of pure-ish stages, executes it, then
-loops.
+`rush` is a classic **read → parse → execute** shell. There is no event loop or
+async runtime: the main thread blocks on a line of input, transforms it through
+a series of pure-ish stages, executes it, then loops. (The only helper threads
+are short-lived writers that feed here-document bodies to a child's stdin.)
 
 The codebase is intentionally small and split along the stages of that
 pipeline, so each module has a single, well-defined responsibility.
@@ -235,6 +235,14 @@ A from-scratch globber, no external crate:
 - `glob` walks the filesystem component-by-component, so `src/*.rs` and
   `*/*.rs` descend directories. A leading `.` in a filename matches only when
   the pattern component begins with a literal `.`, so `*` skips dotfiles.
+
+### `vars.rs` — shell state
+Thread-local state that outlives a single command: the last exit status (`$?`),
+shell variables (value + exported flag, with `snapshot`/`restore` for
+subshells), positional parameters (`$0`, `$1`…), and the pending control-flow
+request (`break`/`continue`/`return`) that `exec` consults via `flow_pending()`.
+Lookups for `$VAR` consult this map first and fall back to the environment; only
+*exported* variables are pushed into child processes.
 
 ### `exec.rs` — runtime
 Sequences a `CommandList` and turns each pipeline into running processes:

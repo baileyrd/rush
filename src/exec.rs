@@ -147,6 +147,17 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
             }
             Ok(status)
         }
+        Compound::Case { word, items } => {
+            let subject = crate::expand::expand_to_string(word)?;
+            for (patterns, body) in items {
+                for pat in patterns {
+                    if crate::glob::match_component(&crate::expand::expand_pattern(pat)?, &subject) {
+                        return exec_list(body);
+                    }
+                }
+            }
+            Ok(0)
+        }
     }
 }
 

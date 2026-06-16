@@ -46,6 +46,27 @@ pub fn expand_words(words: &[Word]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Expand a word to a single string (no splitting or globbing) — used for a
+/// `case` subject.
+pub fn expand_to_string(word: &Word) -> Result<String, String> {
+    expand_word(word)
+}
+
+/// Expand a `case` pattern: like a glob pattern, metacharacters from quoted or
+/// literal parts are escaped so only unquoted `*?[` stay active. No tilde or
+/// word-splitting (a pattern is a single match template).
+pub fn expand_pattern(word: &Word) -> Result<String, String> {
+    let mut pattern = String::new();
+    for part in word {
+        match part {
+            WordPart::Literal(s) => escape_meta_into(&mut pattern, s),
+            WordPart::Quoted(s) => escape_meta_into(&mut pattern, &expand_dollars(s)?),
+            WordPart::Unquoted(s) => pattern.push_str(&expand_dollars(s)?),
+        }
+    }
+    Ok(pattern)
+}
+
 fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // Leading `NAME=value` words are assignments; they stop at the first word
     // that isn't one (the program name).

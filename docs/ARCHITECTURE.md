@@ -134,7 +134,9 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
 - Bare text becomes `Unquoted` parts (eligible for `~`, `$`, and later glob).
 - A `$(...)` substitution is swallowed whole — balanced parens, quotes and all —
   so inner spaces and `|` don't split the word.
-- Operators `|`, `<`, `>`, `>>`, `&`, `&&`, `||`, `;` become distinct tokens.
+- Operators `|`, `<`, `>`, `>>`, `&`, `&&`, `||`, `;`, `;;`, `(`, `)` become
+  distinct tokens. (Bare parens are operators — for `case`/future subshells —
+  so a literal paren in a command must be quoted.)
 - A `#` at a word boundary starts a comment: lexing stops for the rest of the
   line. Mid-word (`foo#bar`) or quoted, `#` is an ordinary character.
 - Lexer errors: an unterminated double quote or an unterminated `$(`.
@@ -147,9 +149,11 @@ list     := and_or ( sep and_or )* sep?          sep = ; | & | newline
 and_or   := pipeline ( ('&&' | '||') pipeline )*
 pipeline := command ( '|' command )*
 command  := compound | simple
-compound := if_clause | loop_clause | for_clause
+compound := if_clause | loop_clause | for_clause | case_clause
 simple   := (word | redirect)+
 redirect := ('<' | '>' | '>>') word
+
+case_clause := 'case' word 'in' ( '('? pattern ('|' pattern)* ')' list ';;' )* 'esac'
 ```
 - `parse_command` dispatches on a **reserved word** in command position (`if`,
   `while`, `until`, `for`) to a compound parser; otherwise `parse_simple` reads
@@ -231,7 +235,8 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   by `run_compound`, which recurses through `run_list` on the condition and body
   lists — so control flow nests naturally and reuses the same status plumbing
   (`if`/`while` branch on a list's exit status; `for` expands its word list via
-  `expand::expand_words` and sets the loop variable each iteration).
+  `expand::expand_words` and sets the loop variable each iteration; `case`
+  matches the subject against each pattern with `glob::match_component`).
 - **`break`/`continue`:** those builtins set a thread-local request in `vars`;
   `exec_list` and `run_andor` stop early when one is pending, and each loop's
   `loop_step` consumes one level (so `break 2` escapes two loops). The public
@@ -331,6 +336,7 @@ classDiagram
         If(branches, else)
         Loop(until, cond, body)
         For(var, words, body)
+        Case(word, items)
     }
     class Pipeline {
         +Vec~Command~ commands
@@ -507,6 +513,6 @@ more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
 
 With `test`/`[`, `$((…))`, and control flow, real scripts work — e.g. a
 counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`. Natural next steps:
-`case`/`esac`, positional parameters (`$1`/`$@`) with a script-file mode,
+positional parameters (`$1`/`$@`) with a script-file mode (`rush script.sh`),
 command substitution / backgrounding of compound commands (needs a subshell),
-`break`/`continue`, and `kill %n`.
+shell functions, and `kill %n`.

@@ -37,9 +37,12 @@ pub enum Token {
     Great,   // >
     DGreat,  // >>
     Semi,    // ;
+    DSemi,   // ;; (case item terminator)
     And,     // &&
     Or,      // ||
     Amp,     // & (single — background)
+    LParen,  // (
+    RParen,  // )
     Newline, // a line break (a separator that also lets `&&`/`|` continue)
 }
 
@@ -84,7 +87,23 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             }
             ';' => {
                 chars.next();
-                tokens.push(Token::Semi);
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                    tokens.push(Token::DSemi);
+                } else {
+                    tokens.push(Token::Semi);
+                }
+            }
+            // Bare parens are operators (used by `case`); literal parens in a
+            // command must be quoted. `$(...)`/`$((...))` are consumed in
+            // `lex_word` before reaching here.
+            '(' => {
+                chars.next();
+                tokens.push(Token::LParen);
+            }
+            ')' => {
+                chars.next();
+                tokens.push(Token::RParen);
             }
             '<' => {
                 chars.next();
@@ -118,7 +137,9 @@ fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
         match chars.peek() {
             None => break,
             Some(&c)
-                if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>' | '&' | ';' | '\n' | '\r') =>
+                if c == ' '
+                    || c == '\t'
+                    || matches!(c, '|' | '<' | '>' | '&' | ';' | '\n' | '\r' | '(' | ')') =>
             {
                 break
             }

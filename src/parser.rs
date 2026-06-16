@@ -98,6 +98,11 @@ pub enum Compound {
         words: Vec<Word>,
         body: CommandList,
     },
+    /// `case WORD in PATTERN|… ) BODY ;; … esac`.
+    Case {
+        word: Word,
+        items: Vec<(Vec<Word>, CommandList)>,
+    },
 }
 
 /// A parse failure. `Incomplete` means the input is a valid prefix that needs
@@ -118,7 +123,8 @@ impl fmt::Display for ParseError {
 }
 
 const RESERVED: &[&str] = &[
-    "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in",
+    "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case",
+    "esac",
 ];
 
 pub fn parse(input: &str) -> Result<CommandList, ParseError> {
@@ -177,6 +183,10 @@ impl Parser {
     /// A list ends at end of input or a reserved word that closes a construct
     /// (`then`, `fi`, `do`, …) — anything that isn't a command starter.
     fn at_list_end(&self) -> bool {
+        // `;;` closes a `case` item's body.
+        if matches!(self.peek(), Some(Token::DSemi)) {
+            return true;
+        }
         match self.peek_keyword() {
             Some(kw) => !is_command_start(kw),
             None => self.at_end(),
@@ -232,6 +242,7 @@ impl Parser {
             Some("while") => self.parse_loop(false),
             Some("until") => self.parse_loop(true),
             Some("for") => self.parse_for(),
+            Some("case") => self.parse_case(),
             // A closing keyword here means a body was empty (e.g. `if; then`).
             Some(kw) => Err(ParseError::Syntax(format!("unexpected `{kw}`"))),
             None => self.parse_simple(),
@@ -337,6 +348,61 @@ impl Parser {
         Ok(RawCommand::Compound(Box::new(Compound::For { var, words, body })))
     }
 
+    fn parse_case(&mut self) -> Result<RawCommand, ParseError> {
+        self.expect_keyword("case")?;
+        let word = self.expect_word_token()?;
+        self.expect_keyword("in")?;
+
+        let mut items = Vec::new();
+        loop {
+            self.skip_separators();
+            if self.peek_keyword() == Some("esac") {
+                break;
+            }
+            if self.at_end() {
+                return Err(ParseError::Incomplete);
+            }
+
+            // Patterns: an optional `(`, then word ( `|` word )* `)`.
+            if matches!(self.peek(), Some(Token::LParen)) {
+                self.pos += 1;
+            }
+            let mut patterns = vec![self.expect_word_token()?];
+            while matches!(self.peek(), Some(Token::Pipe)) {
+                self.pos += 1;
+                patterns.push(self.expect_word_token()?);
+            }
+            match self.peek() {
+                Some(Token::RParen) => self.pos += 1,
+                None => return Err(ParseError::Incomplete),
+                _ => return Err(ParseError::Syntax("expected `)` in case".into())),
+            }
+
+            let body = self.parse_list()?;
+            if matches!(self.peek(), Some(Token::DSemi)) {
+                self.pos += 1;
+            }
+            items.push((patterns, body));
+        }
+
+        self.expect_keyword("esac")?;
+        Ok(RawCommand::Compound(Box::new(Compound::Case { word, items })))
+    }
+
+    /// Consume the current token, requiring it to be a `Word`.
+    fn expect_word_token(&mut self) -> Result<Word, ParseError> {
+        match self.peek() {
+            Some(Token::Word(_)) => {
+                let Some(Token::Word(w)) = self.advance() else {
+                    unreachable!()
+                };
+                Ok(w)
+            }
+            None => Err(ParseError::Incomplete),
+            _ => Err(ParseError::Syntax("expected a word".into())),
+        }
+    }
+
     fn expect_keyword(&mut self, kw: &str) -> Result<(), ParseError> {
         self.skip_newlines();
         match self.peek_keyword() {
@@ -396,7 +462,7 @@ fn as_keyword(tok: &Token) -> Option<&'static str> {
 
 /// Reserved words that begin a command (vs. ones that close a construct).
 fn is_command_start(kw: &str) -> bool {
-    matches!(kw, "if" | "while" | "until" | "for")
+    matches!(kw, "if" | "while" | "until" | "for" | "case")
 }
 
 fn is_name(s: &str) -> bool {
@@ -413,6 +479,9 @@ fn describe(tok: &Token) -> String {
         Token::And => "&&".into(),
         Token::Amp => "&".into(),
         Token::Semi => ";".into(),
+        Token::DSemi => ";;".into(),
+        Token::LParen => "(".into(),
+        Token::RParen => ")".into(),
         Token::Less => "<".into(),
         Token::Great => ">".into(),
         Token::DGreat => ">>".into(),
@@ -561,6 +630,26 @@ mod tests {
             },
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn case_clause() {
+        let p = parse_ok("case $x in a) echo A ;; b|c) echo BC ;; *) echo other ;; esac");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.as_ref() {
+                Compound::Case { items, .. } => {
+                    assert_eq!(items.len(), 3);
+                    assert_eq!(items[1].0.len(), 2); // b|c → two patterns
+                }
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
+        }
+        // Multi-line and an empty body are both fine.
+        assert!(matches!(
+            first_cmd(&parse_ok("case x in\n  y) ;;\n  *) echo z ;;\nesac")),
+            RawCommand::Compound(_)
+        ));
     }
 
     #[test]

@@ -1,17 +1,41 @@
 //! Turn a raw input line into a flat list of tokens.
 //!
 //! The job here is just enough to be correct about quoting and operators —
-//! the parser builds structure out of these tokens. We keep operators as
-//! distinct tokens so the parser never has to re-scan characters.
+//! the parser builds structure out of these tokens, and the expansion stage
+//! later resolves `$VAR`, `~`, and `$(...)`.
+//!
+//! Crucially, words are *not* flattened to a bare string here: quoting decides
+//! what may expand later (`'$x'` is literal, `"$x"` expands), so each word is a
+//! sequence of [`WordPart`]s that remember where their text came from. The
+//! lexer still strips the quote characters themselves.
+
+use std::iter::Peekable;
+use std::str::Chars;
+
+/// One word, as a sequence of differently-quoted fragments. `echo a"$b"'c'`
+/// lexes to a single word with three parts.
+pub type Word = Vec<WordPart>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WordPart {
+    /// Verbatim text — from single quotes or backslash escapes. Never expanded.
+    Literal(String),
+    /// Bare (unquoted) text. Subject to `$`/`$(...)` expansion, and a leading
+    /// `~` is eligible for home-directory expansion.
+    Unquoted(String),
+    /// Double-quoted text. Subject to `$`/`$(...)` expansion, but no tilde and
+    /// (later) no globbing.
+    Quoted(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
-    /// A bare or quoted argument, already unquoted (e.g. `hello world`).
-    Word(String),
-    Pipe,        // |
-    Less,        // <
-    Great,       // >
-    DGreat,      // >>
+    /// A word, ready for the expansion stage.
+    Word(Word),
+    Pipe,  // |
+    Less,  // <
+    Great, // >
+    DGreat, // >>
 }
 
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
@@ -41,56 +65,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 }
             }
             _ => {
-                // Accumulate a word, honoring single and double quotes.
-                let mut word = String::new();
-                loop {
-                    match chars.peek() {
-                        None => break,
-                        Some(&c) if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>') => break,
-                        Some(&'\'') => {
-                            chars.next();
-                            for qc in chars.by_ref() {
-                                if qc == '\'' {
-                                    break;
-                                }
-                                word.push(qc);
-                            }
-                        }
-                        Some(&'"') => {
-                            chars.next();
-                            let mut closed = false;
-                            while let Some(qc) = chars.next() {
-                                if qc == '"' {
-                                    closed = true;
-                                    break;
-                                }
-                                // Inside double quotes, backslash escapes " and \.
-                                if qc == '\\' {
-                                    if let Some(&next) = chars.peek() {
-                                        if next == '"' || next == '\\' {
-                                            word.push(chars.next().unwrap());
-                                            continue;
-                                        }
-                                    }
-                                }
-                                word.push(qc);
-                            }
-                            if !closed {
-                                return Err("unterminated double quote".into());
-                            }
-                        }
-                        Some(&'\\') => {
-                            chars.next();
-                            if let Some(esc) = chars.next() {
-                                word.push(esc);
-                            }
-                        }
-                        Some(&other) => {
-                            word.push(other);
-                            chars.next();
-                        }
-                    }
-                }
+                let word = lex_word(&mut chars)?;
                 tokens.push(Token::Word(word));
             }
         }
@@ -99,19 +74,156 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
+/// Accumulate a single word, honoring single quotes, double quotes, escapes,
+/// and keeping a `$(...)` substitution together even across spaces/operators.
+fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
+    let mut parts: Word = Vec::new();
+
+    loop {
+        match chars.peek() {
+            None => break,
+            Some(&c) if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>') => break,
+            Some(&'\'') => {
+                chars.next();
+                let mut s = String::new();
+                for qc in chars.by_ref() {
+                    if qc == '\'' {
+                        break;
+                    }
+                    s.push(qc);
+                }
+                push_literal(&mut parts, &s);
+            }
+            Some(&'"') => {
+                chars.next();
+                let mut s = String::new();
+                let mut closed = false;
+                while let Some(qc) = chars.next() {
+                    if qc == '"' {
+                        closed = true;
+                        break;
+                    }
+                    // Inside double quotes, backslash escapes ", \, and $.
+                    if qc == '\\' {
+                        if let Some(&next) = chars.peek() {
+                            if matches!(next, '"' | '\\' | '$') {
+                                s.push(chars.next().unwrap());
+                                continue;
+                            }
+                        }
+                    }
+                    // Keep `$(...)` whole so an inner `"` can't close us early.
+                    if qc == '$' {
+                        s.push('$');
+                        if chars.peek() == Some(&'(') {
+                            consume_balanced_paren(chars, &mut s)?;
+                        }
+                        continue;
+                    }
+                    s.push(qc);
+                }
+                if !closed {
+                    return Err("unterminated double quote".into());
+                }
+                push_quoted(&mut parts, &s);
+            }
+            Some(&'\\') => {
+                chars.next();
+                if let Some(esc) = chars.next() {
+                    push_literal(&mut parts, &esc.to_string());
+                }
+            }
+            Some(&'$') => {
+                chars.next();
+                let mut s = String::from("$");
+                // `$(...)` may contain spaces and operators; swallow it whole so
+                // word-splitting doesn't tear it apart. A plain `$VAR` falls
+                // through to ordinary char accumulation below.
+                if chars.peek() == Some(&'(') {
+                    consume_balanced_paren(chars, &mut s)?;
+                }
+                push_unquoted(&mut parts, &s);
+            }
+            Some(&other) => {
+                push_unquoted(&mut parts, &other.to_string());
+                chars.next();
+            }
+        }
+    }
+
+    Ok(parts)
+}
+
+/// Append a balanced `(...)` region (including the parens) to `out`, starting
+/// at the opening `(` under the cursor. Tracks nesting and skips quoted spans
+/// so that `$(echo ")")` is captured correctly.
+fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), String> {
+    // Cursor is on the opening '('.
+    chars.next();
+    out.push('(');
+    let mut depth = 1usize;
+    let mut quote: Option<char> = None;
+
+    for c in chars.by_ref() {
+        out.push(c);
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    Err("unterminated `$(`".into())
+}
+
+fn push_unquoted(parts: &mut Word, t: &str) {
+    match parts.last_mut() {
+        Some(WordPart::Unquoted(s)) => s.push_str(t),
+        _ => parts.push(WordPart::Unquoted(t.to_string())),
+    }
+}
+
+fn push_quoted(parts: &mut Word, t: &str) {
+    match parts.last_mut() {
+        Some(WordPart::Quoted(s)) => s.push_str(t),
+        _ => parts.push(WordPart::Quoted(t.to_string())),
+    }
+}
+
+fn push_literal(parts: &mut Word, t: &str) {
+    match parts.last_mut() {
+        Some(WordPart::Literal(s)) => s.push_str(t),
+        _ => parts.push(WordPart::Literal(t.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shorthand: a token that is a single unquoted part.
+    fn bare(s: &str) -> Token {
+        Token::Word(vec![WordPart::Unquoted(s.into())])
+    }
 
     #[test]
     fn splits_on_whitespace() {
         assert_eq!(
             lex("echo hello world").unwrap(),
-            vec![
-                Token::Word("echo".into()),
-                Token::Word("hello".into()),
-                Token::Word("world".into()),
-            ]
+            vec![bare("echo"), bare("hello"), bare("world")]
         );
     }
 
@@ -119,7 +231,44 @@ mod tests {
     fn double_quotes_group_words() {
         assert_eq!(
             lex("echo \"hello world\"").unwrap(),
-            vec![Token::Word("echo".into()), Token::Word("hello world".into())]
+            vec![bare("echo"), Token::Word(vec![WordPart::Quoted("hello world".into())])]
+        );
+    }
+
+    #[test]
+    fn single_quotes_are_literal() {
+        assert_eq!(
+            lex("echo '$x'").unwrap(),
+            vec![bare("echo"), Token::Word(vec![WordPart::Literal("$x".into())])]
+        );
+    }
+
+    #[test]
+    fn dollar_stays_unquoted() {
+        assert_eq!(
+            lex("$HOME").unwrap(),
+            vec![Token::Word(vec![WordPart::Unquoted("$HOME".into())])]
+        );
+    }
+
+    #[test]
+    fn command_substitution_is_one_word() {
+        // Spaces and the pipe inside `$(...)` must not split the word.
+        assert_eq!(
+            lex("$(ls | wc -l)").unwrap(),
+            vec![Token::Word(vec![WordPart::Unquoted("$(ls | wc -l)".into())])]
+        );
+    }
+
+    #[test]
+    fn adjacent_parts_merge_into_one_word() {
+        assert_eq!(
+            lex("a\"b\"'c'").unwrap(),
+            vec![Token::Word(vec![
+                WordPart::Unquoted("a".into()),
+                WordPart::Quoted("b".into()),
+                WordPart::Literal("c".into()),
+            ])]
         );
     }
 
@@ -128,12 +277,12 @@ mod tests {
         assert_eq!(
             lex("ls|grep x>out").unwrap(),
             vec![
-                Token::Word("ls".into()),
+                bare("ls"),
                 Token::Pipe,
-                Token::Word("grep".into()),
-                Token::Word("x".into()),
+                bare("grep"),
+                bare("x"),
                 Token::Great,
-                Token::Word("out".into()),
+                bare("out"),
             ]
         );
     }
@@ -141,5 +290,10 @@ mod tests {
     #[test]
     fn unterminated_quote_errors() {
         assert!(lex("echo \"oops").is_err());
+    }
+
+    #[test]
+    fn unterminated_substitution_errors() {
+        assert!(lex("echo $(ls").is_err());
     }
 }

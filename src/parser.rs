@@ -1,35 +1,39 @@
-//! Build a `Pipeline` of `Command`s from a token stream.
+//! Build a `RawPipeline` of `RawCommand`s from a token stream.
 //!
 //! Grammar (v0):
 //!   pipeline := command ( '|' command )*
 //!   command  := word+ redirection*
 //!   redirect := ('<' | '>' | '>>') word
+//!
+//! "Raw" here means words still carry their quoting (see [`crate::lexer::Word`])
+//! and have *not* been expanded. The expansion stage turns a `RawPipeline` into
+//! an [`crate::exec::Pipeline`] of concrete strings.
 
-use crate::lexer::{self, Token};
+use crate::lexer::{self, Token, Word};
 
 #[derive(Debug, Clone)]
-pub struct Command {
-    pub argv: Vec<String>,
-    pub redirects: Vec<Redirect>,
+pub struct RawCommand {
+    pub argv: Vec<Word>,
+    pub redirects: Vec<RawRedirect>,
 }
 
 #[derive(Debug, Clone)]
-pub enum Redirect {
+pub enum RawRedirect {
     /// `< file`
-    Stdin(String),
+    Stdin(Word),
     /// `> file` (truncate) or `>> file` (append)
-    Stdout { file: String, append: bool },
+    Stdout { file: Word, append: bool },
 }
 
 #[derive(Debug, Clone)]
-pub struct Pipeline {
-    pub commands: Vec<Command>,
+pub struct RawPipeline {
+    pub commands: Vec<RawCommand>,
 }
 
-pub fn parse(input: &str) -> Result<Pipeline, String> {
+pub fn parse(input: &str) -> Result<RawPipeline, String> {
     let tokens = lexer::lex(input)?;
     let mut commands = Vec::new();
-    let mut cur = Command {
+    let mut cur = RawCommand {
         argv: Vec::new(),
         redirects: Vec::new(),
     };
@@ -44,20 +48,20 @@ pub fn parse(input: &str) -> Result<Pipeline, String> {
                 }
                 commands.push(std::mem::replace(
                     &mut cur,
-                    Command { argv: Vec::new(), redirects: Vec::new() },
+                    RawCommand { argv: Vec::new(), redirects: Vec::new() },
                 ));
             }
             Token::Less => {
                 let file = expect_word(iter.next(), "<")?;
-                cur.redirects.push(Redirect::Stdin(file));
+                cur.redirects.push(RawRedirect::Stdin(file));
             }
             Token::Great => {
                 let file = expect_word(iter.next(), ">")?;
-                cur.redirects.push(Redirect::Stdout { file, append: false });
+                cur.redirects.push(RawRedirect::Stdout { file, append: false });
             }
             Token::DGreat => {
                 let file = expect_word(iter.next(), ">>")?;
-                cur.redirects.push(Redirect::Stdout { file, append: true });
+                cur.redirects.push(RawRedirect::Stdout { file, append: true });
             }
         }
     }
@@ -66,10 +70,10 @@ pub fn parse(input: &str) -> Result<Pipeline, String> {
         return Err("expected a command".into());
     }
     commands.push(cur);
-    Ok(Pipeline { commands })
+    Ok(RawPipeline { commands })
 }
 
-fn expect_word(tok: Option<Token>, after: &str) -> Result<String, String> {
+fn expect_word(tok: Option<Token>, after: &str) -> Result<Word, String> {
     match tok {
         Some(Token::Word(w)) => Ok(w),
         _ => Err(format!("expected filename after '{after}'")),
@@ -79,12 +83,27 @@ fn expect_word(tok: Option<Token>, after: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::WordPart;
+
+    /// Collapse a word's parts into their raw text (ignoring quoting) so tests
+    /// can assert against plain strings.
+    fn text(word: &Word) -> String {
+        word.iter()
+            .map(|p| match p {
+                WordPart::Literal(s) | WordPart::Unquoted(s) | WordPart::Quoted(s) => s.as_str(),
+            })
+            .collect()
+    }
+
+    fn argv_text(cmd: &RawCommand) -> Vec<String> {
+        cmd.argv.iter().map(text).collect()
+    }
 
     #[test]
     fn single_command() {
         let p = parse("ls -la").unwrap();
         assert_eq!(p.commands.len(), 1);
-        assert_eq!(p.commands[0].argv, vec!["ls", "-la"]);
+        assert_eq!(argv_text(&p.commands[0]), vec!["ls", "-la"]);
     }
 
     #[test]
@@ -97,7 +116,7 @@ mod tests {
     fn captures_redirects() {
         let p = parse("sort < in.txt >> out.txt").unwrap();
         let c = &p.commands[0];
-        assert_eq!(c.argv, vec!["sort"]);
+        assert_eq!(argv_text(c), vec!["sort"]);
         assert_eq!(c.redirects.len(), 2);
     }
 

@@ -55,21 +55,23 @@ flowchart LR
 
 ## 2. The processing pipeline
 
-Every non-empty line travels through four transformations. Each stage has a
-narrow contract and surfaces errors as a `Result`, which `main` reports without
-crashing the shell.
+Every non-empty line travels through a small chain of transformations. Each
+stage has a narrow contract and surfaces errors as a `Result`, which `main`
+reports without crashing the shell.
 
 ```mermaid
 flowchart TD
-    A["Raw line<br/><code>ls | grep rs &gt; out.txt</code>"]
-    B["Tokens<br/><code>[Word(ls), Pipe, Word(grep), Word(rs), Great, Word(out.txt)]</code>"]
-    C["Pipeline (AST)<br/>2 Commands, 1 redirect"]
+    A["Raw line<br/><code>echo $HOME | wc -c</code>"]
+    B["Tokens<br/>words carry quoting as WordParts"]
+    C["RawPipeline (AST)<br/>unexpanded words"]
+    F["Pipeline<br/>concrete argv + redirects"]
     D["Spawned processes<br/>+ wired fds"]
     E["Exit / output"]
 
     A -->|"lexer::lex"| B
     B -->|"parser::parse"| C
-    C -->|"exec::run_pipeline"| D
+    C -->|"expand::expand"| F
+    F -->|"exec::run_pipeline"| D
     D --> E
 
     A -.->|"empty line → skipped in main"| E
@@ -77,10 +79,16 @@ flowchart TD
 
 | Stage | Function | Input | Output | Fails on |
 |---|---|---|---|---|
-| Lex | `lexer::lex` | `&str` | `Vec<Token>` | unterminated `"` |
-| Parse | `parser::parse` | `&str` | `Pipeline` | dangling `\|`, missing redirect target, empty command |
+| Lex | `lexer::lex` | `&str` | `Vec<Token>` | unterminated `"`, unterminated `$(` |
+| Parse | `parser::parse` | `&str` | `RawPipeline` | dangling `\|`, missing redirect target, empty command |
+| Expand | `expand::expand` | `RawPipeline` | `Pipeline` | unterminated `${`/`$(`, sub-command parse error |
 | Execute | `exec::run_pipeline` | `&Pipeline` | `()` | spawn failure, missing redirect file |
 | Builtin | `builtins::try_run` | `&[String]` | `Option<i32>` | — (errors printed inline) |
+
+Expansion sits deliberately between parse and exec: the parser preserves each
+word's quoting (single-quoted text is literal, double-quoted and bare text may
+expand), and the expansion stage resolves `~`, `$VAR`/`${VAR}`, and `$(...)`
+against the environment and sub-shells before any process is spawned.
 
 ---
 
@@ -97,27 +105,46 @@ Owns the read-eval-print loop and all I/O concerns:
 
 ### `lexer.rs` — tokenizer
 A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
-`Vec<Token>` and resolves all quoting so the parser never re-scans characters:
-- **Single quotes** (`'…'`): everything literal until the closing quote.
-- **Double quotes** (`"…"`): group words; backslash escapes `"` and `\`.
-- **Backslash** outside quotes: escapes the next character.
+`Vec<Token>`, stripping quote *characters* but **preserving quote context** as
+`WordPart`s so the expansion stage knows what may expand:
+- **Single quotes** (`'…'`) and **backslash** escapes become `Literal` parts —
+  never expanded.
+- **Double quotes** (`"…"`) become `Quoted` parts; backslash escapes `"`, `\`,
+  and `$`.
+- Bare text becomes `Unquoted` parts (eligible for `~`, `$`, and later glob).
+- A `$(...)` substitution is swallowed whole — balanced parens, quotes and all —
+  so inner spaces and `|` don't split the word.
 - Operators `|`, `<`, `>`, `>>` become distinct tokens; `>>` is detected by
   peeking after `>`.
-- An unterminated double quote is the one lexer error.
+- Lexer errors: an unterminated double quote or an unterminated `$(`.
 
 ### `parser.rs` — grammar
-Consumes tokens into a `Pipeline`. The grammar (v0):
+Consumes tokens into a `RawPipeline` (words still unexpanded). The grammar (v0):
 ```
 pipeline := command ( '|' command )*
 command  := word+ redirection*
 redirect := ('<' | '>' | '>>') word
 ```
-- `Word` tokens append to the current command's `argv`.
+- `Word` tokens append to the current command's `argv` (each a `Vec<WordPart>`).
 - `Pipe` finalizes the current command (erroring if it's empty) and starts a new
   one via `std::mem::replace`.
 - Redirect operators consume the following word as a filename (`expect_word`),
   erroring if it isn't a word.
 - A trailing empty command (e.g. `ls |`) is rejected.
+
+### `expand.rs` — expansion
+Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
+- **Tilde:** a leading `~` on the first, unquoted part of a word becomes `$HOME`
+  (falling back to `$USERPROFILE`); `~user` is left untouched.
+- **Variables:** `$VAR` and `${VAR}` read the environment; unset → empty.
+- **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
+  text and runs it via `exec::capture`, inlining stdout with trailing newlines
+  trimmed.
+- **Quoting:** `Literal` parts pass through verbatim; `Quoted`/`Unquoted` parts
+  are scanned for `$`. A word that is entirely unquoted and expands to empty
+  (e.g. `$UNSET`) drops out, mirroring shell field-splitting; a quoted empty
+  (`""`) is kept. Word-splitting and globbing of results are *not* done yet, so
+  one word yields one argument.
 
 ### `exec.rs` — runtime
 Turns a `Pipeline` into running processes:
@@ -128,6 +155,8 @@ Turns a `Pipeline` into running processes:
 - Redirection rules per stage: an explicit `< file` / `> file` / `>> file`
   **wins** over pipe wiring; otherwise non-final stages get a piped stdout and
   the final stage inherits the terminal.
+- `capture` runs the same wiring but pipes the final stage's stdout into a
+  string — the engine behind `$(...)`.
 - After spawning all stages, it waits on each child and reports a non-zero exit
   status of the last stage (non-fatal — the shell keeps running).
 
@@ -144,11 +173,35 @@ child's directory and die with it, leaving the shell where it was.
 
 ## 4. Data model
 
-The parser output is a small, owned AST. There is no borrowing from the input
-string — every word is a `String` — which keeps lifetimes simple at v0 scale.
+The data model is a small, owned AST in two layers: the parser's **raw** form,
+where words keep their quoting (`Vec<WordPart>`), and exec's **resolved** form,
+where every word is a concrete `String`. The expansion stage maps the first onto
+the second. There is no borrowing from the input string, which keeps lifetimes
+simple at v0 scale.
 
 ```mermaid
 classDiagram
+    class Token {
+        <<enum>>
+        Word(Vec~WordPart~)
+        Pipe
+        Less
+        Great
+        DGreat
+    }
+    class WordPart {
+        <<enum>>
+        Literal(String)
+        Unquoted(String)
+        Quoted(String)
+    }
+    class RawPipeline {
+        +Vec~RawCommand~ commands
+    }
+    class RawCommand {
+        +Vec~Word~ argv
+        +Vec~RawRedirect~ redirects
+    }
     class Pipeline {
         +Vec~Command~ commands
     }
@@ -161,18 +214,13 @@ classDiagram
         Stdin(String)
         Stdout(file, append)
     }
-    class Token {
-        <<enum>>
-        Word(String)
-        Pipe
-        Less
-        Great
-        DGreat
-    }
 
+    Token *-- WordPart
+    RawPipeline "1" *-- "1..*" RawCommand
     Pipeline "1" *-- "1..*" Command
     Command "1" *-- "0..*" Redirect
-    Token ..> Command : parsed into
+    Token ..> RawCommand : parsed into
+    RawPipeline ..> Pipeline : expand::expand
 ```
 
 A `Pipeline` always has at least one `Command` (the parser guarantees this).
@@ -282,7 +330,7 @@ Ordered roughly by dependency and effort:
 ```mermaid
 flowchart LR
     v0["v0 ✅<br/>REPL · lex · parse<br/>pipes · redirects · builtins"]
-    e1["Expansion<br/>$VAR · ~ · $(...)"]
+    e1["Expansion ✅<br/>$VAR · ~ · $(...)"]
     e2["Globbing<br/>* · ? · [..]"]
     e3["Operators<br/>&amp;&amp; · || · ;"]
     e4["Job control<br/>pgrps · Ctrl-Z · fg/bg · signals"]
@@ -292,12 +340,13 @@ flowchart LR
     classDef done fill:#064e3b,stroke:#34d399,color:#d1fae5;
     classDef todo fill:#1f2937,stroke:#60a5fa,color:#e5e7eb;
     class v0 done;
-    class e1,e2,e3,e4 todo;
+    class e1 done;
+    class e2,e3,e4 todo;
 ```
 
 | Milestone | Touches | Notes |
 |---|---|---|
-| Variable & tilde expansion | new expansion stage between parse and exec | `$VAR`, `${VAR}`, `~`, command substitution `$(...)` |
+| Variable & tilde expansion | ✅ `expand.rs`, between parse and exec | `$VAR`, `${VAR}`, `~`, command substitution `$(...)`; no word-splitting yet |
 | Globbing | expansion stage | expand `*`, `?`, `[…]` against the filesystem |
 | Control operators | lexer + parser + a new AST node | `&&`, `\|\|`, `;` sequence/short-circuit |
 | Job control | exec rewrite on `nix` | process groups, terminal control, `Ctrl-Z`/`fg`/`bg`, signal forwarding — the headline feature for daily use |

@@ -3,13 +3,15 @@
 //! v0 scope: a REPL with persistent history, pipelines (`|`), redirections
 //! (`>`, `>>`, `<`), and the builtins that must run in-process (`cd`, `exit`,
 //! `pwd`). Quoting is handled by a small hand-written lexer so that
-//! `echo "hello world"` is one argument.
+//! `echo "hello world"` is one argument. An expansion stage resolves `$VAR`,
+//! `~`, and `$(...)` before a command runs.
 //!
-//! Not yet here (see the roadmap): variable expansion, globbing, `&&`/`||`,
-//! background jobs, and signal/job control. Those come next.
+//! Not yet here (see the roadmap): globbing, `&&`/`||`, background jobs, and
+//! signal/job control. Those come next.
 
 mod builtins;
 mod exec;
+mod expand;
 mod lexer;
 mod parser;
 
@@ -48,13 +50,13 @@ fn main() -> rustyline::Result<()> {
                 }
                 rl.add_history_entry(line)?;
 
-                match parser::parse(line) {
+                match parser::parse(line).and_then(expand::expand) {
                     Ok(pipeline) => {
                         if let Err(e) = exec::run_pipeline(&pipeline) {
                             eprintln!("rush: {e}");
                         }
                     }
-                    Err(e) => eprintln!("rush: parse error: {e}"),
+                    Err(e) => eprintln!("rush: {e}"),
                 }
             }
             // Ctrl-C: abandon the current line, keep the shell alive.

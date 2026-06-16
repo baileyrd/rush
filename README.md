@@ -2,10 +2,11 @@
 
 A small, bash-compatible shell written in Rust — built to grow into a daily-use tool.
 
-`rush` reads a command line, lexes and parses it, then executes the resulting
-pipeline. The current version (`v0`) supports interactive editing with
-persistent history, pipelines, file redirection, and the handful of builtins
-that must run inside the shell process.
+`rush` reads a command line, lexes and parses it, expands it, then executes the
+resulting pipeline. The current version (`v0`) supports interactive editing with
+persistent history, pipelines, file redirection, the handful of builtins that
+must run inside the shell process, and expansion of variables, `~`, and
+command substitution.
 
 ```
 /home/baileyrd/projects/rust_bash $ ls | grep rs | wc -l
@@ -13,6 +14,8 @@ that must run inside the shell process.
 /home/baileyrd/projects/rust_bash $ echo "hello world" > out.txt
 /home/baileyrd/projects/rust_bash $ sort < out.txt
 hello world
+/home/baileyrd/projects/rust_bash $ echo "home is $HOME, here is $(pwd)"
+home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 ```
 
 ## Features
@@ -26,7 +29,7 @@ hello world
 | Redirection (`>`, `>>`, `<`) | ✅ | truncate, append, input |
 | Builtins | ✅ | `cd`, `pwd`, `exit` |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
-| Variable expansion (`$VAR`, `~`, `$(...)`) | ⬜ | planned |
+| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, tilde, command substitution (no word-splitting yet) |
 | Globbing (`*`, `?`) | ⬜ | planned |
 | Operators (`&&`, `\|\|`, `;`) | ⬜ | planned |
 | Job control (Ctrl-Z, `fg`/`bg`, signals) | ⬜ | planned (the big one) |
@@ -66,9 +69,10 @@ data-flow diagrams, module reference, and roadmap.
 
 ```
 src/
-  main.rs       REPL: read → parse → execute loop, history, prompt
-  lexer.rs      tokenizer: input string → Vec<Token>
-  parser.rs     grammar: Vec<Token> → Pipeline of Commands
+  main.rs       REPL: read → parse → expand → execute loop, history, prompt
+  lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
+  parser.rs     grammar: Vec<Token> → RawPipeline of unexpanded Commands
+  expand.rs     expansion: $VAR, ~, $(...) → concrete Pipeline
   exec.rs       runtime: spawn processes, wire pipes & redirects
   builtins.rs   in-process commands: cd, pwd, exit
 ```

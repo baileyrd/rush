@@ -1,5 +1,7 @@
 # rush
 
+[![CI](https://github.com/baileyrd/rush/actions/workflows/ci.yml/badge.svg)](https://github.com/baileyrd/rush/actions/workflows/ci.yml)
+
 A small, bash-compatible shell written in Rust — built to grow into a daily-use tool.
 
 `rush` reads a command line, lexes and parses it, expands it, then executes the

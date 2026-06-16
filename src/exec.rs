@@ -165,6 +165,22 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
             Ok(0)
         }
         Compound::Group(list) => exec_list(list),
+        Compound::Subshell(list) => {
+            // A real subshell forks; we approximate by isolating the state that
+            // commands usually mutate — the working directory and variables — so
+            // `(cd x; …)` and `(VAR=…; …)` don't leak out. (`exit` inside still
+            // exits the whole shell — a known limitation of not forking.)
+            let saved_cwd = std::env::current_dir().ok();
+            let saved_vars = crate::vars::snapshot();
+
+            let result = exec_list(list);
+
+            if let Some(dir) = saved_cwd {
+                let _ = std::env::set_current_dir(dir);
+            }
+            crate::vars::restore(saved_vars);
+            result
+        }
         Compound::FuncDef { name, body } => {
             crate::func::define(name, body.clone());
             Ok(0)

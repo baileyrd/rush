@@ -114,6 +114,8 @@ pub enum Compound {
     },
     /// A brace group `{ list; }` — runs the list in the current shell.
     Group(CommandList),
+    /// A subshell `( list )` — runs the list with isolated cwd and variables.
+    Subshell(CommandList),
     /// A function definition `name() { list; }`.
     FuncDef { name: String, body: CommandList },
 }
@@ -196,8 +198,8 @@ impl Parser {
     /// A list ends at end of input or a reserved word that closes a construct
     /// (`then`, `fi`, `do`, …) — anything that isn't a command starter.
     fn at_list_end(&self) -> bool {
-        // `;;` closes a `case` item's body.
-        if matches!(self.peek(), Some(Token::DSemi)) {
+        // `;;` closes a `case` item's body; `)` closes a subshell.
+        if matches!(self.peek(), Some(Token::DSemi | Token::RParen)) {
             return true;
         }
         match self.peek_keyword() {
@@ -254,6 +256,10 @@ impl Parser {
         if self.is_funcdef_ahead() {
             return self.parse_funcdef();
         }
+        // A bare `(` starts a subshell.
+        if matches!(self.peek(), Some(Token::LParen)) {
+            return self.parse_subshell();
+        }
         match self.peek_keyword() {
             Some("if") => self.parse_if(),
             Some("while") => self.parse_loop(false),
@@ -287,6 +293,17 @@ impl Parser {
     fn parse_group(&mut self) -> Result<RawCommand, ParseError> {
         let list = self.parse_brace_body()?;
         Ok(RawCommand::Compound(Box::new(Compound::Group(list))))
+    }
+
+    fn parse_subshell(&mut self) -> Result<RawCommand, ParseError> {
+        self.pos += 1; // `(`
+        let list = self.parse_list()?;
+        match self.peek() {
+            Some(Token::RParen) => self.pos += 1,
+            None => return Err(ParseError::Incomplete),
+            _ => return Err(ParseError::Syntax("expected `)`".into())),
+        }
+        Ok(RawCommand::Compound(Box::new(Compound::Subshell(list))))
     }
 
     /// Parse `{ list; }`.
@@ -728,6 +745,15 @@ mod tests {
             first_cmd(&parse_ok("case x in\n  y) ;;\n  *) echo z ;;\nesac")),
             RawCommand::Compound(_)
         ));
+    }
+
+    #[test]
+    fn subshell() {
+        match first_cmd(&parse_ok("(cd x; ls)")) {
+            RawCommand::Compound(c) => assert!(matches!(c.as_ref(), Compound::Subshell(_))),
+            _ => panic!("expected subshell"),
+        }
+        assert!(matches!(parse("(echo hi"), Err(ParseError::Incomplete)));
     }
 
     #[test]

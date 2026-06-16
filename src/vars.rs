@@ -136,6 +136,28 @@ pub fn export(name: &str) {
     });
 }
 
+/// A snapshot of all variables, for isolating a subshell.
+pub type Snapshot = Vec<(String, String, bool)>;
+
+pub fn snapshot() -> Snapshot {
+    VARS.with(|v| {
+        v.borrow()
+            .iter()
+            .map(|(k, x)| (k.clone(), x.value.clone(), x.exported))
+            .collect()
+    })
+}
+
+pub fn restore(snap: Snapshot) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        m.clear();
+        for (name, value, exported) in snap {
+            m.insert(name, Var { value, exported });
+        }
+    });
+}
+
 /// Every exported variable as `(name, value)`, for seeding child environments.
 pub fn exported() -> Vec<(String, String)> {
     VARS.with(|v| {

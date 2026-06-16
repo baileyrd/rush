@@ -160,6 +160,7 @@ redirect := ('<' | '>' | '>>') word
 
 case_clause := 'case' word 'in' ( '('? pattern ('|' pattern)* ')' list ';;' )* 'esac'
 group       := '{' list '}'
+subshell    := '(' list ')'
 funcdef     := NAME '(' ')' group
 ```
 `{` and `}` are reserved words recognised in command position (so a literal
@@ -360,6 +361,7 @@ classDiagram
         For(var, words, body)
         Case(word, items)
         Group(list)
+        Subshell(list)
         FuncDef(name, body)
     }
     class Pipeline {
@@ -538,5 +540,5 @@ more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
 
 With `test`/`[`, `$((…))`, and control flow, real scripts work — e.g. a
 counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`, and recursive functions.
-Natural next steps: `( subshells )`, command substitution / backgrounding of
-compound commands, here-documents (`<<`), `2>`/`2>&1` redirection, and `kill %n`.
+Natural next steps: command substitution / backgrounding of compound commands,
+here-documents (`<<`), and `kill %n`.

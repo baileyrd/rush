@@ -138,11 +138,14 @@ fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
                             }
                         }
                     }
-                    // Keep `$(...)` whole so an inner `"` can't close us early.
+                    // Keep `$(...)`/`${...}` whole so an inner `"` or space
+                    // can't tear them apart.
                     if qc == '$' {
                         s.push('$');
-                        if chars.peek() == Some(&'(') {
-                            consume_balanced_paren(chars, &mut s)?;
+                        match chars.peek() {
+                            Some(&'(') => consume_balanced_paren(chars, &mut s)?,
+                            Some(&'{') => consume_balanced_brace(chars, &mut s)?,
+                            _ => {}
                         }
                         continue;
                     }
@@ -162,11 +165,13 @@ fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
             Some(&'$') => {
                 chars.next();
                 let mut s = String::from("$");
-                // `$(...)` may contain spaces and operators; swallow it whole so
-                // word-splitting doesn't tear it apart. A plain `$VAR` falls
-                // through to ordinary char accumulation below.
-                if chars.peek() == Some(&'(') {
-                    consume_balanced_paren(chars, &mut s)?;
+                // `$(...)` and `${...}` may contain spaces and operators; swallow
+                // them whole so word-splitting doesn't tear them apart. A plain
+                // `$VAR` falls through to ordinary char accumulation below.
+                match chars.peek() {
+                    Some(&'(') => consume_balanced_paren(chars, &mut s)?,
+                    Some(&'{') => consume_balanced_brace(chars, &mut s)?,
+                    _ => {}
                 }
                 push_unquoted(&mut parts, &s);
             }
@@ -213,6 +218,39 @@ fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Resu
     }
 
     Err("unterminated `$(`".into())
+}
+
+/// Append a balanced `{...}` region (including the braces) to `out`, starting at
+/// the opening `{` under the cursor — used to keep `${...}` whole.
+fn consume_balanced_brace(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), String> {
+    chars.next(); // opening '{'
+    out.push('{');
+    let mut depth = 1usize;
+    let mut quote: Option<char> = None;
+
+    for c in chars.by_ref() {
+        out.push(c);
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    Err("unterminated `${`".into())
 }
 
 fn push_unquoted(parts: &mut Word, t: &str) {
@@ -274,6 +312,14 @@ mod tests {
         assert_eq!(
             lex("$HOME").unwrap(),
             vec![Token::Word(vec![WordPart::Unquoted("$HOME".into())])]
+        );
+    }
+
+    #[test]
+    fn brace_expansion_with_spaces_is_one_word() {
+        assert_eq!(
+            lex("${x:-a b c}").unwrap(),
+            vec![Token::Word(vec![WordPart::Unquoted("${x:-a b c}".into())])]
         );
     }
 

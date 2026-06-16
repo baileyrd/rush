@@ -260,19 +260,25 @@ fn expand_dollars(text: &str) -> Result<String, String> {
             }
             Some('{') => {
                 chars.next(); // consume '{'
-                let mut name = String::new();
+                let mut inner = String::new();
+                let mut depth = 1usize;
                 let mut closed = false;
-                for nc in chars.by_ref() {
-                    if nc == '}' {
-                        closed = true;
-                        break;
+                while let Some(c) = chars.next() {
+                    if c == '{' {
+                        depth += 1;
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            closed = true;
+                            break;
+                        }
                     }
-                    name.push(nc);
+                    inner.push(c);
                 }
                 if !closed {
                     return Err("unterminated `${`".into());
                 }
-                out.push_str(&var_lookup(&name));
+                out.push_str(&expand_braced(&inner)?);
             }
             Some(&c2) if c2 == '_' || c2.is_ascii_alphabetic() => {
                 let mut name = String::new();
@@ -333,11 +339,87 @@ fn command_substitute(src: &str) -> Result<String, String> {
     crate::exec::capture_list(&list)
 }
 
-/// Shell variables shadow the environment; unknown names expand to empty.
+/// A variable's value, or `None` if unset — shell variables shadow the
+/// environment.
+fn var_raw(name: &str) -> Option<String> {
+    crate::vars::get(name).or_else(|| std::env::var(name).ok())
+}
+
+/// As [`var_raw`], but an unset variable expands to empty.
 fn var_lookup(name: &str) -> String {
-    crate::vars::get(name)
-        .or_else(|| std::env::var(name).ok())
-        .unwrap_or_default()
+    var_raw(name).unwrap_or_default()
+}
+
+fn is_valid_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Expand the inside of a `${...}`: a plain name, `${#name}` (length), or one of
+/// the default/alternate operators `:-` `-` `:=` `=` `:+` `+` `:?` `?`. With a
+/// colon the test is "unset *or* empty"; without, just "unset".
+fn expand_braced(inner: &str) -> Result<String, String> {
+    if let Some(name) = inner.strip_prefix('#') {
+        if !is_valid_name(name) {
+            return Err(format!("${{{inner}}}: bad substitution"));
+        }
+        return Ok(var_lookup(name).chars().count().to_string());
+    }
+
+    let name_end = inner
+        .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+        .unwrap_or(inner.len());
+    let name = &inner[..name_end];
+    let rest = &inner[name_end..];
+
+    if !is_valid_name(name) {
+        return Err(format!("${{{inner}}}: bad substitution"));
+    }
+    if rest.is_empty() {
+        return Ok(var_lookup(name));
+    }
+
+    let colon = rest.starts_with(':');
+    let ops = if colon { &rest[1..] } else { rest };
+    let op = ops.chars().next();
+    let word = expand_dollars(&ops[op.map_or(0, char::len_utf8)..])?;
+
+    let value = var_raw(name);
+    let use_word = match &value {
+        None => true,
+        Some(v) => colon && v.is_empty(),
+    };
+
+    match op {
+        // `:-` / `-`: substitute the word when unset (or empty).
+        Some('-') => Ok(if use_word { word } else { value.unwrap() }),
+        // `:=` / `=`: also assign the word back to the variable.
+        Some('=') => {
+            if use_word {
+                crate::vars::set(name, &word);
+                Ok(word)
+            } else {
+                Ok(value.unwrap())
+            }
+        }
+        // `:+` / `+`: substitute the word only when set (and non-empty).
+        Some('+') => Ok(if use_word { String::new() } else { word }),
+        // `:?` / `?`: error out when unset (or empty).
+        Some('?') => {
+            if use_word {
+                let msg = if word.is_empty() {
+                    format!("{name}: parameter null or not set")
+                } else {
+                    word
+                };
+                Err(msg)
+            } else {
+                Ok(value.unwrap())
+            }
+        }
+        _ => Err(format!("${{{inner}}}: bad substitution")),
+    }
 }
 
 fn home_dir() -> Option<String> {
@@ -459,6 +541,40 @@ mod tests {
     fn shell_var_shadows_env() {
         crate::vars::set("RUSH_SHADOW", "shellval");
         assert_eq!(one("echo $RUSH_SHADOW"), vec!["echo", "shellval"]);
+    }
+
+    #[test]
+    fn braced_default_and_alternate() {
+        crate::vars::unset("RUSH_D");
+        // :- substitutes a default for unset/empty (default may have spaces).
+        assert_eq!(one("echo ${RUSH_D:-fallback}"), vec!["echo", "fallback"]);
+        assert_eq!(one("echo \"${RUSH_D:-a b}\""), vec!["echo", "a b"]);
+
+        crate::vars::set("RUSH_D", "set");
+        assert_eq!(one("echo ${RUSH_D:-fallback}"), vec!["echo", "set"]);
+        // :+ is the mirror: word only when set.
+        assert_eq!(one("echo ${RUSH_D:+yes}"), vec!["echo", "yes"]);
+        crate::vars::set("RUSH_D", "");
+        assert_eq!(one("echo ${RUSH_D:+yes}"), vec!["echo"]); // empty → dropped
+    }
+
+    #[test]
+    fn braced_assign_default_and_length() {
+        crate::vars::unset("RUSH_A");
+        // := assigns the default back to the variable...
+        assert_eq!(one("echo ${RUSH_A:=created}"), vec!["echo", "created"]);
+        // ...so a later reference sees it.
+        assert_eq!(one("echo $RUSH_A"), vec!["echo", "created"]);
+        // ${#name} is the length.
+        assert_eq!(one("echo ${#RUSH_A}"), vec!["echo", "7"]);
+    }
+
+    #[test]
+    fn braced_error_when_unset() {
+        crate::vars::unset("RUSH_Q");
+        let list = parser::parse("echo ${RUSH_Q:?missing}").unwrap();
+        let err = expand(&list.jobs[0].list.first).unwrap_err();
+        assert!(err.contains("missing"));
     }
 
     // Globbing tests run from the crate root against stable repo fixtures.

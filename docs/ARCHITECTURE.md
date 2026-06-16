@@ -163,9 +163,12 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
   (falling back to `$USERPROFILE`); `~user` is left untouched.
 - **Variables:** `$VAR` and `${VAR}` resolve to a shell variable (`vars`) if set,
   else the environment, else empty. `$?` expands to the last pipeline's exit
-  status. Leading `NAME=value` words on a command are split off as assignments
-  (`expand_command`): with no program word they set shell variables, otherwise
-  they seed that command's environment (alongside exported variables).
+  status. `${...}` also supports the default/alternate operators `:-` `-` `:=`
+  `=` `:+` `+` `:?` `?` (a colon also treats *empty* as unset) and `${#name}`
+  for length (`expand_braced`). Leading `NAME=value` words on a command are
+  split off as assignments (`expand_command`): with no program word they set
+  shell variables, otherwise they seed that command's environment (alongside
+  exported variables).
 - **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
   text and runs it via `exec::capture`, inlining stdout with trailing newlines
   trimmed.

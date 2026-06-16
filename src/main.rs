@@ -17,6 +17,7 @@ mod glob;
 mod job;
 mod lexer;
 mod parser;
+mod vars;
 
 use std::path::PathBuf;
 

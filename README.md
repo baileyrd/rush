@@ -30,9 +30,9 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`) | ✅ | truncate, append, input |
-| Builtins | ✅ | `cd`, `pwd`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
-| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, tilde, command substitution (no word-splitting yet) |
+| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, tilde, command substitution (no word-splitting yet) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
@@ -89,6 +89,7 @@ src/
   parser.rs     grammar: Vec<Token> → CommandList (pipelines + &&/||/; )
   expand.rs     expansion: $VAR, ~, $(...), globs → concrete Pipeline
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
+  vars.rs       shell state that outlives a command: $? (last exit status)
   exec.rs       runtime: sequence the list, spawn processes, wire pipes & redirects
   job.rs        Unix job control: process groups, terminal, signals, fg/bg/jobs
   builtins.rs   in-process commands: cd, pwd, exit (+ jobs/fg/bg on Unix)

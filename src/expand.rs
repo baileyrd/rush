@@ -164,6 +164,11 @@ fn expand_dollars(text: &str) -> Result<String, String> {
                 // that precedes them on Windows).
                 out.push_str(output.trim_end_matches(['\n', '\r']));
             }
+            // `$?` — the last pipeline's exit status.
+            Some('?') => {
+                chars.next();
+                out.push_str(&crate::vars::last_status().to_string());
+            }
             Some('{') => {
                 chars.next(); // consume '{'
                 let mut name = String::new();
@@ -295,6 +300,14 @@ mod tests {
     fn lone_dollar_is_literal() {
         assert_eq!(one("echo $"), vec!["echo", "$"]);
         assert_eq!(one("echo a$ b"), vec!["echo", "a$", "b"]);
+    }
+
+    #[test]
+    fn last_status_expands() {
+        crate::vars::set_last_status(42);
+        assert_eq!(one("echo $?"), vec!["echo", "42"]);
+        crate::vars::set_last_status(0);
+        assert_eq!(one("echo code=$?"), vec!["echo", "code=0"]);
     }
 
     // Globbing tests run from the crate root against stable repo fixtures.

@@ -160,7 +160,8 @@ redirect := ('<' | '>' | '>>') word
 Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Tilde:** a leading `~` on the first, unquoted part of a word becomes `$HOME`
   (falling back to `$USERPROFILE`); `~user` is left untouched.
-- **Variables:** `$VAR` and `${VAR}` read the environment; unset → empty.
+- **Variables:** `$VAR` and `${VAR}` read the environment; unset → empty. `$?`
+  expands to the last pipeline's exit status (tracked in `vars`).
 - **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
   text and runs it via `exec::capture`, inlining stdout with trailing newlines
   trimmed.
@@ -224,6 +225,7 @@ crate, following the classic glibc job-control structure:
 `try_run` returns `Some(code)` if `argv[0]` is a builtin, else `None`:
 - `cd [dir]` — changes the shell's own working directory (no arg → `$HOME`).
 - `pwd` — prints the current directory.
+- `echo [-n] [args…]` — joins args with spaces (no `-e` escapes).
 - `exit [code]` — terminates the process (diverges; defaults to `0`).
 - On Unix, `jobs`/`fg`/`bg` are dispatched to `job::builtin`.
 

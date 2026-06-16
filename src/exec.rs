@@ -59,6 +59,7 @@ fn run_job(job: &Job) -> Result<i32, String> {
         }
         let pipeline = crate::expand::expand(&job.list.first)?;
         run_background(&pipeline)?;
+        crate::vars::set_last_status(0);
         Ok(0)
     } else {
         run_andor(&job.list)
@@ -66,10 +67,14 @@ fn run_job(job: &Job) -> Result<i32, String> {
 }
 
 fn run_andor(list: &AndOrList) -> Result<i32, String> {
+    // Update `$?` after every pipeline, so a later one in the same line can read
+    // it (e.g. `false || echo $?`).
     let mut status = run_foreground(&list.first)?;
+    crate::vars::set_last_status(status);
     for (connector, raw) in &list.rest {
         if should_run(*connector, status) {
             status = run_foreground(raw)?;
+            crate::vars::set_last_status(status);
         }
     }
     Ok(status)

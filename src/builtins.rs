@@ -12,9 +12,30 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
     match argv.first().map(String::as_str)? {
         "cd" => Some(cd(argv)),
         "pwd" => Some(pwd()),
+        "echo" => Some(echo(argv)),
         "exit" => exit(argv), // diverges on success
         _ => other_builtin(argv),
     }
+}
+
+/// `echo [-n] [args...]` — join args with spaces; `-n` suppresses the newline.
+/// (No `-e` escape processing, matching the bash default.)
+fn echo(argv: &[String]) -> i32 {
+    let mut args = &argv[1..];
+    let newline = !matches!(args.first(), Some(flag) if flag == "-n");
+    if !newline {
+        args = &args[1..];
+    }
+
+    let line = args.join(" ");
+    if newline {
+        println!("{line}");
+    } else {
+        use std::io::Write;
+        print!("{line}");
+        let _ = std::io::stdout().flush();
+    }
+    0
 }
 
 /// Platform-specific builtins. On Unix this is where `jobs`/`fg`/`bg` live.

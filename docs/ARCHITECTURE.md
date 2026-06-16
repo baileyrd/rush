@@ -168,16 +168,18 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
   text and runs it via `exec::capture`, inlining stdout with trailing newlines
   trimmed.
-- **Globbing:** each word is also assembled as a glob *pattern* in lock-step
-  with its plain text, escaping metacharacters that came from quoted/literal
-  parts so only unquoted `*?[` stay active. If the pattern matches files
-  (via `glob::glob`), the sorted matches replace the word; otherwise the
-  literal text is kept (POSIX no-match).
-- **Quoting / emptiness:** `Literal` parts pass through verbatim; `Quoted`/
-  `Unquoted` parts are scanned for `$`. A word that is entirely unquoted and
-  expands to empty (e.g. `$UNSET`) drops out, mirroring shell field-splitting;
-  a quoted empty (`""`) is kept. Whitespace word-splitting of results is *not*
-  done yet.
+- **Word-splitting:** whitespace inside an *unquoted* expansion splits the word
+  into fields (`x="a b"; echo $x` → two args). A `Splitter` assembles the word's
+  parts into fields: quoted/literal text is added unsplit, unquoted-expansion
+  text splits on whitespace runs. Because the lexer already split on literal
+  whitespace, any whitespace left in an unquoted part must have come from an
+  expansion — so this needs no IFS bookkeeping.
+- **Globbing:** each field carries a glob *pattern* alongside its plain text,
+  escaping metacharacters from quoted/literal parts so only unquoted `*?[` stay
+  active. A field that matches files (via `glob::glob`) is replaced by the
+  sorted matches; otherwise its literal text is kept (POSIX no-match).
+- **Emptiness:** a field that is entirely unquoted and empty (e.g. `$UNSET`)
+  drops out, mirroring shell field-splitting; a quoted empty (`""`) is kept.
 
 ### `glob.rs` — filename matching
 A from-scratch globber, no external crate:

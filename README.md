@@ -33,7 +33,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
-| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, tilde, command substitution (no word-splitting yet) |
+| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, tilde, command substitution; unquoted results word-split on whitespace |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |

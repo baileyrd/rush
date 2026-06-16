@@ -87,56 +87,109 @@ fn assignment_split(word: &Word) -> Option<(String, Word)> {
 
 /// Expand a word destined for `argv`, possibly into several arguments.
 ///
-/// Builds two views of the word in lock-step: `plain` (the literal text) and
-/// `pattern` (the same, but with metacharacters from quoted/literal parts
-/// backslash-escaped, so only unquoted `*?[` stay active). If the pattern has
-/// active metacharacters and matches files, the matches replace the word;
-/// otherwise the literal `plain` is used.
+/// Whitespace inside an *unquoted* expansion splits the word into fields
+/// (`x="a b"; echo $x` → two args) — and since the lexer already split on
+/// literal whitespace, any whitespace left in an unquoted part can only have
+/// come from a `$`/`$(…)` expansion. Quoted and literal text never split.
 ///
-/// An entirely unquoted word that expands to nothing — e.g. `$UNSET` — yields
-/// no arguments, mirroring shell field-splitting. A quoted empty (`""`) is kept.
+/// Each field is also a glob pattern: metacharacters from quoted/literal text
+/// are escaped, so only unquoted `*?[` are active. A field that matches files is
+/// replaced by the sorted matches; otherwise its literal text is used. A field
+/// that is entirely unquoted and empty (e.g. `$UNSET`) drops out; a quoted empty
+/// (`""`) is kept.
 fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
-    let mut plain = String::new();
-    let mut pattern = String::new();
-    let mut quoted = false;
-    let mut globbable = false;
+    let mut sp = Splitter::default();
 
     for (i, part) in word.iter().enumerate() {
         match part {
-            WordPart::Literal(s) => {
-                quoted = true;
-                plain.push_str(s);
-                escape_meta_into(&mut pattern, s);
-            }
-            WordPart::Quoted(s) => {
-                quoted = true;
-                let e = expand_dollars(s)?;
-                plain.push_str(&e);
-                escape_meta_into(&mut pattern, &e);
-            }
+            WordPart::Literal(s) => sp.add_unsplit(s),
+            WordPart::Quoted(s) => sp.add_unsplit(&expand_dollars(s)?),
             WordPart::Unquoted(s) => {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
-                let e = expand_dollars(&text)?;
-                plain.push_str(&e);
-                pattern.push_str(&e); // metacharacters stay active
-                if e.contains(['*', '?', '[']) {
-                    globbable = true;
+                sp.add_split(&expand_dollars(&text)?);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for field in sp.fields {
+        if field.globbable {
+            let matches = crate::glob::glob(&field.pattern);
+            if !matches.is_empty() {
+                out.extend(matches);
+                continue;
+            }
+        }
+        if field.plain.is_empty() && !field.quoted {
+            continue; // unquoted-empty field drops out
+        }
+        out.push(field.plain);
+    }
+    Ok(out)
+}
+
+/// One argument under construction: its literal text, its glob pattern (with
+/// non-active metacharacters escaped), and whether any of it was quoted or has
+/// active glob metacharacters.
+#[derive(Default)]
+struct Field {
+    plain: String,
+    pattern: String,
+    quoted: bool,
+    globbable: bool,
+}
+
+/// Assembles a word's parts into fields, splitting on whitespace from unquoted
+/// expansions.
+#[derive(Default)]
+struct Splitter {
+    fields: Vec<Field>,
+    /// A field boundary is pending: the next content starts a new field.
+    delim: bool,
+}
+
+impl Splitter {
+    /// The field currently accepting content, opening a new one if a boundary
+    /// is pending or none exists yet.
+    fn current(&mut self) -> &mut Field {
+        if self.delim || self.fields.is_empty() {
+            self.fields.push(Field::default());
+            self.delim = false;
+        }
+        self.fields.last_mut().unwrap()
+    }
+
+    /// Add quoted/literal text: never split, metacharacters escaped.
+    fn add_unsplit(&mut self, s: &str) {
+        let f = self.current();
+        f.plain.push_str(s);
+        escape_meta_into(&mut f.pattern, s);
+        f.quoted = true;
+    }
+
+    /// Add the result of an unquoted expansion: whitespace becomes field
+    /// boundaries, and metacharacters stay active for globbing.
+    fn add_split(&mut self, text: &str) {
+        let mut chars = text.chars().peekable();
+        while let Some(&c) = chars.peek() {
+            if c.is_whitespace() {
+                while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                    chars.next();
+                }
+                self.delim = true;
+            } else {
+                let mut chunk = String::new();
+                while matches!(chars.peek(), Some(c) if !c.is_whitespace()) {
+                    chunk.push(chars.next().unwrap());
+                }
+                let f = self.current();
+                f.plain.push_str(&chunk);
+                f.pattern.push_str(&chunk);
+                if chunk.contains(['*', '?', '[']) {
+                    f.globbable = true;
                 }
             }
         }
-    }
-
-    if globbable {
-        let matches = crate::glob::glob(&pattern);
-        if !matches.is_empty() {
-            return Ok(matches);
-        }
-    }
-
-    if plain.is_empty() && !quoted {
-        Ok(Vec::new())
-    } else {
-        Ok(vec![plain])
     }
 }
 
@@ -318,13 +371,13 @@ mod tests {
             std::env::remove_var("RUSH_UNSET");
         }
 
-        // $VAR and ${VAR}, kept as a single argument (no word-splitting yet).
-        assert_eq!(one("echo $RUSH_X"), vec!["echo", "hello world"]);
-        assert_eq!(one("echo ${RUSH_X}"), vec!["echo", "hello world"]);
-
-        // Single quotes are literal; double quotes still expand.
-        assert_eq!(one("echo '$RUSH_X'"), vec!["echo", "$RUSH_X"]);
+        // Unquoted $VAR / ${VAR} word-split on whitespace; quotes suppress that.
+        assert_eq!(one("echo $RUSH_X"), vec!["echo", "hello", "world"]);
+        assert_eq!(one("echo ${RUSH_X}"), vec!["echo", "hello", "world"]);
         assert_eq!(one("echo \"$RUSH_X\""), vec!["echo", "hello world"]);
+
+        // Single quotes are literal.
+        assert_eq!(one("echo '$RUSH_X'"), vec!["echo", "$RUSH_X"]);
 
         // Unset → empty. Bare empty drops out; quoted empty is kept.
         assert_eq!(one("echo $RUSH_UNSET done"), vec!["echo", "done"]);
@@ -335,8 +388,26 @@ mod tests {
         assert_eq!(one("echo ~/src"), vec!["echo", "/home/rush/src"]);
         assert_eq!(one("echo a~b"), vec!["echo", "a~b"]);
 
-        // Adjacency: literal + expansion in one word.
-        assert_eq!(one("echo pre$RUSH_X"), vec!["echo", "prehello world"]);
+        // Adjacency: a literal joins the first split field.
+        assert_eq!(one("echo pre$RUSH_X"), vec!["echo", "prehello", "world"]);
+    }
+
+    #[test]
+    fn word_splitting() {
+        crate::vars::set("RUSH_LIST", "a b c");
+        assert_eq!(one("echo $RUSH_LIST"), vec!["echo", "a", "b", "c"]);
+
+        // Leading/trailing and runs of whitespace collapse.
+        crate::vars::set("RUSH_PAD", "  x   y  ");
+        assert_eq!(one("echo $RUSH_PAD"), vec!["echo", "x", "y"]);
+
+        // A field that splits away to nothing leaves no argument.
+        crate::vars::set("RUSH_EMPTY", "");
+        assert_eq!(one("echo a$RUSH_EMPTY b"), vec!["echo", "a", "b"]);
+
+        // Command substitution splits the same way.
+        crate::vars::set("RUSH_CS", "one two");
+        assert_eq!(one("echo \"$RUSH_CS\""), vec!["echo", "one two"]);
     }
 
     #[test]

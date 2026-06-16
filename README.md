@@ -31,6 +31,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
+| Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |

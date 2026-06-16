@@ -86,7 +86,7 @@ flowchart TD
 
 | Stage | Function | Input | Output | Fails on |
 |---|---|---|---|---|
-| Lex | `lexer::lex` | `&str` | `Vec<Token>` | unterminated `"`, unterminated `$(` |
+| Lex | `lexer::lex` | `&str` | `Vec<Token>` | `LexError::{Incomplete, Syntax}` (open quote/`$(`/here-doc → Incomplete) |
 | Parse | `parser::parse` | `&str` | `CommandList` | bad syntax (`Syntax`) or an unfinished prefix (`Incomplete`) |
 | Run list | `exec::run_list` | `&CommandList` | `i32` (status) | propagated from expand/exec |
 | Expand | `expand::expand` | `&RawPipeline` | `Pipeline` | unterminated `${`/`$(`, sub-command parse error |
@@ -144,7 +144,13 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
   command must be quoted.)
 - A `#` at a word boundary starts a comment: lexing stops for the rest of the
   line. Mid-word (`foo#bar`) or quoted, `#` is an ordinary character.
-- Lexer errors: an unterminated double quote or an unterminated `$(`.
+- `<<DELIM` here-documents: the delimiter is read, and after the line's newline
+  the body is collected up to a line equal to `DELIM` (`<<-` strips leading
+  tabs; a quoted delimiter disables expansion). The body rides along in the
+  `Heredoc` redirect op.
+- `lex` returns `LexError::{Incomplete, Syntax}`. An open quote, `$(`, `${`, or
+  here-doc is **`Incomplete`** — the REPL keeps reading (so quotes and here-docs
+  can span lines); a bad fd is `Syntax`.
 
 ### `parser.rs` — grammar
 A recursive-descent parser over a `Vec<Token>` cursor, producing a `CommandList`
@@ -541,5 +547,6 @@ more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
 
 With `test`/`[`, `$((…))`, and control flow, real scripts work — e.g. a
 counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`, and recursive functions.
-Natural next steps: here-documents (`<<`), command substitution / backgrounding
-of compound commands, and arrays.
+Natural next steps: command substitution / backgrounding of compound commands
+(needs a real fork), arrays, and `getopts`. The core POSIX shell language is now
+largely in place.

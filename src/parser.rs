@@ -78,6 +78,9 @@ pub enum RawRedirect {
     Both { file: Word, append: bool },
     /// `fd>&target` — `fd` duplicates `target` (e.g. `2>&1`).
     Dup { fd: u32, target: u32 },
+    /// `<<DELIM` here-document; `body` is the collected text, expanded unless the
+    /// delimiter was quoted.
+    Heredoc { body: String, expand: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +146,10 @@ const RESERVED: &[&str] = &[
 ];
 
 pub fn parse(input: &str) -> Result<CommandList, ParseError> {
-    let tokens = lexer::lex(input).map_err(ParseError::Syntax)?;
+    let tokens = lexer::lex(input).map_err(|e| match e {
+        lexer::LexError::Incomplete => ParseError::Incomplete,
+        lexer::LexError::Syntax(msg) => ParseError::Syntax(msg),
+    })?;
     let mut p = Parser { toks: tokens, pos: 0 };
 
     let list = p.parse_list()?;
@@ -357,6 +363,7 @@ impl Parser {
                             append: true,
                         },
                         RedirOp::Dup(target) => RawRedirect::Dup { fd: r.fd, target },
+                        RedirOp::Heredoc { body, expand } => RawRedirect::Heredoc { body, expand },
                     });
                 }
                 _ => break,

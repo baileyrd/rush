@@ -61,11 +61,25 @@ pub enum RedirOp {
     Both,        // `&>`       — stdout+stderr to a file (truncate)
     BothAppend,  // `&>>`      — stdout+stderr to a file (append)
     Dup(u32),    // `>&n`/`<&n`— fd duplicates fd n
+    /// `<<` here-document: `body` is the collected text, `expand` is false when
+    /// the delimiter was quoted.
+    Heredoc { body: String, expand: bool },
 }
 
-pub fn lex(input: &str) -> Result<Vec<Token>, String> {
+/// A lexing failure. `Incomplete` means the input is an unfinished prefix (an
+/// open quote, `$(`, or here-doc) and the REPL should read more; `Syntax` is a
+/// hard error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LexError {
+    Incomplete,
+    Syntax(String),
+}
+
+pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
+    // Here-docs seen on the current line whose bodies are read after its newline.
+    let mut pending: Vec<Pending> = Vec::new();
 
     while let Some(&c) = chars.peek() {
         match c {
@@ -74,6 +88,15 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
             }
             '\n' => {
                 chars.next();
+                // The bodies of any here-docs opened on this line follow now.
+                for p in pending.drain(..) {
+                    let body = collect_heredoc_body(&mut chars, &p.delim, p.strip)?;
+                    if let Token::Redirect(Redir { op: RedirOp::Heredoc { body: slot, .. }, .. }) =
+                        &mut tokens[p.idx]
+                    {
+                        *slot = body;
+                    }
+                }
                 tokens.push(Token::Newline);
             }
             // A `#` at a word boundary starts a comment to end of line. Mid-word
@@ -134,7 +157,30 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                 chars.next();
                 tokens.push(Token::RParen);
             }
-            '<' | '>' => {
+            '<' => {
+                chars.next();
+                if chars.peek() == Some(&'<') {
+                    // `<<` / `<<-` here-document.
+                    chars.next();
+                    let strip = chars.peek() == Some(&'-');
+                    if strip {
+                        chars.next();
+                    }
+                    while matches!(chars.peek(), Some(' ') | Some('\t')) {
+                        chars.next();
+                    }
+                    let (delim, expand) = read_heredoc_delim(&mut chars)?;
+                    let idx = tokens.len();
+                    tokens.push(Token::Redirect(Redir {
+                        fd: 0,
+                        op: RedirOp::Heredoc { body: String::new(), expand },
+                    }));
+                    pending.push(Pending { idx, delim, strip });
+                } else {
+                    tokens.push(Token::Redirect(Redir { fd: 0, op: RedirOp::Read }));
+                }
+            }
+            '>' => {
                 tokens.push(Token::Redirect(lex_redirect(&mut chars, None)?));
             }
             // A digit run immediately before `<`/`>` is an explicit fd (`2>`);
@@ -150,7 +196,9 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
                     }
                 }
                 if matches!(chars.peek(), Some('<') | Some('>')) {
-                    let fd = digits.parse().map_err(|_| "invalid file descriptor".to_string())?;
+                    let fd = digits
+                        .parse()
+                        .map_err(|_| LexError::Syntax("invalid file descriptor".into()))?;
                     tokens.push(Token::Redirect(lex_redirect(&mut chars, Some(fd))?));
                 } else {
                     let word = lex_word(&mut chars, Some(digits))?;
@@ -164,12 +212,91 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
         }
     }
 
+    // A here-doc opened with no following line yet needs more input.
+    if !pending.is_empty() {
+        return Err(LexError::Incomplete);
+    }
     Ok(tokens)
+}
+
+/// A here-document opened on the current line, awaiting its body.
+struct Pending {
+    idx: usize,
+    delim: String,
+    strip: bool,
+}
+
+/// Read the delimiter word after `<<`. A quoted delimiter (`<<'EOF'`) disables
+/// expansion of the body.
+fn read_heredoc_delim(chars: &mut Peekable<Chars>) -> Result<(String, bool), LexError> {
+    let mut delim = String::new();
+    let mut expand = true;
+    match chars.peek() {
+        Some(&q @ ('\'' | '"')) => {
+            expand = false;
+            chars.next();
+            for c in chars.by_ref() {
+                if c == q {
+                    break;
+                }
+                delim.push(c);
+            }
+        }
+        _ => {
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() || matches!(c, '|' | '<' | '>' | '&' | ';' | '(' | ')') {
+                    break;
+                }
+                delim.push(c);
+                chars.next();
+            }
+        }
+    }
+    if delim.is_empty() {
+        return Err(LexError::Syntax("expected a here-document delimiter".into()));
+    }
+    Ok((delim, expand))
+}
+
+/// Read here-document lines until one equals the delimiter. With `strip`
+/// (`<<-`), leading tabs are removed from each line and the delimiter check.
+fn collect_heredoc_body(
+    chars: &mut Peekable<Chars>,
+    delim: &str,
+    strip: bool,
+) -> Result<String, LexError> {
+    let mut body = String::new();
+    loop {
+        let Some(line) = read_line(chars) else {
+            return Err(LexError::Incomplete); // EOF before the delimiter
+        };
+        let content = if strip { line.trim_start_matches('\t') } else { &line };
+        if content == delim {
+            return Ok(body);
+        }
+        body.push_str(content);
+        body.push('\n');
+    }
+}
+
+/// Read one line (without its trailing newline), or `None` at end of input.
+fn read_line(chars: &mut Peekable<Chars>) -> Option<String> {
+    chars.peek()?;
+    let mut line = String::new();
+    for c in chars.by_ref() {
+        if c == '\n' {
+            break;
+        }
+        if c != '\r' {
+            line.push(c);
+        }
+    }
+    Some(line)
 }
 
 /// Read a redirection operator with the cursor on `<` or `>`. `explicit_fd` is
 /// a leading file-descriptor number (`2>`), if one was lexed.
-fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, String> {
+fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, LexError> {
     match chars.next() {
         Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: RedirOp::Read }),
         Some('>') => {
@@ -187,7 +314,9 @@ fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result
                     }
                     let t = target
                         .parse()
-                        .map_err(|_| "expected a file descriptor after `>&`".to_string())?;
+                        .map_err(|_| {
+                            LexError::Syntax("expected a file descriptor after `>&`".into())
+                        })?;
                     RedirOp::Dup(t)
                 }
                 _ => RedirOp::Write,
@@ -201,7 +330,7 @@ fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result
 /// Accumulate a single word, honoring single quotes, double quotes, escapes,
 /// and keeping a `$(...)` substitution together even across spaces/operators.
 /// `seed` is optional leading text (e.g. a digit run that wasn't an fd).
-fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, String> {
+fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, LexError> {
     let mut parts: Word = Vec::new();
     if let Some(s) = seed {
         if !s.is_empty() {
@@ -262,7 +391,7 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, S
                     s.push(qc);
                 }
                 if !closed {
-                    return Err("unterminated double quote".into());
+                    return Err(LexError::Incomplete);
                 }
                 push_quoted(&mut parts, &s);
             }
@@ -298,7 +427,7 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, S
 /// Append a balanced `(...)` region (including the parens) to `out`, starting
 /// at the opening `(` under the cursor. Tracks nesting and skips quoted spans
 /// so that `$(echo ")")` is captured correctly.
-fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), String> {
+fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), LexError> {
     // Cursor is on the opening '('.
     chars.next();
     out.push('(');
@@ -327,12 +456,12 @@ fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Resu
         }
     }
 
-    Err("unterminated `$(`".into())
+    Err(LexError::Incomplete)
 }
 
 /// Append a balanced `{...}` region (including the braces) to `out`, starting at
 /// the opening `{` under the cursor — used to keep `${...}` whole.
-fn consume_balanced_brace(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), String> {
+fn consume_balanced_brace(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), LexError> {
     chars.next(); // opening '{'
     out.push('{');
     let mut depth = 1usize;
@@ -360,7 +489,7 @@ fn consume_balanced_brace(chars: &mut Peekable<Chars>, out: &mut String) -> Resu
         }
     }
 
-    Err("unterminated `${`".into())
+    Err(LexError::Incomplete)
 }
 
 fn push_unquoted(parts: &mut Word, t: &str) {
@@ -482,6 +611,32 @@ mod tests {
         assert_eq!(lex("&> f").unwrap(), vec![r(1, Both), bare("f")]);
         // A digit not before a redirect is just a word.
         assert_eq!(lex("echo 2").unwrap(), vec![bare("echo"), bare("2")]);
+    }
+
+    #[test]
+    fn heredoc_collects_body() {
+        let body = |src| {
+            lex(src).unwrap().into_iter().find_map(|t| match t {
+                Token::Redirect(Redir { op: RedirOp::Heredoc { body, expand }, .. }) => {
+                    Some((body, expand))
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(
+            body("cat <<EOF\nline1\nline2\nEOF\n"),
+            Some(("line1\nline2\n".to_string(), true))
+        );
+        // A quoted delimiter disables expansion.
+        assert_eq!(body("cat <<'EOF'\n$x\nEOF\n"), Some(("$x\n".to_string(), false)));
+        // `<<-` strips leading tabs from body and the delimiter line.
+        assert_eq!(body("cat <<-EOF\n\tindented\n\tEOF\n"), Some(("indented\n".to_string(), true)));
+    }
+
+    #[test]
+    fn heredoc_unterminated_is_incomplete() {
+        assert_eq!(lex("cat <<EOF\nbody"), Err(LexError::Incomplete));
+        assert_eq!(lex("cat <<EOF"), Err(LexError::Incomplete));
     }
 
     #[test]

@@ -115,6 +115,7 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
         let mut child = command
             .spawn()
             .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
+        crate::exec::feed_heredoc(&mut child, cmd);
         let pid = child.id() as pid_t;
         if i == 0 {
             pgid = pid;

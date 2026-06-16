@@ -88,19 +88,30 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     }
 
     let mut redirects = Vec::with_capacity(rc.redirects.len());
+    let mut heredoc = None;
     for r in &rc.redirects {
-        redirects.push(match r {
-            RawRedirect::File { fd, file, mode } => {
-                Redirect::File { fd: *fd, file: expand_word(file)?, mode: *mode }
+        match r {
+            RawRedirect::File { fd, file, mode } => redirects.push(Redirect::File {
+                fd: *fd,
+                file: expand_word(file)?,
+                mode: *mode,
+            }),
+            RawRedirect::Both { file, append } => redirects.push(Redirect::Both {
+                file: expand_word(file)?,
+                append: *append,
+            }),
+            RawRedirect::Dup { fd, target } => {
+                redirects.push(Redirect::Dup { fd: *fd, target: *target })
             }
-            RawRedirect::Both { file, append } => {
-                Redirect::Both { file: expand_word(file)?, append: *append }
+            // A here-doc body feeds stdin; it's a Command field, not a Redirect.
+            // Its `$`-expansions run unless the delimiter was quoted.
+            RawRedirect::Heredoc { body, expand } => {
+                heredoc = Some(if *expand { expand_dollars(body)? } else { body.clone() });
             }
-            RawRedirect::Dup { fd, target } => Redirect::Dup { fd: *fd, target: *target },
-        });
+        }
     }
 
-    Ok(Command { argv, redirects, assignments })
+    Ok(Command { argv, redirects, assignments, heredoc })
 }
 
 /// If `word` has the form `NAME=...` with `NAME` a valid identifier whose `=`

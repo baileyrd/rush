@@ -28,6 +28,8 @@ pub struct Command {
     /// Leading `NAME=value` assignments. With no `argv` they set shell variables;
     /// otherwise they apply to this command's environment only.
     pub assignments: Vec<(String, String)>,
+    /// A here-document body (already expanded) to feed on stdin, if any.
+    pub heredoc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +350,7 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
         let mut child = command
             .spawn()
             .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
+        feed_heredoc(&mut child, cmd);
 
         if !is_last {
             prev_stdout = child.stdout.take().map(Stdio::from);
@@ -433,6 +436,11 @@ pub(crate) fn build_stage(
         }
     }
 
+    // A here-document feeds stdin from a pipe we write after spawn.
+    if cmd.heredoc.is_some() {
+        stdin_sink = Some(Stdio::piped());
+    }
+
     if let Some(s) = stdin_sink {
         command.stdin(s);
     }
@@ -483,6 +491,20 @@ fn open_write(file: &str, append: bool) -> Result<File, String> {
         .truncate(!append)
         .open(file)
         .map_err(|e| format!("{file}: {e}"))
+}
+
+/// Write a command's here-document body to its stdin on a background thread, so
+/// a large body can't deadlock against a child that hasn't started reading.
+pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
+    if let Some(body) = &cmd.heredoc {
+        if let Some(mut stdin) = child.stdin.take() {
+            let body = body.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = stdin.write_all(body.as_bytes());
+            });
+        }
+    }
 }
 
 /// A human-readable rendering of a pipeline, for the `jobs` listing. Only the

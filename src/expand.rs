@@ -262,12 +262,19 @@ fn expand_dollars(text: &str) -> Result<String, String> {
 
         match chars.peek() {
             Some('(') => {
-                chars.next(); // consume '('
-                let inner = take_balanced_paren(&mut chars)?;
-                let output = command_substitute(&inner)?;
-                // Command substitution drops trailing newlines (and the `\r`
-                // that precedes them on Windows).
-                out.push_str(output.trim_end_matches(['\n', '\r']));
+                chars.next(); // consume the first '('
+                if chars.peek() == Some(&'(') {
+                    // `$((expr))` — arithmetic.
+                    chars.next();
+                    let expr = take_arith(&mut chars)?;
+                    out.push_str(&crate::arith::eval(&expr)?.to_string());
+                } else {
+                    // `$(...)` — command substitution. Drops trailing newlines
+                    // (and the `\r` that precedes them on Windows).
+                    let inner = take_balanced_paren(&mut chars)?;
+                    let output = command_substitute(&inner)?;
+                    out.push_str(output.trim_end_matches(['\n', '\r']));
+                }
             }
             // `$?` — the last pipeline's exit status.
             Some('?') => {
@@ -347,6 +354,34 @@ fn take_balanced_paren(chars: &mut Peekable<Chars>) -> Result<String, String> {
     }
 
     Err("unterminated `$(`".into())
+}
+
+/// Read an arithmetic expression up to the closing `))`, after `$((` has been
+/// consumed. Inner parentheses are balanced.
+fn take_arith(chars: &mut Peekable<Chars>) -> Result<String, String> {
+    let mut expr = String::new();
+    let mut depth = 0usize;
+    loop {
+        match chars.next() {
+            None => return Err("unterminated `$((`".into()),
+            Some('(') => {
+                depth += 1;
+                expr.push('(');
+            }
+            Some(')') if depth > 0 => {
+                depth -= 1;
+                expr.push(')');
+            }
+            // A `)` at depth 0 must be the first of the closing `))`.
+            Some(')') => {
+                return match chars.next() {
+                    Some(')') => Ok(expr),
+                    _ => Err("unterminated `$((`".into()),
+                };
+            }
+            Some(c) => expr.push(c),
+        }
+    }
 }
 
 /// Run `src` as its own command line (operators and all) and capture its stdout.

@@ -178,6 +178,8 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
   text and runs it via `exec::capture`, inlining stdout with trailing newlines
   trimmed.
+- **Arithmetic:** `$((expr))` is evaluated by `arith::eval` and inlined as its
+  integer result (`$(` vs `$((` is decided by a second peek).
 - **Word-splitting:** whitespace inside an *unquoted* expansion splits the word
   into fields (`x="a b"; echo $x` → two args). A `Splitter` assembles the word's
   parts into fields: quoted/literal text is added unsplit, unquoted-expansion
@@ -190,6 +192,12 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
   sorted matches; otherwise its literal text is kept (POSIX no-match).
 - **Emptiness:** a field that is entirely unquoted and empty (e.g. `$UNSET`)
   drops out, mirroring shell field-splitting; a quoted empty (`""`) is kept.
+
+### `arith.rs` — integer arithmetic
+A self-contained tokenizer + recursive-descent evaluator over `i64` for
+`$((...))`: `+ - * / %`, unary `+ - !`, comparisons, `&&`/`||`, parentheses, and
+bare variable names (resolved like `$name`, unset → `0`). Comparisons and
+logicals yield `1`/`0`. No assignment/increment inside the expression yet.
 
 ### `glob.rs` — filename matching
 A from-scratch globber, no external crate:
@@ -491,7 +499,8 @@ shell variables/`export`/`unset`, `$?`, the `${VAR:-default}` family, comments,
 more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
 `for`, single- or multi-line).
 
-Natural next steps: a `test`/`[` builtin and arithmetic `$((…))` (to make
-`while`/`if` conditions expressive), `case`/`esac`, positional parameters
-(`$1`/`$@`) with a script-file mode, command substitution / backgrounding of
-compound commands (needs a subshell), and `kill %n`.
+With `test`/`[`, `$((…))`, and control flow, real scripts work — e.g. a
+counting `while [ $i -le 3 ]; do …; i=$((i+1)); done`. Natural next steps:
+`case`/`esac`, positional parameters (`$1`/`$@`) with a script-file mode,
+command substitution / backgrounding of compound commands (needs a subshell),
+`break`/`continue`, and `kill %n`.

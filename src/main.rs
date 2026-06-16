@@ -9,6 +9,7 @@
 //! background and stopped jobs are managed with real job control (`fg`/`bg`/
 //! `jobs`, Ctrl-Z); other platforms run foreground-only.
 
+mod arith;
 mod builtins;
 mod exec;
 mod expand;

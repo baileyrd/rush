@@ -35,6 +35,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, tilde, command substitution; unquoted results word-split |
+| Arithmetic (`$((...))`) | ✅ | `+ - * / %`, comparisons, `&& \|\| !`, parentheses, variables (`i=$((i+1))`) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
 | Control flow | ✅ | `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`, `for … in … ; do … done`; single- or multi-line |
@@ -92,7 +93,8 @@ src/
   main.rs       REPL: read → parse → run loop, history, prompt
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
   parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for)
-  expand.rs     expansion: $VAR, ~, $(...), globs → concrete Pipeline
+  expand.rs     expansion: $VAR, ~, $(...), $((...)), globs → concrete Pipeline
+  arith.rs      integer arithmetic evaluator for $((...))
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
   vars.rs       shell state that outlives a command: $?, shell variables, export
   exec.rs       runtime: sequence the list, spawn processes, wire pipes & redirects

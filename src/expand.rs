@@ -31,8 +31,22 @@ pub fn expand(raw: &RawPipeline) -> Result<Pipeline, String> {
 }
 
 fn expand_command(rc: &RawCommand) -> Result<Command, String> {
+    // Leading `NAME=value` words are assignments; they stop at the first word
+    // that isn't one (the program name).
+    let mut assignments = Vec::new();
+    let mut idx = 0;
+    while idx < rc.argv.len() {
+        match assignment_split(&rc.argv[idx]) {
+            Some((name, value_word)) => {
+                assignments.push((name, expand_word(&value_word)?));
+                idx += 1;
+            }
+            None => break,
+        }
+    }
+
     let mut argv = Vec::new();
-    for word in &rc.argv {
+    for word in &rc.argv[idx..] {
         argv.extend(expand_argv_word(word)?);
     }
 
@@ -46,7 +60,29 @@ fn expand_command(rc: &RawCommand) -> Result<Command, String> {
         });
     }
 
-    Ok(Command { argv, redirects })
+    Ok(Command { argv, redirects, assignments })
+}
+
+/// If `word` has the form `NAME=...` with `NAME` a valid identifier whose `=`
+/// comes from unquoted text, split it into the name and a `Word` for the value
+/// (the rest of the first part plus any following parts). Otherwise `None`.
+fn assignment_split(word: &Word) -> Option<(String, Word)> {
+    let WordPart::Unquoted(text) = word.first()? else {
+        return None;
+    };
+    let eq = text.find('=')?;
+    let name = &text[..eq];
+
+    let mut chars = name.chars();
+    let valid = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+    if !valid {
+        return None;
+    }
+
+    let mut value: Word = vec![WordPart::Unquoted(text[eq + 1..].to_string())];
+    value.extend(word[1..].iter().cloned());
+    Some((name.to_string(), value))
 }
 
 /// Expand a word destined for `argv`, possibly into several arguments.
@@ -244,8 +280,11 @@ fn command_substitute(src: &str) -> Result<String, String> {
     crate::exec::capture_list(&list)
 }
 
+/// Shell variables shadow the environment; unknown names expand to empty.
 fn var_lookup(name: &str) -> String {
-    std::env::var(name).unwrap_or_default()
+    crate::vars::get(name)
+        .or_else(|| std::env::var(name).ok())
+        .unwrap_or_default()
 }
 
 fn home_dir() -> Option<String> {
@@ -259,9 +298,13 @@ mod tests {
     use super::*;
 
     fn one(input: &str) -> Vec<String> {
+        expand_cmd(input).argv
+    }
+
+    fn expand_cmd(input: &str) -> Command {
         let list = parser::parse(input).unwrap();
         let pipeline = expand(&list.jobs[0].list.first).unwrap();
-        pipeline.commands[0].argv.clone()
+        pipeline.commands[0].clone()
     }
 
     // All env-mutating cases live in one test: `set_var` is process-global and
@@ -308,6 +351,43 @@ mod tests {
         assert_eq!(one("echo $?"), vec!["echo", "42"]);
         crate::vars::set_last_status(0);
         assert_eq!(one("echo code=$?"), vec!["echo", "code=0"]);
+    }
+
+    #[test]
+    fn assignments_split_from_argv() {
+        let c = expand_cmd("FOO=bar");
+        assert!(c.argv.is_empty());
+        assert_eq!(c.assignments, vec![("FOO".into(), "bar".into())]);
+
+        let c = expand_cmd("A=1 B=2 echo hi");
+        assert_eq!(c.argv, vec!["echo", "hi"]);
+        assert_eq!(c.assignments, vec![("A".into(), "1".into()), ("B".into(), "2".into())]);
+    }
+
+    #[test]
+    fn not_an_assignment() {
+        // After the command word, `NAME=value` is a plain argument.
+        let c = expand_cmd("echo FOO=bar");
+        assert!(c.assignments.is_empty());
+        assert_eq!(c.argv, vec!["echo", "FOO=bar"]);
+
+        // Invalid identifier → not an assignment.
+        let c = expand_cmd("1FOO=bar");
+        assert!(c.assignments.is_empty());
+        assert_eq!(c.argv, vec!["1FOO=bar"]);
+    }
+
+    #[test]
+    fn assignment_value_is_expanded() {
+        crate::vars::set("RUSH_BASE", "/base");
+        let c = expand_cmd("P=$RUSH_BASE/x");
+        assert_eq!(c.assignments, vec![("P".into(), "/base/x".into())]);
+    }
+
+    #[test]
+    fn shell_var_shadows_env() {
+        crate::vars::set("RUSH_SHADOW", "shellval");
+        assert_eq!(one("echo $RUSH_SHADOW"), vec!["echo", "shellval"]);
     }
 
     // Globbing tests run from the crate root against stable repo fixtures.

@@ -30,7 +30,8 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`) | ✅ | truncate, append, input |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `exit` (+ `jobs`/`fg`/`bg` on Unix) |
+| Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, tilde, command substitution (no word-splitting yet) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
@@ -89,7 +90,7 @@ src/
   parser.rs     grammar: Vec<Token> → CommandList (pipelines + &&/||/; )
   expand.rs     expansion: $VAR, ~, $(...), globs → concrete Pipeline
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
-  vars.rs       shell state that outlives a command: $? (last exit status)
+  vars.rs       shell state that outlives a command: $?, shell variables, export
   exec.rs       runtime: sequence the list, spawn processes, wire pipes & redirects
   job.rs        Unix job control: process groups, terminal, signals, fg/bg/jobs
   builtins.rs   in-process commands: cd, pwd, exit (+ jobs/fg/bg on Unix)

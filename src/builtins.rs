@@ -13,6 +13,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "cd" => Some(cd(argv)),
         "pwd" => Some(pwd()),
         "echo" => Some(echo(argv)),
+        "export" => Some(export(argv)),
         "exit" => exit(argv), // diverges on success
         _ => other_builtin(argv),
     }
@@ -80,6 +81,18 @@ fn pwd() -> i32 {
             1
         }
     }
+}
+
+/// `export NAME` marks an existing variable exported; `export NAME=value` sets
+/// and exports it. The `NAME=value` arg arrives already expanded.
+fn export(argv: &[String]) -> i32 {
+    for arg in &argv[1..] {
+        match arg.split_once('=') {
+            Some((name, value)) => crate::vars::set_exported(name, value),
+            None => crate::vars::export(arg),
+        }
+    }
+    0
 }
 
 fn exit(argv: &[String]) -> Option<i32> {

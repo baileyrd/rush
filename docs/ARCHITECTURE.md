@@ -160,8 +160,11 @@ redirect := ('<' | '>' | '>>') word
 Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
 - **Tilde:** a leading `~` on the first, unquoted part of a word becomes `$HOME`
   (falling back to `$USERPROFILE`); `~user` is left untouched.
-- **Variables:** `$VAR` and `${VAR}` read the environment; unset → empty. `$?`
-  expands to the last pipeline's exit status (tracked in `vars`).
+- **Variables:** `$VAR` and `${VAR}` resolve to a shell variable (`vars`) if set,
+  else the environment, else empty. `$?` expands to the last pipeline's exit
+  status. Leading `NAME=value` words on a command are split off as assignments
+  (`expand_command`): with no program word they set shell variables, otherwise
+  they seed that command's environment (alongside exported variables).
 - **Command substitution:** `$(...)` re-enters `parse → expand` on the inner
   text and runs it via `exec::capture`, inlining stdout with trailing newlines
   trimmed.
@@ -226,6 +229,7 @@ crate, following the classic glibc job-control structure:
 - `cd [dir]` — changes the shell's own working directory (no arg → `$HOME`).
 - `pwd` — prints the current directory.
 - `echo [-n] [args…]` — joins args with spaces (no `-e` escapes).
+- `export NAME[=value]` — marks a shell variable exported (see `vars`).
 - `exit [code]` — terminates the process (diverges; defaults to `0`).
 - On Unix, `jobs`/`fg`/`bg` are dispatched to `job::builtin`.
 
@@ -288,6 +292,7 @@ classDiagram
     class Command {
         +Vec~String~ argv
         +Vec~Redirect~ redirects
+        +Vec~(String, String)~ assignments
     }
     class Redirect {
         <<enum>>

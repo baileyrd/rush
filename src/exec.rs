@@ -25,6 +25,9 @@ use crate::parser::{AndOrList, CommandList, Connector, Job, RawPipeline};
 pub struct Command {
     pub argv: Vec<String>,
     pub redirects: Vec<Redirect>,
+    /// Leading `NAME=value` assignments. With no `argv` they set shell variables;
+    /// otherwise they apply to this command's environment only.
+    pub assignments: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,9 +90,28 @@ fn should_run(connector: Connector, prev_status: i32) -> bool {
     }
 }
 
+/// A single command that is only `NAME=value` assignments (no program word):
+/// `FOO=bar`. These set shell variables rather than spawning anything.
+fn assignment_only(pipeline: &Pipeline) -> bool {
+    pipeline.commands.len() == 1
+        && pipeline.commands[0].argv.is_empty()
+        && !pipeline.commands[0].assignments.is_empty()
+}
+
+fn apply_assignments(pipeline: &Pipeline) {
+    for (name, value) in &pipeline.commands[0].assignments {
+        crate::vars::set(name, value);
+    }
+}
+
 /// Expand and run a single pipeline in the foreground.
 fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     let pipeline = crate::expand::expand(raw)?;
+
+    if assignment_only(&pipeline) {
+        apply_assignments(&pipeline);
+        return Ok(0);
+    }
 
     if pipeline.commands.len() == 1 {
         if let Some(code) = builtins::try_run(&pipeline.commands[0].argv) {
@@ -140,6 +162,10 @@ fn capture_andor(list: &AndOrList, out: &mut String) -> Result<i32, String> {
 
 fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> {
     let pipeline = crate::expand::expand(raw)?;
+    if assignment_only(&pipeline) {
+        apply_assignments(&pipeline);
+        return Ok(0);
+    }
     let (status, captured) = run(&pipeline, true)?;
     out.push_str(&captured);
     Ok(status)
@@ -200,6 +226,11 @@ pub(crate) fn build_stage(
         .ok_or_else(|| "empty command".to_string())?;
     let mut command = OsCommand::new(program);
     command.args(&cmd.argv[1..]);
+
+    // Seed the environment: exported shell variables first, then this command's
+    // own `NAME=value` prefixes (which override).
+    command.envs(crate::vars::exported());
+    command.envs(cmd.assignments.iter().map(|(k, v)| (k, v)));
 
     // stdin: explicit `< file` wins, else the previous pipe, else inherit.
     if let Some(file) = stdin_redirect(&cmd.redirects) {

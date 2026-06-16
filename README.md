@@ -37,6 +37,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, tilde, command substitution; unquoted results word-split |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
+| Control flow | ✅ | `if`/`elif`/`else`/`fi`, `while`/`until`/`do`/`done`, `for … in … ; do … done`; single- or multi-line |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
 
 ## Build & Run
@@ -63,6 +64,8 @@ echo ~ has $(ls *.rs | wc -l) files      # tilde, command sub, glob
 mkdir build && cd build       # && runs only if mkdir succeeds
 test -f x || echo "missing"   # || runs only if test fails
 a ; b ; c                     # ; runs each in turn
+for f in *.rs; do echo $f; done                 # for loop (one line or many)
+if cmd; then echo ok; else echo failed; fi      # if/then/else by exit status
 sleep 30 &                    # run in the background (Unix); prints [1] <pid>
 jobs                          # list background/stopped jobs (Unix)
 fg %1                         # bring job 1 to the foreground (Unix)
@@ -88,7 +91,7 @@ data-flow diagrams, module reference, and roadmap.
 src/
   main.rs       REPL: read → parse → run loop, history, prompt
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
-  parser.rs     grammar: Vec<Token> → CommandList (pipelines + &&/||/; )
+  parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for)
   expand.rs     expansion: $VAR, ~, $(...), globs → concrete Pipeline
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
   vars.rs       shell state that outlives a command: $?, shell variables, export

@@ -20,17 +20,33 @@ use std::str::Chars;
 
 use crate::exec::{Command, Pipeline, Redirect};
 use crate::lexer::{Word, WordPart};
-use crate::parser::{self, RawCommand, RawPipeline, RawRedirect};
+use crate::parser::{self, RawCommand, RawPipeline, RawRedirect, RawSimple};
 
 pub fn expand(raw: &RawPipeline) -> Result<Pipeline, String> {
     let mut commands = Vec::with_capacity(raw.commands.len());
     for rc in &raw.commands {
-        commands.push(expand_command(rc)?);
+        match rc {
+            RawCommand::Simple(s) => commands.push(expand_simple(s)?),
+            // Compound commands are run directly by `exec`, never lowered here.
+            RawCommand::Compound(_) => {
+                return Err("compound command cannot be part of a pipeline".into());
+            }
+        }
     }
     Ok(Pipeline { commands })
 }
 
-fn expand_command(rc: &RawCommand) -> Result<Command, String> {
+/// Expand a list of words into arguments (splitting + globbing) — used by the
+/// `for` loop to compute its iteration values.
+pub fn expand_words(words: &[Word]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for w in words {
+        out.extend(expand_argv_word(w)?);
+    }
+    Ok(out)
+}
+
+fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // Leading `NAME=value` words are assignments; they stop at the first word
     // that isn't one (the program name).
     let mut assignments = Vec::new();
@@ -263,7 +279,7 @@ fn expand_dollars(text: &str) -> Result<String, String> {
                 let mut inner = String::new();
                 let mut depth = 1usize;
                 let mut closed = false;
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if c == '{' {
                         depth += 1;
                     } else if c == '}' {
@@ -335,7 +351,7 @@ fn take_balanced_paren(chars: &mut Peekable<Chars>) -> Result<String, String> {
 
 /// Run `src` as its own command line (operators and all) and capture its stdout.
 fn command_substitute(src: &str) -> Result<String, String> {
-    let list = parser::parse(src)?;
+    let list = parser::parse(src).map_err(|e| e.to_string())?;
     crate::exec::capture_list(&list)
 }
 

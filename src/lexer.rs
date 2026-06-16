@@ -32,14 +32,15 @@ pub enum WordPart {
 pub enum Token {
     /// A word, ready for the expansion stage.
     Word(Word),
-    Pipe,   // |
-    Less,   // <
-    Great,  // >
-    DGreat, // >>
-    Semi,   // ;
-    And,    // &&
-    Or,     // ||
-    Amp,    // & (single — background, not yet supported)
+    Pipe,    // |
+    Less,    // <
+    Great,   // >
+    DGreat,  // >>
+    Semi,    // ;
+    And,     // &&
+    Or,      // ||
+    Amp,     // & (single — background)
+    Newline, // a line break (a separator that also lets `&&`/`|` continue)
 }
 
 pub fn lex(input: &str) -> Result<Vec<Token>, String> {
@@ -48,13 +49,21 @@ pub fn lex(input: &str) -> Result<Vec<Token>, String> {
 
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' => {
+            ' ' | '\t' | '\r' => {
                 chars.next();
+            }
+            '\n' => {
+                chars.next();
+                tokens.push(Token::Newline);
             }
             // A `#` at a word boundary starts a comment to end of line. Mid-word
             // (`foo#bar`) it's consumed literally by `lex_word`, never reaching
             // here; quoted, it's handled inside `lex_word` too.
-            '#' => break,
+            '#' => {
+                while matches!(chars.peek(), Some(&c) if c != '\n') {
+                    chars.next();
+                }
+            }
             '|' => {
                 chars.next();
                 if chars.peek() == Some(&'|') {
@@ -108,7 +117,11 @@ fn lex_word(chars: &mut Peekable<Chars>) -> Result<Word, String> {
     loop {
         match chars.peek() {
             None => break,
-            Some(&c) if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>' | '&' | ';') => break,
+            Some(&c)
+                if c == ' ' || c == '\t' || matches!(c, '|' | '<' | '>' | '&' | ';' | '\n' | '\r') =>
+            {
+                break
+            }
             Some(&'\'') => {
                 chars.next();
                 let mut s = String::new();

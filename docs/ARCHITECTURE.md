@@ -60,9 +60,11 @@ flowchart LR
 
 ## 2. The processing pipeline
 
-Every non-empty line travels through a small chain of transformations. Each
-stage has a narrow contract and surfaces errors as a `Result`, which `main`
-reports without crashing the shell.
+Each command travels through a small chain of transformations. (A command may
+span several input lines: when the parser returns `Incomplete`, `main` keeps
+reading with a `> ` prompt and re-parses the accumulated buffer.) Each stage has
+a narrow contract and surfaces errors as a `Result`, which `main` reports
+without crashing the shell.
 
 ```mermaid
 flowchart TD
@@ -85,7 +87,7 @@ flowchart TD
 | Stage | Function | Input | Output | Fails on |
 |---|---|---|---|---|
 | Lex | `lexer::lex` | `&str` | `Vec<Token>` | unterminated `"`, unterminated `$(` |
-| Parse | `parser::parse` | `&str` | `CommandList` | dangling `\|`, missing redirect target, empty command |
+| Parse | `parser::parse` | `&str` | `CommandList` | bad syntax (`Syntax`) or an unfinished prefix (`Incomplete`) |
 | Run list | `exec::run_list` | `&CommandList` | `i32` (status) | propagated from expand/exec |
 | Expand | `expand::expand` | `&RawPipeline` | `Pipeline` | unterminated `${`/`$(`, sub-command parse error |
 | Execute (fg) | `job::run_foreground` (Unix) / `exec::run` | `&Pipeline` | `i32` / `(i32, String)` | spawn failure, missing redirect file |
@@ -138,24 +140,28 @@ A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat
 - Lexer errors: an unterminated double quote or an unterminated `$(`.
 
 ### `parser.rs` — grammar
-Consumes tokens into a `CommandList` (a `Vec<Job>`), words still unexpanded.
-The grammar (v0):
+A recursive-descent parser over a `Vec<Token>` cursor, producing a `CommandList`
+(a `Vec<Job>`) whose commands may be simple or compound. The grammar (v0):
 ```
-list     := job ( (';' | '&') job )* (';' | '&')?
-job      := pipeline ( ('&&' | '||') pipeline )*
+list     := and_or ( sep and_or )* sep?          sep = ; | & | newline
+and_or   := pipeline ( ('&&' | '||') pipeline )*
 pipeline := command ( '|' command )*
-command  := word+ redirection*
+command  := compound | simple
+compound := if_clause | loop_clause | for_clause
+simple   := (word | redirect)+
 redirect := ('<' | '>' | '>>') word
 ```
-- `parse_andor` builds one job's `&&`/`||` chain; `parse_pipeline` builds one
-  pipeline, each stopping (without consuming) at the next operator or end.
-- `Word` tokens append to the current command's `argv` (each a `Vec<WordPart>`).
-- `Pipe` finalizes the current command (erroring if it's empty) and starts a new
-  one via `std::mem::replace`.
-- Redirect operators consume the following word as a filename (`expect_word`),
-  erroring if it isn't a word.
-- A trailing `;`/`&` is allowed; a trailing empty command (`ls |`) and an empty
-  job between operators (`a ;; b`, `&& a`) are rejected.
+- `parse_command` dispatches on a **reserved word** in command position (`if`,
+  `while`, `until`, `for`) to a compound parser; otherwise `parse_simple` reads
+  words and redirects. After the first word, reserved words are ordinary
+  arguments (`echo done` is fine), and a list ends at a closing keyword
+  (`then`/`fi`/`do`/`done`/…).
+- Newlines are their own token, so input can span lines and `&&`/`||`/`|` can
+  continue onto the next line.
+- `ParseError` distinguishes **`Incomplete`** (a valid prefix that needs more
+  input — the REPL keeps reading with a `> ` prompt) from **`Syntax`** (a real
+  error). Reaching end of input mid-construct (`if x; then …`) is `Incomplete`;
+  a stray `fi` is `Syntax`.
 
 ### `expand.rs` — expansion
 Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
@@ -213,6 +219,11 @@ Sequences a `CommandList` and turns each pipeline into running processes:
 - On Unix, foreground/background spawning, terminal control, and waiting live in
   `job` (below). Off Unix, `run` spawns each stage, threads stdout→stdin, waits,
   and reports the last stage's exit code as the pipeline status.
+- **Compound commands:** a pipeline that is a single `if`/`while`/`for` is run
+  by `run_compound`, which recurses through `run_list` on the condition and body
+  lists — so control flow nests naturally and reuses the same status plumbing
+  (`if`/`while` branch on a list's exit status; `for` expands its word list via
+  `expand::expand_words` and sets the loop variable each iteration).
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 Implements the parts that need POSIX process groups and signals, via the `libc`
@@ -291,8 +302,19 @@ classDiagram
         +Vec~RawCommand~ commands
     }
     class RawCommand {
+        <<enum>>
+        Simple(RawSimple)
+        Compound(Box~Compound~)
+    }
+    class RawSimple {
         +Vec~Word~ argv
         +Vec~RawRedirect~ redirects
+    }
+    class Compound {
+        <<enum>>
+        If(branches, else)
+        Loop(until, cond, body)
+        For(var, words, body)
     }
     class Pipeline {
         +Vec~Command~ commands
@@ -314,9 +336,12 @@ classDiagram
     AndOrList "1" *-- "1..*" RawPipeline
     AndOrList ..> Connector : joins with
     RawPipeline "1" *-- "1..*" RawCommand
+    RawCommand ..> RawSimple : Simple
+    RawCommand ..> Compound : Compound
+    Compound ..> CommandList : bodies
     Pipeline "1" *-- "1..*" Command
     Command "1" *-- "0..*" Redirect
-    Token ..> RawCommand : parsed into
+    Token ..> RawSimple : parsed into
     RawPipeline ..> Pipeline : expand::expand
 ```
 
@@ -390,10 +415,10 @@ Input: `cat log.txt | grep ERROR >> errors.txt`
 
 1. **Lex** →
    `[Word("cat"), Word("log.txt"), Pipe, Word("grep"), Word("ERROR"), DGreat, Word("errors.txt")]`
-2. **Parse** → `CommandList { first: Pipeline { commands: [`
-   - `RawCommand { argv: [["cat"], ["log.txt"]], redirects: [] }`,
-   - `RawCommand { argv: [["grep"], ["ERROR"]], redirects: [Stdout { "errors.txt", append: true }] }`
-   `] }, rest: [] }` (one pipeline, no operators)
+2. **Parse** → one job, one and-or, one `RawPipeline { commands: [`
+   - `Simple(RawSimple { argv: [["cat"], ["log.txt"]], redirects: [] })`,
+   - `Simple(RawSimple { argv: [["grep"], ["ERROR"]], redirects: [Stdout { "errors.txt", append: true }] })`
+   `] }` (no operators or compounds)
 3. **Run list / Expand** → the single pipeline is expanded (here a no-op — no
    `$`, `~`, or globs) into the concrete `Pipeline` of `String` argv.
 4. **Execute**
@@ -459,7 +484,12 @@ flowchart LR
 | Control operators | ✅ lexer + parser `CommandList` + `exec::run_list` | `&&`, `\|\|`, `;` sequence/short-circuit by exit status |
 | Job control | ✅ `job.rs` (`#[cfg(unix)]`, `libc`) | `&`, process groups, terminal control, `Ctrl-Z`/`fg`/`bg`/`jobs`, signals |
 
-All four roadmap milestones are now in. Beyond the roadmap, natural next steps
-are word-splitting of expansions, `$?`/`$#`/`$@` and variable assignment,
-backgrounding `&&`/`||` lists via a subshell, and more builtins (`export`,
-`echo`, `kill %n`).
+All four roadmap milestones are in, plus a good deal beyond: word-splitting,
+shell variables/`export`/`unset`, `$?`, the `${VAR:-default}` family, comments,
+more builtins (`echo`, `true`/`false`/`:`), and control flow (`if`/`while`/
+`for`, single- or multi-line).
+
+Natural next steps: a `test`/`[` builtin and arithmetic `$((…))` (to make
+`while`/`if` conditions expressive), `case`/`esac`, positional parameters
+(`$1`/`$@`) with a script-file mode, command substitution / backgrounding of
+compound commands (needs a subshell), and `kill %n`.

@@ -49,30 +49,47 @@ fn main() -> rustyline::Result<()> {
     #[cfg(unix)]
     job::init();
 
+    // Accumulates lines until a complete command is parsed — so an `if`/`while`
+    // can span several lines, with a `> ` continuation prompt.
+    let mut buffer = String::new();
+
     loop {
         // Report any background jobs that finished or stopped since last prompt.
         #[cfg(unix)]
         job::reap_background();
 
-        match rl.readline(&prompt()) {
+        let prompt = if buffer.is_empty() { prompt() } else { "> ".to_string() };
+        match rl.readline(&prompt) {
             Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
+                if buffer.is_empty() && line.trim().is_empty() {
                     continue;
                 }
-                rl.add_history_entry(line)?;
+                rl.add_history_entry(&line)?;
+                if !buffer.is_empty() {
+                    buffer.push('\n');
+                }
+                buffer.push_str(&line);
 
-                match parser::parse(line) {
+                match parser::parse(&buffer) {
                     Ok(list) => {
                         if let Err(e) = exec::run_list(&list) {
                             eprintln!("rush: {e}");
                         }
+                        buffer.clear();
                     }
-                    Err(e) => eprintln!("rush: {e}"),
+                    // A valid prefix: keep reading more lines.
+                    Err(parser::ParseError::Incomplete) => {}
+                    Err(parser::ParseError::Syntax(e)) => {
+                        eprintln!("rush: {e}");
+                        buffer.clear();
+                    }
                 }
             }
-            // Ctrl-C: abandon the current line, keep the shell alive.
-            Err(ReadlineError::Interrupted) => continue,
+            // Ctrl-C: abandon the current (possibly multi-line) input.
+            Err(ReadlineError::Interrupted) => {
+                buffer.clear();
+                continue;
+            }
             // Ctrl-D on an empty line: exit.
             Err(ReadlineError::Eof) => break,
             Err(e) => {

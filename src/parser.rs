@@ -1,40 +1,43 @@
-//! Build a `CommandList` from a token stream.
+//! Build a `CommandList` from a token stream via recursive descent.
 //!
 //! Grammar (v0):
-//!   list     := job ( (';' | '&') job )* (';' | '&')?
-//!   job      := pipeline ( ('&&' | '||') pipeline )*
+//!   list     := and_or ( sep and_or )* sep?          sep = ; | & | newline
+//!   and_or   := pipeline ( ('&&' | '||') pipeline )*
 //!   pipeline := command ( '|' command )*
-//!   command  := word+ redirection*
+//!   command  := compound | simple
+//!   compound := if_clause | loop_clause | for_clause
+//!   simple   := (word | redirect)+
 //!   redirect := ('<' | '>' | '>>') word
 //!
-//! Two levels of grouping: `&&`/`||` bind a chain of pipelines into one *job*
-//! (equal precedence, left-associative); `;` and `&` then separate jobs, with
-//! `&` marking the preceding job to run in the background.
+//!   if_clause   := 'if' list 'then' list ('elif' list 'then' list)* ('else' list)? 'fi'
+//!   loop_clause := ('while' | 'until') list 'do' list 'done'
+//!   for_clause  := 'for' NAME ('in' word*)? sep 'do' list 'done'
+//!
+//! `&&`/`||` bind pipelines into one job; `;`/`&`/newline separate jobs, with
+//! `&` backgrounding the preceding job. Reserved words (`if`, `then`, …) are
+//! recognised only in command position; elsewhere they are ordinary words.
 //!
 //! "Raw" here means words still carry their quoting (see [`crate::lexer::Word`])
-//! and have *not* been expanded. Each pipeline is expanded lazily, left to
-//! right, as the list runs (so `cd /tmp && ls *` globs in the new directory).
+//! and are *not* expanded; expansion happens lazily as the list runs.
 
-use std::vec::IntoIter;
+use std::fmt;
 
-use crate::lexer::{self, Token, Word};
+use crate::lexer::{self, Token, Word, WordPart};
 
-/// A whole command line: a sequence of jobs separated by `;`/`&`.
+/// A list: jobs separated by `;`/`&`/newline.
 #[derive(Debug, Clone)]
 pub struct CommandList {
     pub jobs: Vec<Job>,
 }
 
-/// One job — an and-or chain of pipelines — plus whether it runs in the
-/// background (a trailing `&`).
+/// One job — an and-or chain — plus whether it runs in the background (`&`).
 #[derive(Debug, Clone)]
 pub struct Job {
     pub list: AndOrList,
     pub background: bool,
 }
 
-/// Pipelines joined by `&&`/`||`, run left-to-right; the runner decides whether
-/// to run each from the previous pipeline's exit status.
+/// Pipelines joined by `&&`/`||`, run left-to-right.
 #[derive(Debug, Clone)]
 pub struct AndOrList {
     pub first: RawPipeline,
@@ -50,7 +53,19 @@ pub enum Connector {
 }
 
 #[derive(Debug, Clone)]
-pub struct RawCommand {
+pub struct RawPipeline {
+    pub commands: Vec<RawCommand>,
+}
+
+/// A pipeline stage: either a plain command or a compound (`if`/`while`/`for`).
+#[derive(Debug, Clone)]
+pub enum RawCommand {
+    Simple(RawSimple),
+    Compound(Box<Compound>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RawSimple {
     pub argv: Vec<Word>,
     pub redirects: Vec<RawRedirect>,
 }
@@ -63,122 +78,352 @@ pub enum RawRedirect {
     Stdout { file: Word, append: bool },
 }
 
+/// A compound command. Each body is itself a list, run by the executor.
 #[derive(Debug, Clone)]
-pub struct RawPipeline {
-    pub commands: Vec<RawCommand>,
+pub enum Compound {
+    /// `if` with its `elif`s flattened into `branches` of `(condition, body)`.
+    If {
+        branches: Vec<(CommandList, CommandList)>,
+        else_body: Option<CommandList>,
+    },
+    /// `while` (or `until`, when `until` is set).
+    Loop {
+        until: bool,
+        cond: CommandList,
+        body: CommandList,
+    },
+    /// `for NAME in WORDS; do BODY; done`.
+    For {
+        var: String,
+        words: Vec<Word>,
+        body: CommandList,
+    },
 }
 
-pub fn parse(input: &str) -> Result<CommandList, String> {
-    let tokens = lexer::lex(input)?;
-    // Nothing but whitespace or a comment: a no-op (empty job list).
-    if tokens.is_empty() {
-        return Ok(CommandList { jobs: Vec::new() });
-    }
-    let mut iter = tokens.into_iter().peekable();
+/// A parse failure. `Incomplete` means the input is a valid prefix that needs
+/// more lines (the REPL keeps reading); `Syntax` is a real error.
+#[derive(Debug)]
+pub enum ParseError {
+    Incomplete,
+    Syntax(String),
+}
 
-    let mut jobs = Vec::new();
-    loop {
-        let list = parse_andor(&mut iter)?;
-        // `;` ends a foreground job, `&` a background one; either may also end
-        // the whole line.
-        match iter.next() {
-            None => {
-                jobs.push(Job { list, background: false });
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::Incomplete => write!(f, "unexpected end of input"),
+            ParseError::Syntax(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+const RESERVED: &[&str] = &[
+    "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in",
+];
+
+pub fn parse(input: &str) -> Result<CommandList, ParseError> {
+    let tokens = lexer::lex(input).map_err(ParseError::Syntax)?;
+    let mut p = Parser { toks: tokens, pos: 0 };
+
+    let list = p.parse_list()?;
+    p.skip_separators();
+    if let Some(tok) = p.peek() {
+        return Err(ParseError::Syntax(format!("unexpected `{}`", describe(tok))));
+    }
+    Ok(list)
+}
+
+struct Parser {
+    toks: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> Option<&Token> {
+        self.toks.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<Token> {
+        let tok = self.toks.get(self.pos).cloned();
+        if tok.is_some() {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.toks.len()
+    }
+
+    /// The reserved word at the cursor, if the current token is one.
+    fn peek_keyword(&self) -> Option<&'static str> {
+        self.peek().and_then(as_keyword)
+    }
+
+    /// Skip `;` and newline separators (not `&`, which is significant).
+    fn skip_separators(&mut self) {
+        while matches!(self.peek(), Some(Token::Semi | Token::Newline)) {
+            self.pos += 1;
+        }
+    }
+
+    /// Skip newlines only — used after `&&`/`||`/`|` to allow line continuation.
+    fn skip_newlines(&mut self) {
+        while matches!(self.peek(), Some(Token::Newline)) {
+            self.pos += 1;
+        }
+    }
+
+    /// A list ends at end of input or a reserved word that closes a construct
+    /// (`then`, `fi`, `do`, …) — anything that isn't a command starter.
+    fn at_list_end(&self) -> bool {
+        match self.peek_keyword() {
+            Some(kw) => !is_command_start(kw),
+            None => self.at_end(),
+        }
+    }
+
+    fn parse_list(&mut self) -> Result<CommandList, ParseError> {
+        let mut jobs = Vec::new();
+        loop {
+            self.skip_separators();
+            if self.at_list_end() {
                 break;
             }
-            Some(Token::Semi) => jobs.push(Job { list, background: false }),
-            Some(Token::Amp) => jobs.push(Job { list, background: true }),
-            Some(other) => return Err(format!("unexpected token after job: {other:?}")),
+            let list = self.parse_and_or()?;
+            let background = matches!(self.peek(), Some(Token::Amp));
+            if matches!(self.peek(), Some(Token::Semi | Token::Amp | Token::Newline)) {
+                self.pos += 1;
+            }
+            jobs.push(Job { list, background });
         }
-        if iter.peek().is_none() {
-            break;
+        Ok(CommandList { jobs })
+    }
+
+    fn parse_and_or(&mut self) -> Result<AndOrList, ParseError> {
+        let first = self.parse_pipeline()?;
+        let mut rest = Vec::new();
+        loop {
+            let connector = match self.peek() {
+                Some(Token::And) => Connector::And,
+                Some(Token::Or) => Connector::Or,
+                _ => break,
+            };
+            self.pos += 1;
+            self.skip_newlines();
+            rest.push((connector, self.parse_pipeline()?));
+        }
+        Ok(AndOrList { first, rest })
+    }
+
+    fn parse_pipeline(&mut self) -> Result<RawPipeline, ParseError> {
+        let mut commands = vec![self.parse_command()?];
+        while matches!(self.peek(), Some(Token::Pipe)) {
+            self.pos += 1;
+            self.skip_newlines();
+            commands.push(self.parse_command()?);
+        }
+        Ok(RawPipeline { commands })
+    }
+
+    fn parse_command(&mut self) -> Result<RawCommand, ParseError> {
+        match self.peek_keyword() {
+            Some("if") => self.parse_if(),
+            Some("while") => self.parse_loop(false),
+            Some("until") => self.parse_loop(true),
+            Some("for") => self.parse_for(),
+            // A closing keyword here means a body was empty (e.g. `if; then`).
+            Some(kw) => Err(ParseError::Syntax(format!("unexpected `{kw}`"))),
+            None => self.parse_simple(),
         }
     }
 
-    Ok(CommandList { jobs })
-}
+    fn parse_simple(&mut self) -> Result<RawCommand, ParseError> {
+        let mut argv = Vec::new();
+        let mut redirects = Vec::new();
 
-/// Parse an and-or chain: one pipeline, then `&&`/`||`-joined pipelines.
-fn parse_andor(iter: &mut Peekable) -> Result<AndOrList, String> {
-    let first = parse_pipeline(iter)?;
-    let mut rest = Vec::new();
-    loop {
-        let connector = match iter.peek() {
-            Some(Token::And) => Connector::And,
-            Some(Token::Or) => Connector::Or,
-            _ => break,
-        };
-        iter.next();
-        rest.push((connector, parse_pipeline(iter)?));
-    }
-    Ok(AndOrList { first, rest })
-}
-
-/// Parse one pipeline, stopping (without consuming) at a control operator or
-/// the end of the token stream.
-fn parse_pipeline(iter: &mut Peekable) -> Result<RawPipeline, String> {
-    let mut commands = Vec::new();
-    let mut cur = RawCommand {
-        argv: Vec::new(),
-        redirects: Vec::new(),
-    };
-
-    loop {
-        match iter.peek() {
-            None | Some(Token::Semi | Token::And | Token::Or | Token::Amp) => break,
-            _ => {}
-        }
-        match iter.next().unwrap() {
-            Token::Word(w) => cur.argv.push(w),
-            Token::Pipe => {
-                if cur.argv.is_empty() {
-                    return Err("unexpected '|'".into());
+        loop {
+            match self.peek() {
+                // After the first word, reserved words are ordinary arguments,
+                // so we match on `Word` without consulting `as_keyword`.
+                Some(Token::Word(_)) => {
+                    let Some(Token::Word(w)) = self.advance() else {
+                        unreachable!()
+                    };
+                    argv.push(w);
                 }
-                commands.push(std::mem::replace(
-                    &mut cur,
-                    RawCommand { argv: Vec::new(), redirects: Vec::new() },
-                ));
+                Some(Token::Less) => {
+                    self.pos += 1;
+                    redirects.push(RawRedirect::Stdin(self.expect_word("<")?));
+                }
+                Some(Token::Great) => {
+                    self.pos += 1;
+                    redirects.push(RawRedirect::Stdout {
+                        file: self.expect_word(">")?,
+                        append: false,
+                    });
+                }
+                Some(Token::DGreat) => {
+                    self.pos += 1;
+                    redirects.push(RawRedirect::Stdout {
+                        file: self.expect_word(">>")?,
+                        append: true,
+                    });
+                }
+                _ => break,
             }
-            Token::Less => {
-                let file = expect_word(iter.next(), "<")?;
-                cur.redirects.push(RawRedirect::Stdin(file));
+        }
+
+        if argv.is_empty() && redirects.is_empty() {
+            return Err(self.eof_or_syntax("expected a command"));
+        }
+        Ok(RawCommand::Simple(RawSimple { argv, redirects }))
+    }
+
+    fn parse_if(&mut self) -> Result<RawCommand, ParseError> {
+        self.expect_keyword("if")?;
+        let mut branches = Vec::new();
+        branches.push(self.parse_cond_then()?);
+        while self.peek_keyword() == Some("elif") {
+            self.pos += 1;
+            branches.push(self.parse_cond_then()?);
+        }
+        let else_body = if self.peek_keyword() == Some("else") {
+            self.pos += 1;
+            Some(self.parse_list()?)
+        } else {
+            None
+        };
+        self.expect_keyword("fi")?;
+        Ok(RawCommand::Compound(Box::new(Compound::If { branches, else_body })))
+    }
+
+    fn parse_cond_then(&mut self) -> Result<(CommandList, CommandList), ParseError> {
+        let cond = self.parse_list()?;
+        self.expect_keyword("then")?;
+        let body = self.parse_list()?;
+        Ok((cond, body))
+    }
+
+    fn parse_loop(&mut self, until: bool) -> Result<RawCommand, ParseError> {
+        self.expect_keyword(if until { "until" } else { "while" })?;
+        let cond = self.parse_list()?;
+        self.expect_keyword("do")?;
+        let body = self.parse_list()?;
+        self.expect_keyword("done")?;
+        Ok(RawCommand::Compound(Box::new(Compound::Loop { until, cond, body })))
+    }
+
+    fn parse_for(&mut self) -> Result<RawCommand, ParseError> {
+        self.expect_keyword("for")?;
+        let var = self.expect_name()?;
+
+        let mut words = Vec::new();
+        if self.peek_keyword() == Some("in") {
+            self.pos += 1;
+            while let Some(Token::Word(_)) = self.peek() {
+                let Some(Token::Word(w)) = self.advance() else {
+                    unreachable!()
+                };
+                words.push(w);
             }
-            Token::Great => {
-                let file = expect_word(iter.next(), ">")?;
-                cur.redirects.push(RawRedirect::Stdout { file, append: false });
+        }
+
+        // A separator (`;` or newline) precedes `do`.
+        self.skip_separators();
+        self.expect_keyword("do")?;
+        let body = self.parse_list()?;
+        self.expect_keyword("done")?;
+        Ok(RawCommand::Compound(Box::new(Compound::For { var, words, body })))
+    }
+
+    fn expect_keyword(&mut self, kw: &str) -> Result<(), ParseError> {
+        self.skip_newlines();
+        match self.peek_keyword() {
+            Some(found) if found == kw => {
+                self.pos += 1;
+                Ok(())
             }
-            Token::DGreat => {
-                let file = expect_word(iter.next(), ">>")?;
-                cur.redirects.push(RawRedirect::Stdout { file, append: true });
-            }
-            // The peek above guarantees we never reach a connector here.
-            tok => return Err(format!("unexpected token: {tok:?}")),
+            _ => Err(self.eof_or_syntax(&format!("expected `{kw}`"))),
         }
     }
 
-    if cur.argv.is_empty() {
-        return Err("expected a command".into());
+    fn expect_word(&mut self, after: &str) -> Result<Word, ParseError> {
+        match self.advance() {
+            Some(Token::Word(w)) => Ok(w),
+            None => Err(ParseError::Incomplete),
+            _ => Err(ParseError::Syntax(format!("expected filename after `{after}`"))),
+        }
     }
-    commands.push(cur);
-    Ok(RawPipeline { commands })
+
+    /// A bare identifier word, e.g. the variable of a `for` loop.
+    fn expect_name(&mut self) -> Result<String, ParseError> {
+        match self.peek() {
+            Some(Token::Word(parts)) => {
+                if let [WordPart::Unquoted(s)] = parts.as_slice() {
+                    if is_name(s) {
+                        let name = s.clone();
+                        self.pos += 1;
+                        return Ok(name);
+                    }
+                }
+                Err(ParseError::Syntax("expected a variable name".into()))
+            }
+            None => Err(ParseError::Incomplete),
+            _ => Err(ParseError::Syntax("expected a variable name".into())),
+        }
+    }
+
+    /// Pick `Incomplete` (more input may finish it) vs a hard syntax error.
+    fn eof_or_syntax(&self, msg: &str) -> ParseError {
+        if self.at_end() {
+            ParseError::Incomplete
+        } else {
+            ParseError::Syntax(msg.to_string())
+        }
+    }
 }
 
-type Peekable = std::iter::Peekable<IntoIter<Token>>;
+/// The reserved word a token represents, if it's a single unquoted keyword.
+fn as_keyword(tok: &Token) -> Option<&'static str> {
+    if let Token::Word(parts) = tok {
+        if let [WordPart::Unquoted(s)] = parts.as_slice() {
+            return RESERVED.iter().copied().find(|&kw| kw == s);
+        }
+    }
+    None
+}
 
-fn expect_word(tok: Option<Token>, after: &str) -> Result<Word, String> {
+/// Reserved words that begin a command (vs. ones that close a construct).
+fn is_command_start(kw: &str) -> bool {
+    matches!(kw, "if" | "while" | "until" | "for")
+}
+
+fn is_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn describe(tok: &Token) -> String {
     match tok {
-        Some(Token::Word(w)) => Ok(w),
-        _ => Err(format!("expected filename after '{after}'")),
+        Token::Word(_) => "word".into(),
+        Token::Pipe => "|".into(),
+        Token::Or => "||".into(),
+        Token::And => "&&".into(),
+        Token::Amp => "&".into(),
+        Token::Semi => ";".into(),
+        Token::Less => "<".into(),
+        Token::Great => ">".into(),
+        Token::DGreat => ">>".into(),
+        Token::Newline => "newline".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::WordPart;
 
-    /// Collapse a word's parts into their raw text (ignoring quoting) so tests
-    /// can assert against plain strings.
     fn text(word: &Word) -> String {
         word.iter()
             .map(|p| match p {
@@ -187,91 +432,160 @@ mod tests {
             .collect()
     }
 
-    fn argv_text(cmd: &RawCommand) -> Vec<String> {
-        cmd.argv.iter().map(text).collect()
-    }
-
-    /// The lone job's and-or list, for tests that don't care about job structure.
+    /// The lone job's and-or list.
     fn only(list: &CommandList) -> &AndOrList {
         assert_eq!(list.jobs.len(), 1);
         &list.jobs[0].list
     }
 
+    /// Extract a simple command's argv as strings.
+    fn argv_text(cmd: &RawCommand) -> Vec<String> {
+        match cmd {
+            RawCommand::Simple(s) => s.argv.iter().map(text).collect(),
+            RawCommand::Compound(_) => panic!("expected a simple command"),
+        }
+    }
+
+    fn first_cmd(list: &CommandList) -> &RawCommand {
+        &only(list).first.commands[0]
+    }
+
+    fn parse_ok(input: &str) -> CommandList {
+        parse(input).unwrap()
+    }
+
     #[test]
     fn single_command() {
-        let p = parse("ls -la").unwrap();
-        let a = only(&p);
-        assert!(a.rest.is_empty());
-        assert_eq!(a.first.commands.len(), 1);
-        assert_eq!(argv_text(&a.first.commands[0]), vec!["ls", "-la"]);
+        let p = parse_ok("ls -la");
+        assert_eq!(argv_text(first_cmd(&p)), vec!["ls", "-la"]);
     }
 
     #[test]
     fn pipeline_splits() {
-        let p = parse("ls | grep rs | wc -l").unwrap();
+        let p = parse_ok("ls | grep rs | wc -l");
         assert_eq!(only(&p).first.commands.len(), 3);
     }
 
     #[test]
     fn captures_redirects() {
-        let p = parse("sort < in.txt >> out.txt").unwrap();
-        let c = &only(&p).first.commands[0];
-        assert_eq!(argv_text(c), vec!["sort"]);
-        assert_eq!(c.redirects.len(), 2);
+        let p = parse_ok("sort < in.txt >> out.txt");
+        match first_cmd(&p) {
+            RawCommand::Simple(s) => assert_eq!(s.redirects.len(), 2),
+            _ => panic!(),
+        }
     }
 
     #[test]
-    fn dangling_pipe_errors() {
-        assert!(parse("ls |").is_err());
+    fn dangling_pipe_is_incomplete() {
+        assert!(matches!(parse("ls |"), Err(ParseError::Incomplete)));
         assert!(parse("| ls").is_err());
     }
 
     #[test]
     fn parses_and_or() {
-        let p = parse("a && b | c || d").unwrap();
+        let p = parse_ok("a && b | c || d");
         let a = only(&p);
-        assert_eq!(argv_text(&a.first.commands[0]), vec!["a"]);
         let connectors: Vec<Connector> = a.rest.iter().map(|(c, _)| *c).collect();
         assert_eq!(connectors, vec![Connector::And, Connector::Or]);
-        // The `b | c` pipeline keeps both stages.
         assert_eq!(a.rest[0].1.commands.len(), 2);
     }
 
     #[test]
-    fn semicolon_separates_jobs() {
-        let p = parse("a ; b ; c").unwrap();
+    fn semicolon_and_background_separate_jobs() {
+        let p = parse_ok("a ; b ; c");
         assert_eq!(p.jobs.len(), 3);
-        assert!(p.jobs.iter().all(|j| !j.background));
-    }
-
-    #[test]
-    fn ampersand_marks_background() {
-        let p = parse("sleep 1 & echo done").unwrap();
-        assert_eq!(p.jobs.len(), 2);
+        let p = parse_ok("sleep 1 & echo done");
         assert!(p.jobs[0].background);
         assert!(!p.jobs[1].background);
     }
 
     #[test]
-    fn trailing_separator_is_ok() {
-        assert_eq!(parse("ls ;").unwrap().jobs.len(), 1);
-        let p = parse("sleep 1 &").unwrap();
-        assert_eq!(p.jobs.len(), 1);
-        assert!(p.jobs[0].background);
-    }
-
-    #[test]
-    fn empty_between_operators_errors() {
-        assert!(parse("a ;; b").is_err());
-        assert!(parse("&& a").is_err());
-        assert!(parse("a && && b").is_err());
+    fn newline_separates_jobs() {
+        let p = parse_ok("a\nb\nc");
+        assert_eq!(p.jobs.len(), 3);
+        // Blank lines collapse.
+        assert_eq!(parse_ok("a\n\n\nb").jobs.len(), 2);
     }
 
     #[test]
     fn comment_only_is_a_noop() {
-        assert!(parse("# just a comment").unwrap().jobs.is_empty());
-        assert!(parse("   ").unwrap().jobs.is_empty());
-        // A trailing comment doesn't change the command.
-        assert_eq!(parse("ls -l  # list").unwrap().jobs.len(), 1);
+        assert!(parse_ok("# just a comment").jobs.is_empty());
+        assert!(parse_ok("   ").jobs.is_empty());
+        assert_eq!(parse_ok("ls -l  # list").jobs.len(), 1);
+    }
+
+    #[test]
+    fn if_then_else() {
+        let p = parse_ok("if true; then echo yes; else echo no; fi");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.as_ref() {
+                Compound::If { branches, else_body } => {
+                    assert_eq!(branches.len(), 1);
+                    assert!(else_body.is_some());
+                }
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
+        }
+    }
+
+    #[test]
+    fn if_elif_chain() {
+        let p = parse_ok("if a; then b; elif c; then d; elif e; then f; fi");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.as_ref() {
+                Compound::If { branches, else_body } => {
+                    assert_eq!(branches.len(), 3);
+                    assert!(else_body.is_none());
+                }
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn while_and_for() {
+        assert!(matches!(
+            first_cmd(&parse_ok("while true; do echo x; done")),
+            RawCommand::Compound(_)
+        ));
+        let p = parse_ok("for x in a b c; do echo $x; done");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.as_ref() {
+                Compound::For { var, words, .. } => {
+                    assert_eq!(var, "x");
+                    assert_eq!(words.len(), 3);
+                }
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn multiline_if_across_newlines() {
+        let p = parse_ok("if true\nthen\n  echo hi\nfi");
+        assert!(matches!(first_cmd(&p), RawCommand::Compound(_)));
+    }
+
+    #[test]
+    fn incomplete_compound_reports_incomplete() {
+        assert!(matches!(parse("if true; then echo hi"), Err(ParseError::Incomplete)));
+        assert!(matches!(parse("while true; do"), Err(ParseError::Incomplete)));
+        assert!(matches!(parse("for x in a b"), Err(ParseError::Incomplete)));
+    }
+
+    #[test]
+    fn reserved_word_as_argument() {
+        // After the command word, `if`/`then` are ordinary arguments.
+        let p = parse_ok("echo if then fi");
+        assert_eq!(argv_text(first_cmd(&p)), vec!["echo", "if", "then", "fi"]);
+    }
+
+    #[test]
+    fn stray_terminator_is_error() {
+        assert!(matches!(parse("fi"), Err(ParseError::Syntax(_))));
+        assert!(matches!(parse("then echo"), Err(ParseError::Syntax(_))));
     }
 }

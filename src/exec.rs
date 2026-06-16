@@ -19,7 +19,7 @@ use std::io::Read;
 use std::process::{Child, Command as OsCommand, Stdio};
 
 use crate::builtins;
-use crate::parser::{AndOrList, CommandList, Connector, Job, RawPipeline};
+use crate::parser::{AndOrList, CommandList, Compound, Connector, Job, RawCommand, RawPipeline};
 
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -72,15 +72,59 @@ fn run_job(job: &Job) -> Result<i32, String> {
 fn run_andor(list: &AndOrList) -> Result<i32, String> {
     // Update `$?` after every pipeline, so a later one in the same line can read
     // it (e.g. `false || echo $?`).
-    let mut status = run_foreground(&list.first)?;
+    let mut status = run_pipeline_node(&list.first)?;
     crate::vars::set_last_status(status);
     for (connector, raw) in &list.rest {
         if should_run(*connector, status) {
-            status = run_foreground(raw)?;
+            status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
         }
     }
     Ok(status)
+}
+
+/// A pipeline that is a single compound command (`if`/`while`/`for`) is run
+/// directly; everything else goes through the simple-command path.
+fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
+    if let [RawCommand::Compound(compound)] = raw.commands.as_slice() {
+        return run_compound(compound);
+    }
+    run_foreground(raw)
+}
+
+fn run_compound(compound: &Compound) -> Result<i32, String> {
+    match compound {
+        Compound::If { branches, else_body } => {
+            for (cond, body) in branches {
+                if run_list(cond)? == 0 {
+                    return run_list(body);
+                }
+            }
+            match else_body {
+                Some(body) => run_list(body),
+                None => Ok(0),
+            }
+        }
+        Compound::Loop { until, cond, body } => {
+            let mut status = 0;
+            loop {
+                let met = run_list(cond)? == 0;
+                if met == *until {
+                    break; // while: stop when not met; until: stop when met
+                }
+                status = run_list(body)?;
+            }
+            Ok(status)
+        }
+        Compound::For { var, words, body } => {
+            let mut status = 0;
+            for value in crate::expand::expand_words(words)? {
+                crate::vars::set(var, &value);
+                status = run_list(body)?;
+            }
+            Ok(status)
+        }
+    }
 }
 
 fn should_run(connector: Connector, prev_status: i32) -> bool {

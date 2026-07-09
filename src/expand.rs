@@ -28,12 +28,21 @@ pub fn expand(raw: &RawPipeline) -> Result<Pipeline, String> {
     for rc in &raw.commands {
         let stage = match rc {
             RawCommand::Simple(s) => crate::exec::Stage::Simple(expand_simple(s)?),
-            // A compound stage isn't expanded here (its own body is expanded
+            // The compound's own body isn't expanded here (it's expanded
             // lazily, same as a sole compound) — just carried through. Only
             // Unix's job-control runner can actually run one as one stage
             // among several (it forks); elsewhere that's still an error, but
-            // one raised at run time, not here at expansion time.
-            RawCommand::Compound(c) => crate::exec::Stage::Compound(c.clone()),
+            // one raised at run time, not here at expansion time. Any
+            // redirects trailing its close (`done < file`) *are* expanded now,
+            // same as a simple command's.
+            RawCommand::Compound(rc) => {
+                let (redirects, heredoc) = expand_redirects(&rc.redirects)?;
+                crate::exec::Stage::Compound(crate::exec::CompoundStage {
+                    compound: rc.compound.clone(),
+                    redirects,
+                    heredoc,
+                })
+            }
         };
         commands.push(stage);
     }
@@ -100,9 +109,18 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
         argv = expanded;
     }
 
-    let mut redirects = Vec::with_capacity(rc.redirects.len());
+    let (redirects, heredoc) = expand_redirects(&rc.redirects)?;
+    Ok(Command { argv, redirects, assignments, heredoc })
+}
+
+/// Expand a raw redirect list into concrete `Redirect`s plus an optional
+/// here-doc body (kept separate since it feeds stdin rather than naming a
+/// target file) — shared by simple commands and compound commands, since a
+/// redirect can trail either (`echo hi > f`, `while …; done < f`).
+pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Option<String>), String> {
+    let mut redirects = Vec::with_capacity(raw.len());
     let mut heredoc = None;
-    for r in &rc.redirects {
+    for r in raw {
         match r {
             RawRedirect::File { fd, file, mode } => redirects.push(Redirect::File {
                 fd: *fd,
@@ -116,15 +134,13 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
             RawRedirect::Dup { fd, target } => {
                 redirects.push(Redirect::Dup { fd: *fd, target: *target })
             }
-            // A here-doc body feeds stdin; it's a Command field, not a Redirect.
             // Its `$`-expansions run unless the delimiter was quoted.
             RawRedirect::Heredoc { body, expand } => {
                 heredoc = Some(if *expand { expand_dollars(body)? } else { body.clone() });
             }
         }
     }
-
-    Ok(Command { argv, redirects, assignments, heredoc })
+    Ok((redirects, heredoc))
 }
 
 /// If `word` has the form `NAME=...` with `NAME` a valid identifier whose `=`

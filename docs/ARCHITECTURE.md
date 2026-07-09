@@ -353,14 +353,33 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   `eprintln!` straight to the process's real stdio, so a redirect on one
   (`echo hi > f`) can't be handed to a child the way `build_stage` hands
   redirects to an external command's `Command`; instead, on Unix,
-  `redirect_builtin_stdio` temporarily `dup2`s the shell's own fd 0/1/2 to
-  match, running the builtin, then restores the originals (`StdioGuard`'s
-  `Drop`, so a redirect that fails partway through still restores whatever it
-  already touched). Off Unix, a builtin's redirects are silently ignored — no
-  raw `dup2` equivalent in play (see the Windows note above). This only
-  covers a builtin as the *sole* command of a pipeline — one in the middle of
-  a multi-stage pipe (`echo hi | cd`) is still the pre-existing punt: rush
+  `redirect_stdio` temporarily `dup2`s the shell's own fd 0/1/2 to match,
+  running the builtin, then restores the originals (`StdioGuard`'s `Drop`, so
+  a redirect that fails partway through still restores whatever it already
+  touched). Off Unix, a builtin's redirects are silently ignored — no raw
+  `dup2` equivalent in play (see the Windows note above). This only covers a
+  builtin as the *sole* command of a pipeline — one in the middle of a
+  multi-stage pipe (`echo hi | cd`) is still the pre-existing punt: rush
   tries to exec it as an external program and fails.
+- **Redirects trailing a compound command's close** (`while …; done < file`,
+  `{ …; } > log`, C7's prerequisite fix): the parser attaches them to the
+  compound itself (`RawCompound`/`exec::CompoundStage`, alongside a here-doc
+  body, mirroring `Command`'s own `redirects`/`heredoc` split) rather than
+  leaving them to become a stray no-op command afterward, which is what used
+  to happen — silently, no parse error, so `done < file` never wired the
+  file to fd 0 at all. Applied via the *same* `redirect_stdio` a lone builtin
+  uses, wrapping the whole compound's execution instead of one builtin call
+  (`run_compound_with_redirects`), reused unchanged for a compound as one
+  stage of a real pipeline (`job::spawn_compound_stage`, forked — the guard
+  is deliberately never restored there, since that child exits right after)
+  and for capturing a sole compound via `$(...)` (`capture_compound`), with
+  the same "explicit redirect overrides implicit pipe/capture wiring"
+  precedence `build_stage` already uses for simple commands. A trailing
+  here-doc is fed through a `CLOEXEC`-marked pipe from a background thread
+  (`set_cloexec`) — without that, a real child spawned from the compound's
+  body before the writer thread finished would inherit its own copy of the
+  write end via fork/exec, and the reader would never see EOF (a real
+  deadlock found while testing this).
 - `build_stage` constructs one stage's `std::process::Command` and stdio. It
   resolves fd 0/1/2 to `Sink`s (inherit / pipe / file), applying redirects in
   source order — so `> f 2>&1` sends both to `f` (the dup `try_clone`s the file

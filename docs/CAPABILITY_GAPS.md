@@ -36,7 +36,7 @@ applicable to that shell's own model.
 |---|---|---|---|---|---|---|
 | Real pipes / job control / forked subshells | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `#`/`##`/`%`/`%%` param. expansion | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| `read` / `printf` / `shift` / `getopts` | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 |
+| `read` / `printf` / `shift` / `getopts` | 🟡† | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | `local` function-scoped vars | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `wait` / `disown` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
@@ -51,12 +51,15 @@ applicable to that shell's own model.
 \* Done for the interactive/script job-control path; a compound as one stage
 among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
+† `read` (with `-r` and `$IFS` splitting) is done; `printf`/`shift`/`getopts`
+remain missing.
+
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11
+- **Tier II — missing standard builtins:** 11 (1 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -166,11 +169,46 @@ POSIX-mandated in every comparison shell here. Each one blocks a whole
 category of otherwise-ordinary scripts outright, rather than just being an
 inconvenience.
 
-### C7 — `read`
+### C7 — `read` ✅ done
 Arguably the single highest-value missing builtin. Without it: no `while
 read line; do …; done < file`, no prompting for input, no parsing
 `IFS`-delimited fields from a line. Blocks an entire class of everyday
 scripts on its own. **Effort: M.**
+
+Implemented: `read [-r] [name...]` (`builtins.rs`), reading one logical line
+directly off fd 0 a byte at a time (never over-consuming past the newline,
+so a loop of calls sharing one fd — `while read line; do …; done < file` —
+picks up exactly where the last call left off) and splitting it into fields
+on `$IFS`, using the same whitespace/non-whitespace classification and
+trailing-delimiter asymmetry as word-splitting (C5). A name past the last
+field gets `""`; the *last* name absorbs any extra fields verbatim (original
+separators intact), not re-split. Without `-r`, `\<newline>` is a line
+continuation and `\<char>` escapes a separator; `-r` disables both. Exit
+status is 0 for a newline-terminated line, 1 on EOF (even if a trailing
+unterminated partial line was still read and assigned) — all verified
+against real bash directly across two dozen field-splitting/escaping/EOF
+scenarios.
+
+Landing this exposed a real, separate pre-existing gap it needed to be
+useful for its headline idiom: rush's parser silently dropped any redirect
+trailing a compound command's close (`while …; done < file`, `{ …; } > log`)
+— the tokens were simply left to become a stray no-op command afterward, so
+`done < file` never wired the file to fd 0 at all (a lone `while read …`
+with no pipe would silently read the shell's real stdin instead — a hang in
+a script, not an error). Fixed alongside `read`: the parser now attaches
+trailing redirects to a compound (new `RawCompound`/`exec::CompoundStage`),
+applied for the compound's whole duration via the same `redirect_stdio`
+(renamed from `redirect_builtin_stdio`, since it's no longer builtin-only)
+a lone builtin already used — including a compound as one stage of a real
+pipeline (`job::spawn_compound_stage`) and a compound captured via
+`$(...)` (`capture_compound`), with the same "explicit redirect overrides
+implicit pipe/capture wiring" precedence `build_stage` already uses for
+simple commands. A here-doc trailing a compound's close (`while …; done
+<<EOF`) works the same way, fed through a `CLOEXEC`-marked pipe from a
+background thread — the fix for a real deadlock found while testing this:
+without `CLOEXEC`, a real child spawned from the compound's body before the
+writer thread finished would inherit its own copy of the write end, so the
+reader never saw EOF.
 
 ### C8 — `printf`
 The portable, correct way to emit formatted output — real scripts avoid

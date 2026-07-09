@@ -19,7 +19,7 @@ use std::io::Read;
 use std::process::{Child, Command as OsCommand, Stdio};
 
 use crate::builtins;
-use crate::parser::{AndOrList, CommandList, Compound, Connector, Job, RawCommand, RawPipeline};
+use crate::parser::{AndOrList, CommandList, Compound, Connector, Job, RawCommand, RawCompound, RawPipeline};
 
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -50,7 +50,18 @@ pub use crate::parser::RedirMode;
 #[derive(Debug, Clone)]
 pub enum Stage {
     Simple(Command),
-    Compound(Box<Compound>),
+    Compound(CompoundStage),
+}
+
+/// A compound command plus any redirects trailing its close (`done < file`,
+/// `{ …; } > log`), already expanded — mirrors `Command`'s own
+/// `redirects`/`heredoc` split (a here-doc feeds stdin rather than naming a
+/// target file, so it isn't itself a `Redirect`).
+#[derive(Debug, Clone)]
+pub struct CompoundStage {
+    pub compound: Box<Compound>,
+    pub redirects: Vec<Redirect>,
+    pub heredoc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,10 +166,39 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
 /// A pipeline that is a single compound command (`if`/`while`/`for`) is run
 /// directly; everything else goes through the simple-command path.
 fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
-    if let [RawCommand::Compound(compound)] = raw.commands.as_slice() {
-        return run_compound(compound);
+    if let [RawCommand::Compound(rc)] = raw.commands.as_slice() {
+        return run_compound_with_redirects(rc);
     }
     run_foreground(raw)
+}
+
+/// Run a sole compound command, applying any redirects trailing its close
+/// (`while …; done < file`, `{ …; } > log`) for the duration — the same idea
+/// as `run_builtin_foreground`'s `redirect_stdio`, just wrapping the whole
+/// compound instead of one builtin call. This covers the common case (no
+/// pipe involved); a compound as one stage *of* a real pipeline goes through
+/// `job::spawn_compound_stage` instead, which applies its own redirects the
+/// same way in the forked child.
+fn run_compound_with_redirects(rc: &RawCompound) -> Result<i32, String> {
+    if rc.redirects.is_empty() {
+        return run_compound(&rc.compound);
+    }
+    let (redirects, heredoc) = crate::expand::expand_redirects(&rc.redirects)?;
+    #[cfg(unix)]
+    {
+        // Unlike a builtin (which writes straight to the process's own fds),
+        // a compound's body can itself spawn real children (an external
+        // command, a piped stage, a subshell) that inherit fd 0/1/2 by the
+        // usual rules — dup2'ing the *shell's* fds for the duration covers
+        // both that and any builtins/`println!` output inside it uniformly.
+        let _guard = redirect_stdio(&redirects, heredoc.as_deref())?;
+        run_compound(&rc.compound)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (redirects, heredoc);
+        Err("redirects on a compound command are not supported on this platform".into())
+    }
 }
 
 pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
@@ -395,7 +435,7 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
 fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     #[cfg(unix)]
     {
-        let _guard = redirect_builtin_stdio(&cmd.redirects)?;
+        let _guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
         Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
     }
     #[cfg(not(unix))]
@@ -406,11 +446,17 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     }
 }
 
-/// Temporarily redirect the shell's own fd 0/1/2 to match `redirects`,
-/// restoring the originals when the returned guard drops. Unix only: needs a
-/// real `dup`/`dup2` to save and restore descriptors that outlive this call.
+/// Temporarily redirect the shell's own fd 0/1/2 to match `redirects` (plus
+/// `heredoc`, if any, which always wins for fd 0 — same ordering
+/// `build_stage` uses), restoring the originals when the returned guard
+/// drops. Used both for a lone builtin (`run_builtin_foreground`) and for a
+/// whole compound command run in-process (`run_compound_with_redirects`) —
+/// forked pipeline stages instead use this same logic but discard the guard,
+/// since a forked child never needs to restore anything (see
+/// `job::spawn_compound_stage`). Unix only: needs a real `dup`/`dup2` to save
+/// and restore descriptors that outlive this call.
 #[cfg(unix)]
-fn redirect_builtin_stdio(redirects: &[Redirect]) -> Result<StdioGuard, String> {
+pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<StdioGuard, String> {
     use std::os::unix::io::AsRawFd;
 
     let mut guard = StdioGuard { saved: Vec::new() };
@@ -470,14 +516,54 @@ fn redirect_builtin_stdio(redirects: &[Redirect]) -> Result<StdioGuard, String> 
         }
     }
 
+    // A here-document always wins for fd 0, same ordering `build_stage` uses.
+    // We aren't forking here, so there's no `Child::stdin` to write into
+    // after spawn (`feed_heredoc`'s approach) — instead materialize a real
+    // pipe and feed it from a background thread (so a body bigger than the
+    // pipe buffer can't deadlock), then dup2 its read end onto fd 0 through
+    // the same tracked `redirect_to`, so it's restored like any other.
+    //
+    // Both ends get `CLOEXEC`: if the compound's body spawns a real child
+    // (an external command) before the writer thread finishes, that child
+    // would otherwise inherit its own copy of the write end (fork/exec
+    // inherits open fds by default) and keep it open past the thread's own
+    // close — the reader would then never see EOF. `dup2` onto fd 0 always
+    // clears `CLOEXEC` on the *new* descriptor regardless, so this doesn't
+    // stop the child from reading its inherited fd 0 normally.
+    if let Some(body) = heredoc {
+        let (read, write) = make_pipe()?;
+        set_cloexec(&read)?;
+        set_cloexec(&write)?;
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut write = write;
+            let _ = write.write_all(body.as_bytes());
+        });
+        redirect_to(&mut guard, 0, &read)?;
+    }
+
     Ok(guard)
 }
 
-/// Restores the shell's original fd 0/1/2 (saved by `redirect_builtin_stdio`)
-/// when dropped — including on an early return via `?`, so a redirect that
-/// fails partway through never leaves the shell talking to the wrong fd.
+/// Mark a descriptor close-on-exec, so a forked child that goes on to `exec`
+/// doesn't inherit it.
 #[cfg(unix)]
-struct StdioGuard {
+fn set_cloexec(f: &File) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    let fd = f.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+/// Restores the shell's original fd 0/1/2 (saved by `redirect_stdio`) when
+/// dropped — including on an early return via `?`, so a redirect that fails
+/// partway through never leaves the shell talking to the wrong fd.
+#[cfg(unix)]
+pub(crate) struct StdioGuard {
     saved: Vec<(i32, i32)>,
 }
 
@@ -536,8 +622,8 @@ fn capture_andor(list: &AndOrList, out: &mut String) -> Result<i32, String> {
 /// substitution — this was missing before, leaving `$?` at whatever it was
 /// from outside the substitution instead of tracking its own jobs.
 fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> {
-    if let [RawCommand::Compound(compound)] = raw.commands.as_slice() {
-        let (status, captured) = capture_compound(compound)?;
+    if let [RawCommand::Compound(rc)] = raw.commands.as_slice() {
+        let (status, captured) = capture_compound(rc)?;
         out.push_str(&captured);
         crate::vars::set_last_status(status);
         return Ok(status);
@@ -565,13 +651,18 @@ fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> 
 /// real stdout), fork (Unix only, mirroring `run_subshell_forked`) and
 /// redirect the *child's* fd 1 to a pipe we own before running the compound
 /// there — everything the child writes, in-process or via a further spawn
-/// that inherits its stdout, ends up in that pipe. This only handles a
-/// pipeline that *is* a single compound; one as one stage among several in a
-/// larger pipeline remains the documented, separate limitation.
+/// that inherits its stdout, ends up in that pipe. Any redirects trailing the
+/// compound's own close (`$(while …; done < file)`) are applied *after* that
+/// baseline, so — same precedence as an ordinary command inside `$(...)` —
+/// an explicit one targeting fd 1 overrides the capture pipe rather than
+/// being captured. This only handles a pipeline that *is* a single compound;
+/// one as one stage among several in a larger pipeline remains the
+/// documented, separate limitation.
 #[cfg(unix)]
-fn capture_compound(compound: &Compound) -> Result<(i32, String), String> {
+fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
     use std::os::unix::io::AsRawFd;
 
+    let (redirects, heredoc) = crate::expand::expand_redirects(&rc.redirects)?;
     let (read, write) = make_pipe()?;
     match unsafe { libc::fork() } {
         -1 => Err(std::io::Error::last_os_error().to_string()),
@@ -583,7 +674,16 @@ fn capture_compound(compound: &Compound) -> Result<(i32, String), String> {
             }
             drop(write);
             drop(read);
-            let status = run_compound(compound).unwrap_or(1);
+            match redirect_stdio(&redirects, heredoc.as_deref()) {
+                // Never restore — this child exits right after running the
+                // compound, so there's nothing to give the fds back to.
+                Ok(guard) => std::mem::forget(guard),
+                Err(e) => {
+                    eprintln!("rush: {e}");
+                    crate::trap::exit_shell(1);
+                }
+            }
+            let status = run_compound(&rc.compound).unwrap_or(1);
             crate::trap::exit_shell(status);
         }
         pid => {
@@ -612,7 +712,7 @@ fn capture_compound(compound: &Compound) -> Result<(i32, String), String> {
 /// compound can't be captured, same as it already couldn't be part of a
 /// pipeline here.
 #[cfg(not(unix))]
-fn capture_compound(_compound: &Compound) -> Result<(i32, String), String> {
+fn capture_compound(_rc: &RawCompound) -> Result<(i32, String), String> {
     Err("compound commands cannot be captured on this platform".into())
 }
 
@@ -878,7 +978,7 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
         .iter()
         .map(|stage| match stage {
             Stage::Simple(cmd) => cmd.argv.join(" "),
-            Stage::Compound(compound) => match compound.as_ref() {
+            Stage::Compound(stage) => match stage.compound.as_ref() {
                 Compound::If { .. } => "if ...".to_string(),
                 Compound::Loop { until: false, .. } => "while ...".to_string(),
                 Compound::Loop { until: true, .. } => "until ...".to_string(),

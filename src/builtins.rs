@@ -36,6 +36,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "command" => Some(command_cmd(argv)),
         "type" => Some(type_cmd(argv)),
         "hash" => Some(hash_cmd(argv)),
+        "." | "source" => Some(source_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -45,7 +46,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash",
+    "getopts", "command", "type", "hash", ".", "source",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1198,6 +1199,24 @@ fn hash_cmd(argv: &[String]) -> i32 {
         }
     }
     status
+}
+
+/// `. name [args...]` / `source name [args...]` — run `name`'s commands in
+/// the current shell (see `exec::source_file` for the full semantics: no
+/// fork, no new variable scope, `$PATH`-searched, positional parameters
+/// swapped only when `args` are given, `return` ends just the sourcing).
+fn source_cmd(argv: &[String]) -> i32 {
+    let Some(name) = argv.get(1) else {
+        eprintln!("{}: filename argument required", argv[0]);
+        return 2;
+    };
+    match crate::exec::source_file(name, &argv[2..]) {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("{}: {name}: {e}", argv[0]);
+            1
+        }
+    }
 }
 
 fn exit(argv: &[String]) -> Option<i32> {

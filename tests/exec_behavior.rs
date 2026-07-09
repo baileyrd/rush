@@ -369,6 +369,81 @@ fn wait_builtin_and_last_bg_pid() {
 }
 
 #[test]
+fn source_and_dot_builtin() {
+    let path = std::env::temp_dir().join(format!("rush_source_lib_{}.sh", std::process::id()));
+    std::fs::write(&path, "FOO=bar\ngreet() { echo \"hi $1\"; }\n").unwrap();
+    let file = path.to_str().unwrap();
+
+    // `.` runs the file in the current environment: variables and functions
+    // it defines stick around afterward, and `source` is a plain synonym.
+    assert_eq!(rush(&format!(". {file}; echo $FOO; greet world")).0, "bar\nhi world\n");
+    assert_eq!(rush(&format!("source {file}; echo $FOO")).0, "bar\n");
+
+    // With no extra args, the caller's own positional params show through
+    // unchanged; extra args temporarily replace them, restored afterward.
+    let args_path = std::env::temp_dir().join(format!("rush_source_args_{}.sh", std::process::id()));
+    std::fs::write(&args_path, "echo \"args:$#:$*\"\n").unwrap();
+    let args_file = args_path.to_str().unwrap();
+    assert_eq!(
+        rush(&format!("f() {{ . {args_file}; echo \"after:$#:$*\"; }}; f a b c")).0,
+        "args:3:a b c\nafter:3:a b c\n"
+    );
+    assert_eq!(
+        rush(&format!("f() {{ . {args_file} x y; echo \"after:$#:$*\"; }}; f a b c")).0,
+        "args:2:x y\nafter:3:a b c\n"
+    );
+
+    // `return` inside the sourced file ends only the sourcing, not the
+    // caller; `break`/`continue` are NOT consumed and propagate transparently
+    // to an enclosing loop back in the calling context.
+    let ret_path = std::env::temp_dir().join(format!("rush_source_return_{}.sh", std::process::id()));
+    std::fs::write(&ret_path, "echo before\nreturn 5\necho after\n").unwrap();
+    let ret_file = ret_path.to_str().unwrap();
+    let (out, status) = rush(&format!(". {ret_file}; echo \"status=$?\"; echo done"));
+    assert_eq!(out, "before\nstatus=5\ndone\n");
+    assert_eq!(status, 0);
+
+    let brk_path = std::env::temp_dir().join(format!("rush_source_break_{}.sh", std::process::id()));
+    std::fs::write(&brk_path, "echo in-lib\nbreak\necho unreached\n").unwrap();
+    let brk_file = brk_path.to_str().unwrap();
+    assert_eq!(
+        rush(&format!("for i in 1 2 3; do . {brk_file}; echo unreached-loop-body; done; echo after-loop")).0,
+        "in-lib\nafter-loop\n"
+    );
+
+    // Missing file: a failure status (error text goes to stderr).
+    let (_, status) = rush(". /no/such/rush_source_test_file.sh");
+    assert_eq!(status, 1);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&args_path);
+    let _ = std::fs::remove_file(&ret_path);
+    let _ = std::fs::remove_file(&brk_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_searches_path_for_a_readable_but_not_executable_bare_name() {
+    let dir = std::env::temp_dir().join(format!("rush_source_pathdir_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("rush_source_path_lib.sh");
+    std::fs::write(&lib, "PATHVAR=hit\n").unwrap();
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&lib).unwrap().permissions();
+    perms.set_mode(0o644); // readable, not executable
+    std::fs::set_permissions(&lib, perms).unwrap();
+
+    let src = format!(
+        "PATH=$PATH:{}; . rush_source_path_lib.sh; echo $PATHVAR",
+        dir.to_str().unwrap()
+    );
+    assert_eq!(rush(&src).0, "hit\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn getopts_builtin() {
     // Combined short flags (`-abc` = `-a -b -c`): `$OPTIND` stays put while
     // still inside the same word, advancing only once it's exhausted.

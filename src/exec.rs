@@ -168,24 +168,61 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
         }
         Compound::Group(list) => exec_list(list),
         Compound::Subshell(list) => {
-            // A real subshell forks; we approximate by isolating the state that
-            // commands usually mutate — the working directory and variables — so
-            // `(cd x; …)` and `(VAR=…; …)` don't leak out. (`exit` inside still
-            // exits the whole shell — a known limitation of not forking.)
-            let saved_cwd = std::env::current_dir().ok();
-            let saved_vars = crate::vars::snapshot();
-
-            let result = exec_list(list);
-
-            if let Some(dir) = saved_cwd {
-                let _ = std::env::set_current_dir(dir);
+            #[cfg(unix)]
+            {
+                run_subshell_forked(list)
             }
-            crate::vars::restore(saved_vars);
-            result
+            #[cfg(not(unix))]
+            {
+                // No `fork` on this platform: approximate isolation by saving
+                // and restoring the state commands usually mutate — the
+                // working directory and variables — so `(cd x; …)` and
+                // `(VAR=…; …)` don't leak out. `exit` inside still exits the
+                // whole shell (see docs/ARCHITECTURE.md's Windows note).
+                let saved_cwd = std::env::current_dir().ok();
+                let saved_vars = crate::vars::snapshot();
+
+                let result = exec_list(list);
+
+                if let Some(dir) = saved_cwd {
+                    let _ = std::env::set_current_dir(dir);
+                }
+                crate::vars::restore(saved_vars);
+                result
+            }
         }
         Compound::FuncDef { name, body } => {
             crate::func::define(name, body.clone());
             Ok(0)
+        }
+    }
+}
+
+/// Run a subshell's body in a forked child: real isolation for cwd,
+/// variables, and even `exit` — none of it can leak back to the parent,
+/// because the child is a genuinely separate process. The parent just waits
+/// for it and adopts its exit status as `$?`.
+#[cfg(unix)]
+fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
+    match unsafe { libc::fork() } {
+        -1 => Err(std::io::Error::last_os_error().to_string()),
+        0 => {
+            // Child: run the body, then exit with its status. The `exit`
+            // builtin's `std::process::exit` now only ends this child.
+            let status = exec_list(list).unwrap_or(1);
+            std::process::exit(status);
+        }
+        pid => {
+            let mut status: libc::c_int = 0;
+            loop {
+                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1 {
+                    return Ok(crate::job::exit_code(status));
+                }
+                // Interrupted by a signal (e.g. a background job's SIGCHLD); retry.
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
         }
     }
 }
@@ -271,13 +308,13 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     }
 
     if pipeline.commands.len() == 1 {
-        let argv = &pipeline.commands[0].argv;
+        let cmd = &pipeline.commands[0];
         // A defined function shadows external commands (but not builtins).
-        if argv.first().is_some_and(|name| crate::func::exists(name)) {
-            return call_function(argv);
+        if cmd.argv.first().is_some_and(|name| crate::func::exists(name)) {
+            return call_function(&cmd.argv);
         }
-        if let Some(code) = builtins::try_run(argv) {
-            return Ok(code);
+        if cmd.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
+            return run_builtin_foreground(cmd);
         }
     }
 
@@ -288,6 +325,113 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     #[cfg(not(unix))]
     {
         run(&pipeline, false).map(|(status, _)| status)
+    }
+}
+
+/// Run a builtin as the shell's sole foreground command, honoring any
+/// redirects attached to it (`echo hi > f`, `pwd 2>e`, `cd < f`, …). Builtins
+/// write via `println!`/`eprintln!` straight to the process's real stdio, so
+/// unlike an external command (whose redirects `build_stage` wires into a
+/// *child's* fds) a builtin's redirects have to be applied to the shell's own
+/// fds — temporarily, for the duration of the call.
+fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
+    #[cfg(unix)]
+    {
+        let _guard = redirect_builtin_stdio(&cmd.redirects)?;
+        Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
+    }
+    #[cfg(not(unix))]
+    {
+        // No raw `dup2` equivalent in play here, so a builtin's redirects are
+        // silently ignored on this platform (see docs/ARCHITECTURE.md).
+        Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
+    }
+}
+
+/// Temporarily redirect the shell's own fd 0/1/2 to match `redirects`,
+/// restoring the originals when the returned guard drops. Unix only: needs a
+/// real `dup`/`dup2` to save and restore descriptors that outlive this call.
+#[cfg(unix)]
+fn redirect_builtin_stdio(redirects: &[Redirect]) -> Result<StdioGuard, String> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut guard = StdioGuard { saved: Vec::new() };
+
+    // Same fd-0/2/else-is-stdout approximation `build_stage` uses.
+    let target_fd = |fd: u32| -> i32 {
+        match fd {
+            0 => 0,
+            2 => 2,
+            _ => 1,
+        }
+    };
+    let redirect_to = |guard: &mut StdioGuard, target: i32, source: &File| -> Result<(), String> {
+        if !guard.saved.iter().any(|(fd, _)| *fd == target) {
+            let saved = unsafe { libc::dup(target) };
+            if saved == -1 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            guard.saved.push((target, saved));
+        }
+        if unsafe { libc::dup2(source.as_raw_fd(), target) } == -1 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    };
+
+    for r in redirects {
+        match r {
+            Redirect::File { fd, file, mode } => {
+                let f = match mode {
+                    RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                    RedirMode::Write | RedirMode::Append => open_write(file, *mode == RedirMode::Append)?,
+                };
+                redirect_to(&mut guard, target_fd(*fd), &f)?;
+            }
+            Redirect::Both { file, append } => {
+                let f = open_write(file, *append)?;
+                redirect_to(&mut guard, 1, &f)?;
+                redirect_to(&mut guard, 2, &f)?;
+            }
+            Redirect::Dup { fd, target } => {
+                // `target` is already live on fd 0/1/2 (possibly redirected by
+                // an earlier entry in this same list) — dup straight from it.
+                let dst = target_fd(*fd);
+                let src = target_fd(*target);
+                if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
+                    let saved = unsafe { libc::dup(dst) };
+                    if saved == -1 {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
+                    guard.saved.push((dst, saved));
+                }
+                if unsafe { libc::dup2(src, dst) } == -1 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+        }
+    }
+
+    Ok(guard)
+}
+
+/// Restores the shell's original fd 0/1/2 (saved by `redirect_builtin_stdio`)
+/// when dropped — including on an early return via `?`, so a redirect that
+/// fails partway through never leaves the shell talking to the wrong fd.
+#[cfg(unix)]
+struct StdioGuard {
+    saved: Vec<(i32, i32)>,
+}
+
+#[cfg(unix)]
+impl Drop for StdioGuard {
+    fn drop(&mut self) {
+        for (fd, saved) in self.saved.drain(..) {
+            unsafe {
+                libc::dup2(saved, fd);
+                libc::close(saved);
+            }
+        }
     }
 }
 
@@ -345,14 +489,30 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
 
     for (i, cmd) in pipeline.commands.iter().enumerate() {
         let is_last = i == n - 1;
-        let mut command = build_stage(cmd, prev_stdout.take(), is_last, capture)?;
+        let (mut command, real_pipe_read) = build_stage(cmd, prev_stdout.take(), is_last, capture)?;
 
         let mut child = command
             .spawn()
             .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
+        // `Command` keeps any file-backed `Stdio` (our manually-made pipe
+        // included) alive in its own fields until dropped. For an ordinary
+        // file that's harmless, but a lingering parent-side copy of a pipe's
+        // write end stops the reader below from ever seeing EOF — so drop it
+        // now, before reading, not at the end of the loop iteration.
+        drop(command);
         feed_heredoc(&mut child, cmd);
 
-        if !is_last {
+        if let Some(read) = real_pipe_read {
+            // `2>&1` forced a real pipe (see `build_stage`): its read end is
+            // the next stage's stdin, or — on the last, captured stage — what
+            // we read stdout+stderr from directly.
+            if is_last && capture {
+                let mut out = read;
+                out.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+            } else {
+                prev_stdout = Some(Stdio::from(read));
+            }
+        } else if !is_last {
             prev_stdout = child.stdout.take().map(Stdio::from);
         } else if capture {
             if let Some(mut out) = child.stdout.take() {
@@ -377,12 +537,16 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
 /// stdio. An explicit `<`/`>`/`>>` redirect wins over pipe wiring; otherwise a
 /// non-final stage (or any stage when capturing) gets a piped stdout. Shared by
 /// the plain runner and the Unix job runner.
+/// Second return value: on Unix, `Some(read_end)` if `2>&1` forced us to
+/// materialize a real pipe for fd 1 (see `clone_or_materialize`) — the caller
+/// must use it as the next stage's stdin (or read it directly, when capturing)
+/// instead of taking `child.stdout`.
 pub(crate) fn build_stage(
     cmd: &Command,
     stdin_src: Option<Stdio>,
     is_last: bool,
     capture: bool,
-) -> Result<OsCommand, String> {
+) -> Result<(OsCommand, Option<File>), String> {
     let program = cmd
         .argv
         .first()
@@ -401,6 +565,7 @@ pub(crate) fn build_stage(
     let mut stdin_sink: Option<Stdio> = stdin_src;
     let mut stdout_sink = if !is_last || capture { Sink::Pipe } else { Sink::Inherit };
     let mut stderr_sink = Sink::Inherit;
+    let mut real_pipe_read: Option<File> = None;
 
     for r in &cmd.redirects {
         match r {
@@ -427,7 +592,11 @@ pub(crate) fn build_stage(
                 stderr_sink = Sink::File(g);
             }
             Redirect::Dup { fd, target } => {
-                let cloned = clone_sink(*target, &stdout_sink, &stderr_sink)?;
+                let cloned = if *target == 2 {
+                    clone_or_materialize(&mut stderr_sink, &mut real_pipe_read)?
+                } else {
+                    clone_or_materialize(&mut stdout_sink, &mut real_pipe_read)?
+                };
                 match fd {
                     2 => stderr_sink = cloned,
                     _ => stdout_sink = cloned,
@@ -451,7 +620,7 @@ pub(crate) fn build_stage(
         command.stderr(s);
     }
 
-    Ok(command)
+    Ok((command, real_pipe_read))
 }
 
 /// Where one descriptor is routed. Files are kept as handles so `2>&1` can
@@ -473,14 +642,51 @@ impl Sink {
     }
 }
 
-/// Clone the sink currently bound to `target` (for `fd>&target`). A pipe can't
-/// be shared with `std` before spawn, so duping a piped fd falls back to inherit.
-fn clone_sink(target: u32, stdout: &Sink, stderr: &Sink) -> Result<Sink, String> {
-    let src = if target == 2 { stderr } else { stdout };
-    Ok(match src {
-        Sink::Inherit | Sink::Pipe => Sink::Inherit,
-        Sink::File(f) => Sink::File(f.try_clone().map_err(|e| e.to_string())?),
-    })
+/// Clone `sink` (for `fd>&target`). `Stdio::piped()` doesn't hand us the write
+/// end before spawn, so a plain `Sink::Pipe` can't be shared with a second
+/// descriptor as-is. On Unix, materialize a real OS pipe we own instead:
+/// `sink` becomes a `File` wrapping the write end (so both descriptors get
+/// independent fds onto the *same* pipe), and the read end is stashed in
+/// `real_pipe_read` for the caller to use as the next stage's stdin.
+#[cfg(unix)]
+fn clone_or_materialize(sink: &mut Sink, real_pipe_read: &mut Option<File>) -> Result<Sink, String> {
+    if matches!(sink, Sink::Pipe) {
+        let (read, write) = make_pipe()?;
+        *real_pipe_read = Some(read);
+        *sink = Sink::File(write);
+    }
+    match sink {
+        Sink::Inherit | Sink::Pipe => Ok(Sink::Inherit),
+        Sink::File(f) => f.try_clone().map(Sink::File).map_err(|e| e.to_string()),
+    }
+}
+
+/// Off Unix there's no way to materialize a shareable pipe before spawn, so
+/// duping a piped fd falls back to inherit (see docs/ARCHITECTURE.md's Windows
+/// note).
+#[cfg(not(unix))]
+fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> Result<Sink, String> {
+    match sink {
+        Sink::Inherit | Sink::Pipe => Ok(Sink::Inherit),
+        Sink::File(f) => f.try_clone().map(Sink::File).map_err(|e| e.to_string()),
+    }
+}
+
+/// Create a real, parent-owned pipe (Unix only) so its write end can be shared
+/// across two descriptors (`stdout` and `stderr`) before spawn — something
+/// `Stdio::piped()` can't do, since it only exposes the pipe to `std` internals.
+#[cfg(unix)]
+fn make_pipe() -> Result<(File, File), String> {
+    use std::os::unix::io::FromRawFd;
+
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // SAFETY: `pipe(2)` just handed us two fresh, valid, owned descriptors.
+    let read = unsafe { File::from_raw_fd(fds[0]) };
+    let write = unsafe { File::from_raw_fd(fds[1]) };
+    Ok((read, write))
 }
 
 fn open_write(file: &str, append: bool) -> Result<File, String> {

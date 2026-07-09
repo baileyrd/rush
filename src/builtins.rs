@@ -28,6 +28,38 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
     }
 }
 
+/// Whether `name` is one `try_run` dispatches — so a caller can wire up
+/// redirects for a builtin *before* running it, without a speculative,
+/// side-effect-free call to `try_run` itself.
+pub fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "cd" | "pwd"
+            | "echo"
+            | "export"
+            | "unset"
+            | "test"
+            | "["
+            | "break"
+            | "continue"
+            | "return"
+            | "true"
+            | ":"
+            | "false"
+            | "exit"
+    ) || other_is_builtin(name)
+}
+
+#[cfg(unix)]
+fn other_is_builtin(name: &str) -> bool {
+    crate::job::is_builtin(name)
+}
+
+#[cfg(not(unix))]
+fn other_is_builtin(_name: &str) -> bool {
+    false
+}
+
 /// `echo [-n] [args...]` — join args with spaces; `-n` suppresses the newline.
 /// (No `-e` escape processing, matching the bash default.)
 fn echo(argv: &[String]) -> i32 {

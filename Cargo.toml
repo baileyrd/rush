@@ -2,6 +2,9 @@
 name = "rush"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A small, bash-compatible shell written in Rust"
+repository = "https://github.com/baileyrd/rush"
 
 [dependencies]
 rustyline = "18.0.0"

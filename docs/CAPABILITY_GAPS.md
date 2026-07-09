@@ -29,7 +29,8 @@ which is now down to a single open item (C36) — `local`, `getopts`,
 `command`/`type`/`hash`) turned up while closing out `source`; C37
 while closing out `eval`; C38 while closing out `exec`. Tier III
 (`set -euo pipefail`, the header nearly every production shell script
-opens with) is now underway too — `set -u` (C18) is done.
+opens with) is now half done — `-e` (already done), `-u` (C18), and
+`-o pipefail` (C19) all work; only `-x` (C20) is left of the header itself.
 
 ---
 
@@ -70,7 +71,7 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 ‡ `wait` (`pid`/`%job`, or none) is done, along with its `$!` prerequisite;
 `disown` remains missing.
 
-§ `-e` and `-u` are both done; `-o pipefail` (C19) is still missing.
+§ `-e`, `-u`, and `-o pipefail` are all done; `-x` (C20) is still missing.
 
 ---
 
@@ -78,7 +79,7 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
-- **Tier III — scripting-safety idioms:** 4 (1 done)
+- **Tier III — scripting-safety idioms:** 4 (2 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
 
@@ -555,11 +556,26 @@ part that actually matters), just with a different code. Not introduced
 by this change; not worth its own tracked item given how minor it is next
 to `set -u` actually existing at all.
 
-### C19 — `set -o pipefail`
+### C19 — `set -o pipefail` ✅ done
 Present in bash/ksh/zsh (notably *not* dash — bash-family parity, not
-strict POSIX). Without it, a pipeline's exit status is always just its last
-stage's: `false | true` "succeeds," masking real failures anywhere earlier
-in the chain. **Effort: M.**
+strict POSIX). Without it, a pipeline's exit status was always just its
+last stage's: `false | true` "succeeds," masking real failures anywhere
+earlier in the chain.
+
+Added `vars::set_pipefail`/`pipefail` (mirroring `errexit`/`nounset`'s own
+thread-local flags), `set`'s new `-o`/`+o` two-token parsing (`set -o
+pipefail`, `set +o pipefail`; an unrecognized `-o` name is an error, not a
+silent no-op), and a shared `exec::pipeline_status` helper called from both
+places a pipeline's stages get reduced to one exit code: the non-Unix/
+capture runner (`exec::run`, used for both a non-Unix foreground pipeline
+*and* `$(...)` command substitution — pipefail applies inside a
+substitution too, verified directly) and the Unix job-control runner
+(`job::wait_pgid`, which now tracks every stage's own exit code by position
+instead of only the last). Without pipefail, still just the last stage's
+status; with it, the *rightmost* non-zero status among all stages (not
+"the first failure", not "any failure" — verified directly against real
+bash with a distinct exit code at each position to disambiguate), or 0 if
+every stage succeeded.
 
 ### C20 — `set -x` (xtrace)
 POSIX-mandated; present in dash/bash/ksh/zsh. The standard way to debug a

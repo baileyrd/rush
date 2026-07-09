@@ -162,6 +162,41 @@ fn nounset_rejects_unset_variable_references() {
 }
 
 #[test]
+fn pipefail_reports_the_rightmost_nonzero_stage() {
+    // Without pipefail, a pipeline's status is always just its last stage's.
+    assert_eq!(rush("false | true; echo $?").0, "0\n");
+
+    // With it: the rightmost non-zero status among all stages, not "the
+    // first failure" or "any failure" — specifically the one closest to
+    // the end (verified directly against real bash with distinct codes at
+    // each position).
+    assert_eq!(rush("set -o pipefail; false | true; echo $?").0, "1\n");
+    assert_eq!(rush("set -o pipefail; true | false; echo $?").0, "1\n");
+    assert_eq!(rush("set -o pipefail; true | true; echo $?").0, "0\n");
+    assert_eq!(
+        rush("set -o pipefail; (exit 3) | (exit 5) | true; echo $?").0,
+        "5\n"
+    );
+    assert_eq!(
+        rush("set -o pipefail; (exit 5) | (exit 3) | (exit 0); echo $?").0,
+        "3\n"
+    );
+
+    // Applies inside command substitution too, not just a foreground pipeline.
+    assert_eq!(rush("set -o pipefail; x=$(false | true); echo $?").0, "1\n");
+
+    // `set +o pipefail` turns it back off.
+    assert_eq!(
+        rush("set -o pipefail; set +o pipefail; false | true; echo $?").0,
+        "0\n"
+    );
+
+    // An unrecognized `-o` name is an error, not a silently-ignored no-op.
+    let (_, status) = rush("set -o badname");
+    assert_eq!(status, 1);
+}
+
+#[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used
     // to leak stderr straight to the terminal instead of routing it through

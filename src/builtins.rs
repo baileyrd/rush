@@ -1351,17 +1351,34 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 
 /// `set -e` / `set +e` — errexit: a failing command exits the shell (see
 /// `exec::exec_list_impl`). `set -u` / `set +u` — nounset: referencing an
-/// unset variable is an error (see `expand::var_lookup_checked`). Other
-/// flags aren't implemented yet; naming one is an error rather than a
-/// silently-ignored no-op.
+/// unset variable is an error (see `expand::var_lookup_checked`). `set -o
+/// pipefail` / `set +o pipefail` — a pipeline's own exit status is the
+/// rightmost non-zero stage rather than just its last (see
+/// `exec::pipeline_status`). Other flags/`-o` names aren't implemented yet;
+/// naming one is an error rather than a silently-ignored no-op.
 fn set_cmd(argv: &[String]) -> i32 {
     let mut status = 0;
-    for arg in &argv[1..] {
+    let mut args = argv[1..].iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-e" => crate::vars::set_errexit(true),
             "+e" => crate::vars::set_errexit(false),
             "-u" => crate::vars::set_nounset(true),
             "+u" => crate::vars::set_nounset(false),
+            "-o" | "+o" => {
+                let on = arg == "-o";
+                match args.next().map(String::as_str) {
+                    Some("pipefail") => crate::vars::set_pipefail(on),
+                    Some(name) => {
+                        eprintln!("set: {name}: invalid option name");
+                        status = 1;
+                    }
+                    None => {
+                        eprintln!("{}: option requires an argument -- 'o'", argv[0]);
+                        status = 1;
+                    }
+                }
+            }
             other => {
                 eprintln!("set: {other}: not supported");
                 status = 1;

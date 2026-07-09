@@ -515,3 +515,20 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   with status 127 for an unbound reference specifically, but rush's exits
   with 1 like most of its other expansion errors — the script still aborts
   right there either way, just with a different code.
+
+### `set -o pipefail` (C19)
+- `vars::set_pipefail`/`pipefail` (mirroring `errexit`/`nounset`'s own
+  thread-local flags), `set`'s new `-o`/`+o` two-token parsing (`set -o
+  pipefail`, `set +o pipefail`; an unrecognized `-o` name is an error, not
+  a silent no-op), and a shared `exec::pipeline_status` helper called
+  wherever a pipeline's stages get reduced to one exit code: the non-Unix/
+  capture runner (`exec::run` — used for both a non-Unix foreground
+  pipeline *and* `$(...)` command substitution, which is also subject to
+  pipefail, verified directly) and the Unix job-control runner
+  (`job::wait_pgid`, which now tracks every stage's own exit code by
+  position instead of only the last).
+- Without pipefail, a pipeline's status is still just its last stage's;
+  with it, the *rightmost* non-zero status among all stages — not "the
+  first failure", not "any failure", specifically the one closest to the
+  end (verified directly against real bash with a distinct exit code at
+  each position to disambiguate) — or 0 if every stage succeeded.

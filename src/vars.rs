@@ -38,6 +38,9 @@ thread_local! {
     // `set -u`: referencing an unset variable is an error (see
     // `expand::var_lookup_checked`).
     static NOUNSET: RefCell<bool> = const { RefCell::new(false) };
+    // `set -o pipefail`: a pipeline's own exit status is the rightmost
+    // non-zero stage, not just its last (see `exec::pipeline_status`).
+    static PIPEFAIL: RefCell<bool> = const { RefCell::new(false) };
     // The exit status of the most recent command substitution performed
     // while expanding a command's words, if any (see `reset_last_subst_status`).
     static LAST_SUBST_STATUS: RefCell<Option<i32>> = const { RefCell::new(None) };
@@ -75,6 +78,14 @@ pub fn set_nounset(on: bool) {
 
 pub fn nounset() -> bool {
     NOUNSET.with(|e| *e.borrow())
+}
+
+pub fn set_pipefail(on: bool) {
+    PIPEFAIL.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn pipefail() -> bool {
+    PIPEFAIL.with(|e| *e.borrow())
 }
 
 /// Clear the "did a command substitution just run" marker. Called right

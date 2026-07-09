@@ -395,6 +395,24 @@ fn apply_assignments(pipeline: &Pipeline) {
     }
 }
 
+/// If `cmd` is `command name [args...]` — the *execution* form, not
+/// `command -v`/`-V`, which are pure lookups the `command` builtin handles
+/// entirely on its own — returns the inner command with the leading
+/// `command` word stripped, ready to run bypassing function lookup.
+fn command_bypass(cmd: &Command) -> Option<Command> {
+    if cmd.argv.first().map(String::as_str) != Some("command") {
+        return None;
+    }
+    match cmd.argv.get(1).map(String::as_str) {
+        Some("-v") | Some("-V") | None => None,
+        Some(_) => {
+            let mut inner = cmd.clone();
+            inner.argv.remove(0);
+            Some(inner)
+        }
+    }
+}
+
 /// Expand and run a single pipeline in the foreground.
 fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     crate::vars::reset_last_subst_status();
@@ -412,6 +430,23 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     // function is ever called, so a single-stage pipeline reaching here is
     // always `Stage::Simple`.
     if let [Stage::Simple(cmd)] = pipeline.commands.as_slice() {
+        if let Some(inner) = command_bypass(cmd) {
+            // `command name [args...]`: run bypassing function lookup — the
+            // whole point of `command` in this form (C12) — otherwise
+            // proceeding exactly as a plain simple command would.
+            if inner.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
+                return run_builtin_foreground(&inner);
+            }
+            let pipeline = Pipeline { commands: vec![Stage::Simple(inner)] };
+            #[cfg(unix)]
+            {
+                return crate::job::run_foreground(&pipeline);
+            }
+            #[cfg(not(unix))]
+            {
+                return run(&pipeline, false).map(|(status, _)| status);
+            }
+        }
         // A defined function shadows external commands (but not builtins).
         if cmd.argv.first().is_some_and(|name| crate::func::exists(name)) {
             return call_function(&cmd.argv);

@@ -155,7 +155,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-const RESERVED: &[&str] = &[
+pub(crate) const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case",
     "esac", "{", "}",
 ];

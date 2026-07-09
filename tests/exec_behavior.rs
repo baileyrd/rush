@@ -285,6 +285,49 @@ fn shift_builtin() {
 }
 
 #[test]
+fn command_type_and_hash_builtins() {
+    // `command -v` — the standard portable existence check — is terse: an
+    // alias prints its definition, a function/builtin just its bare name, a
+    // real executable its resolved path; not found prints nothing and
+    // fails.
+    assert_eq!(rush("alias ll='ls -l'; command -v ll").0, "alias ll='ls -l'\n");
+    assert_eq!(rush("f() { :; }; command -v f").0, "f\n");
+    assert_eq!(rush("command -v cd").0, "cd\n");
+    let (out, status) = rush("command -v ls");
+    assert!(out.trim_end().ends_with("/ls"), "got: {out:?}");
+    assert_eq!(status, 0);
+    let (out, status) = rush("command -v rush_nonexistent_cmd_xyz");
+    assert_eq!(out, "");
+    assert_eq!(status, 1);
+
+    // `command -V` and `type` share the same human-readable sentence form.
+    assert_eq!(rush("alias ll='ls -l'; command -V ll").0, "ll is aliased to `ls -l'\n");
+    assert_eq!(rush("f() { :; }; type f").0, "f is a function\n");
+    assert_eq!(rush("type cd").0, "cd is a shell builtin\n");
+    assert_eq!(rush("type if").0, "if is a shell keyword\n"); // `type` (not `command`) also covers keywords
+
+    // `type -t` gives just the one-word classification.
+    assert_eq!(
+        rush("f() { :; }; type -t f; type -t cd; type -t if").0,
+        "function\nbuiltin\nkeyword\n"
+    );
+
+    // The headline case: `command name` bypasses a shadowing shell function
+    // of the same name, running the real builtin/executable instead.
+    assert_eq!(
+        rush("cd() { echo fake; }; cd; command cd; pwd").0.lines().next().unwrap(),
+        "fake"
+    );
+
+    // `hash` never caches anything (rush re-searches `$PATH` on every
+    // spawn), so it's a narrow stub: `-r` and a bare call are no-ops that
+    // still succeed, and `hash name` at least reports whether it resolves.
+    assert_eq!(rush("hash -r; echo $?").0, "0\n");
+    assert_eq!(rush("hash ls; echo $?").0, "0\n");
+    assert_eq!(rush("hash rush_nonexistent_cmd_xyz; echo $?").0, "1\n");
+}
+
+#[test]
 fn getopts_builtin() {
     // Combined short flags (`-abc` = `-a -b -c`): `$OPTIND` stays put while
     // still inside the same word, advancing only once it's exhausted.

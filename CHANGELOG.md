@@ -360,3 +360,28 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   consumed. This and `shift` (C9) together unlock the standard `while
   getopts ...; do case $opt in ...; esac; done; shift $((OPTIND-1))`
   argument-parsing idiom, verified end-to-end against real bash.
+
+### `command` / `type` / `hash` builtins (C12)
+- `command -v`/`-V name...` (`builtins::command_cmd`/`command_v`, shared
+  `Kind` classifier) describes how each name would resolve — alias,
+  function, builtin, or `$PATH` executable, in that precedence order
+  (`-v`: terse, the standard existence-check form used constantly in
+  install scripts; `-V`: a human-readable sentence) — without running
+  anything, failing if none resolve. `type` (`type_cmd`) shares the same
+  classifier, additionally recognizing shell keywords, and has a `-t` form
+  for just the one-word classification.
+- Plain `command name [args...]` (no `-v`/`-V`) actually *runs* `name`,
+  bypassing a shadowing shell function of the same name — the headline
+  reason `command` exists. Handled at the exec dispatch level
+  (`exec::command_bypass`, wired into `run_foreground`) rather than purely
+  inside the builtin, so it composes with real redirects and external
+  spawns exactly like an ordinary simple command would.
+- `hash` (`hash_cmd`) is a genuine stub: rush never caches `$PATH` lookups
+  (every spawn just searches fresh), so there's nothing to actually hash.
+  `-r` and a bare call are accepted no-ops; `hash name` at least reports via
+  exit status whether it currently resolves.
+- A function's own reconstructed source (as bash prints after "is a
+  function") isn't reproduced by either `command -V` or `type` — a
+  documented narrowing, since rush functions store a parsed `CommandList`,
+  not original source text. All other cases verified against real bash
+  directly.

@@ -33,6 +33,9 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "shift" => Some(shift_cmd(argv)),
         "local" => Some(local_cmd(argv)),
         "getopts" => Some(getopts_cmd(argv)),
+        "command" => Some(command_cmd(argv)),
+        "type" => Some(type_cmd(argv)),
+        "hash" => Some(hash_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -42,7 +45,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts",
+    "getopts", "command", "type", "hash",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1010,6 +1013,191 @@ fn advance_option_pos(optind: usize, chars: &[char], pos: usize) -> (usize, usiz
     } else {
         (optind + 1, 0)
     }
+}
+
+/// How a name would resolve — an alias, a reserved word, a function, a
+/// builtin, or an executable found on `$PATH` — shared by `command
+/// -v`/`-V` and `type`.
+enum Kind {
+    Alias(String),
+    Keyword,
+    Function,
+    Builtin,
+    File(std::path::PathBuf),
+}
+
+impl Kind {
+    /// `type -t`'s one-word classification.
+    fn label(&self) -> &'static str {
+        match self {
+            Kind::Alias(_) => "alias",
+            Kind::Keyword => "keyword",
+            Kind::Function => "function",
+            Kind::Builtin => "builtin",
+            Kind::File(_) => "file",
+        }
+    }
+
+    /// `command -V`'s / `type`'s human-readable form.
+    fn describe(&self, name: &str) -> String {
+        match self {
+            Kind::Alias(value) => format!("{name} is aliased to `{value}'"),
+            Kind::Keyword => format!("{name} is a shell keyword"),
+            Kind::Function => format!("{name} is a function"),
+            Kind::Builtin => format!("{name} is a shell builtin"),
+            Kind::File(path) => format!("{name} is {}", path.display()),
+        }
+    }
+
+    /// `command -v`'s terser form: an alias prints its definition
+    /// (`alias name='value'`); a function or builtin is just its bare
+    /// name; a file is its resolved path.
+    fn describe_terse(&self, name: &str) -> String {
+        match self {
+            Kind::Alias(value) => format!("alias {name}='{value}'"),
+            Kind::Keyword | Kind::Function | Kind::Builtin => name.to_string(),
+            Kind::File(path) => path.display().to_string(),
+        }
+    }
+}
+
+/// Classify `name` the way the shell itself would resolve it as a command —
+/// alias, reserved word, function, builtin, or `$PATH` executable, in that
+/// precedence order — or `None` if it wouldn't resolve to anything.
+/// `keywords` is `false` for `command` (which, per POSIX, only concerns
+/// itself with ordinary simple commands, not reserved words) and `true` for
+/// `type`.
+fn classify(name: &str, keywords: bool) -> Option<Kind> {
+    if let Some(value) = crate::alias::get(name) {
+        return Some(Kind::Alias(value));
+    }
+    if keywords && crate::parser::RESERVED.contains(&name) {
+        return Some(Kind::Keyword);
+    }
+    if crate::func::exists(name) {
+        return Some(Kind::Function);
+    }
+    if is_builtin(name) {
+        return Some(Kind::Builtin);
+    }
+    resolve_in_path(name).map(Kind::File)
+}
+
+/// Search `$PATH` for an executable file named `name`. A `name` containing
+/// `/` is treated as an explicit path (checked directly, not searched for)
+/// rather than a `$PATH` lookup.
+fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
+    if name.contains('/') {
+        let p = Path::new(name);
+        return is_executable_file(p).then(|| p.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// `command [-v|-V] name [args...]` — with `-v`/`-V`, describes how `name`
+/// would resolve (`-v`: terse, the standard `command -v foo` existence
+/// check; `-V`: human-readable) without running anything, exiting nonzero
+/// if it wouldn't resolve at all. Without either flag, `command` actually
+/// *running* `name` (bypassing a shadowing shell function, the whole point
+/// of `command` in that form) is handled earlier, at the exec dispatch
+/// level (`exec::run_foreground`'s `command_bypass`), before this builtin
+/// is ever reached — reaching here with neither flag (e.g. `command` used
+/// as one stage of a multi-command pipeline, where that interception
+/// doesn't apply — the same "sole command only" limitation every builtin
+/// already has) is a narrower case this falls back to reporting rather
+/// than executing.
+fn command_cmd(argv: &[String]) -> i32 {
+    match argv.get(1).map(String::as_str) {
+        Some("-v") => command_v(&argv[2..], false),
+        Some("-V") => command_v(&argv[2..], true),
+        None => 0,
+        Some(_) => {
+            eprintln!("command: running a command isn't supported here (only as the sole stage of a pipeline)");
+            127
+        }
+    }
+}
+
+fn command_v(names: &[String], verbose: bool) -> i32 {
+    if names.is_empty() {
+        eprintln!("command: usage: command -{} name ...", if verbose { "V" } else { "v" });
+        return 2;
+    }
+    let mut found_any = false;
+    for name in names {
+        if let Some(kind) = classify(name, false) {
+            found_any = true;
+            if verbose {
+                println!("{}", kind.describe(name));
+            } else {
+                println!("{}", kind.describe_terse(name));
+            }
+        }
+    }
+    if found_any { 0 } else { 1 }
+}
+
+/// `type [-t] name ...` — describes how each `name` resolves (an alias, a
+/// shell keyword, a function, a builtin, or a `$PATH` executable), printing
+/// a diagnostic and reporting failure for any that don't resolve at all.
+/// `-t` prints just the one-word classification instead of the full
+/// sentence — useful in a script (`[ "$(type -t foo)" = function ]`).
+fn type_cmd(argv: &[String]) -> i32 {
+    let (just_kind, names) =
+        if argv.get(1).map(String::as_str) == Some("-t") { (true, &argv[2..]) } else { (false, &argv[1..]) };
+    if names.is_empty() {
+        eprintln!("type: usage: type [-t] name ...");
+        return 2;
+    }
+    let mut status = 0;
+    for name in names {
+        match classify(name, true) {
+            Some(kind) => println!("{}", if just_kind { kind.label().to_string() } else { kind.describe(name) }),
+            None => {
+                eprintln!("type: {name}: not found");
+                status = 1;
+            }
+        }
+    }
+    status
+}
+
+/// `hash [-r] [name...]` — rush never caches `$PATH` lookups (each spawn
+/// just searches `$PATH` fresh, so there's no cache to poison), so this is
+/// necessarily a narrower stub: `-r` and a bare `hash` are accepted as
+/// no-ops (status 0), and `hash name...` reports whether each would
+/// currently resolve on `$PATH`, without printing or caching anything.
+fn hash_cmd(argv: &[String]) -> i32 {
+    if argv.get(1).map(String::as_str) == Some("-r") {
+        return 0;
+    }
+    let names = &argv[1..];
+    if names.is_empty() {
+        println!("hash: hash table empty");
+        return 0;
+    }
+    let mut status = 0;
+    for name in names {
+        if resolve_in_path(name).is_none() {
+            eprintln!("hash: {name}: not found");
+            status = 1;
+        }
+    }
+    status
 }
 
 fn exit(argv: &[String]) -> Option<i32> {

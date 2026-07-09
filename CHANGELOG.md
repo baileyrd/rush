@@ -169,10 +169,19 @@ git history for the commit-by-commit narrative.
   (Unix only) and redirecting the child's fd 1 to a pipe before running
   `run_compound` there, so everything the child writes — in-process
   (builtins) or via a further spawn that inherits its stdout — is captured.
-- Surfaced, not fixed: the exit status of a command substitution isn't
-  propagated to an *assignment's own* status — `x=$(false); echo $?` still
-  prints `0`. The assignment-only path in `run_foreground`/`capture_pipeline`
-  hardcodes `Ok(0)` regardless of what happened during expansion.
+- `x=$(false); echo $?` now correctly prints `1` (was `0`): a
+  variable-assignment-only command takes the exit status of the last command
+  substitution performed while expanding it, per POSIX, rather than always
+  `0`. A new one-shot marker in `vars.rs`
+  (`reset_last_subst_status`/`set_last_subst_status`/`take_last_subst_status`)
+  — deliberately *not* the same thread-local as `$?` itself, since reusing
+  `$?`'s slot as a sentinel would corrupt a direct `x=$?` read happening in
+  the same expansion — carries the substitution's status from `capture_list`
+  up to the assignment-only branch in `run_foreground`/`capture_pipeline`.
+  Composes correctly with multiple assignments on one line (the last
+  substitution wins), an assignment prefixed onto a real command (the
+  command's own status counts, unaffected), and nested substitutions (each
+  level sees its own last command's status, not an inner one's).
 
 ### Windows/MSYS2 build strategy (G11)
 - Validated, not just documented: cross-compiled rush for

@@ -35,6 +35,9 @@ thread_local! {
     static ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     // `set -e`: a failing command exits the shell (see exec::exec_list_impl).
     static ERREXIT: RefCell<bool> = const { RefCell::new(false) };
+    // The exit status of the most recent command substitution performed
+    // while expanding a command's words, if any (see `reset_last_subst_status`).
+    static LAST_SUBST_STATUS: RefCell<Option<i32>> = const { RefCell::new(None) };
 }
 
 pub fn set_errexit(on: bool) {
@@ -43,6 +46,29 @@ pub fn set_errexit(on: bool) {
 
 pub fn errexit() -> bool {
     ERREXIT.with(|e| *e.borrow())
+}
+
+/// Clear the "did a command substitution just run" marker. Called right
+/// before expanding a simple command's words, so that afterward
+/// `take_last_subst_status` reflects only a substitution that happened
+/// during *this* command's own expansion — not a stale one left over from
+/// something unrelated.
+pub fn reset_last_subst_status() {
+    LAST_SUBST_STATUS.with(|s| *s.borrow_mut() = None);
+}
+
+/// Record a command substitution's exit status — its last job's status, same
+/// as `$?` would see from inside it. Used to give a variable-assignment-only
+/// command (`x=$(false)`) POSIX's exit-status rule: it's the last
+/// substitution's status, not always 0.
+pub fn set_last_subst_status(code: i32) {
+    LAST_SUBST_STATUS.with(|s| *s.borrow_mut() = Some(code));
+}
+
+/// Consume the marker set by `set_last_subst_status`, if any command
+/// substitution ran since the last `reset_last_subst_status`.
+pub fn take_last_subst_status() -> Option<i32> {
+    LAST_SUBST_STATUS.with(|s| s.borrow_mut().take())
 }
 
 /// Set `$0` and the positional parameters (`$1`…).

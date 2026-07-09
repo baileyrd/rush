@@ -324,11 +324,15 @@ fn apply_assignments(pipeline: &Pipeline) {
 
 /// Expand and run a single pipeline in the foreground.
 fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
+    crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
 
     if assignment_only(&pipeline) {
         apply_assignments(&pipeline);
-        return Ok(0);
+        // POSIX: a variable-assignment-only command takes the exit status of
+        // the last command substitution performed while expanding it, rather
+        // than always 0 (`run_andor` sets `$?` from whatever we return here).
+        return Ok(crate::vars::take_last_subst_status().unwrap_or(0));
     }
 
     if pipeline.commands.len() == 1 {
@@ -474,9 +478,16 @@ fn run_background(_pipeline: &Pipeline) -> Result<(), String> {
 /// spawn-and-wait (no job control), and the `&` background marker is ignored.
 pub fn capture_list(list: &CommandList) -> Result<String, String> {
     let mut out = String::new();
+    let mut status = 0;
     for job in &list.jobs {
-        capture_andor(&job.list, &mut out)?;
+        status = capture_andor(&job.list, &mut out)?;
     }
+    // POSIX: a variable-assignment-only command (`x=$(...)`) takes the exit
+    // status of the last command substitution performed while expanding it,
+    // rather than always 0 — this is how a caller (an enclosing
+    // `capture_pipeline`/`run_foreground`) finds out this substitution ran,
+    // and what its own last job's status was.
+    crate::vars::set_last_subst_status(status);
     Ok(out)
 }
 
@@ -502,11 +513,13 @@ fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> 
         return Ok(status);
     }
 
+    crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
     if assignment_only(&pipeline) {
         apply_assignments(&pipeline);
-        crate::vars::set_last_status(0);
-        return Ok(0);
+        let status = crate::vars::take_last_subst_status().unwrap_or(0);
+        crate::vars::set_last_status(status);
+        return Ok(status);
     }
     let (status, captured) = run(&pipeline, true)?;
     out.push_str(&captured);

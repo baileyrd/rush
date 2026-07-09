@@ -403,6 +403,55 @@ pub fn eval_cmd(args: &[String]) -> Result<i32, String> {
     exec_list(&list)
 }
 
+/// `exec [cmd [args...]]` (Unix only). With a command: replaces the current
+/// process image via `execvp` — no fork, so on success this never returns.
+/// It inherits whatever fds 0/1/2 the caller's redirects already left them
+/// as (`run_builtin_foreground` applies those before calling into `try_run`,
+/// same as for any other builtin) and the shell's exported environment,
+/// exactly like an ordinary spawned child (`build_stage`). On failure (e.g.
+/// command not found) — verified directly against real bash — a
+/// non-interactive shell exits immediately with status 127 (the same as
+/// bash: the *whole script* stops there, not just this command), while an
+/// interactive one just reports 127 and keeps running, its redirects
+/// restored as normal since the `run_builtin_foreground` guard never got
+/// disarmed.
+///
+/// With no command (bare `exec`, or `exec` followed only by redirects) it's
+/// a no-op that always succeeds — the redirects were already applied by the
+/// caller, which makes them permanent by disarming its own guard rather
+/// than restoring it, exactly the way `exec > file`/`exec 3<&-` are meant
+/// to work.
+///
+/// Caveat shared with the rest of rush's redirect machinery: a target `fd`
+/// other than 0/1/2 (`exec 3>file`) isn't actually honored as fd 3 — see
+/// `redirect_stdio`'s own `target_fd` collapse, a pre-existing limitation
+/// not specific to `exec`.
+#[cfg(unix)]
+pub fn exec_cmd(argv: &[String]) -> i32 {
+    use std::os::unix::process::CommandExt;
+
+    let Some(program) = argv.get(1) else {
+        return 0;
+    };
+
+    let mut command = std::process::Command::new(program);
+    command.args(&argv[2..]);
+    command.envs(crate::vars::exported());
+
+    let err = command.exec();
+    eprintln!("{}: {program}: {err}", argv[0]);
+    if !crate::job::job_control_enabled() {
+        std::process::exit(127);
+    }
+    127
+}
+
+#[cfg(not(unix))]
+pub fn exec_cmd(argv: &[String]) -> i32 {
+    eprintln!("{}: process replacement is not supported on this platform", argv[0]);
+    1
+}
+
 /// After running a loop body, consume one level of any pending `break`/
 /// `continue`. Returns `true` if this loop should stop iterating.
 fn loop_step() -> Result<bool, String> {
@@ -539,8 +588,17 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
 fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     #[cfg(unix)]
     {
-        let _guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
-        Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
+        let mut guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
+        let status = builtins::try_run(&cmd.argv).unwrap_or(1);
+        // The no-command form of `exec` (`exec > file`, `exec 3<&-`, bare
+        // `exec`) exists specifically to make its redirects permanent — the
+        // opposite of every other builtin, whose redirects are always
+        // scoped to just that one call. Disarming the guard here (instead
+        // of letting it restore on drop, as usual) is what makes that happen.
+        if cmd.argv.len() == 1 && cmd.argv.first().map(String::as_str) == Some("exec") {
+            guard.disarm();
+        }
+        Ok(status)
     }
     #[cfg(not(unix))]
     {
@@ -669,6 +727,21 @@ fn set_cloexec(f: &File) -> Result<(), String> {
 #[cfg(unix)]
 pub(crate) struct StdioGuard {
     saved: Vec<(i32, i32)>,
+}
+
+#[cfg(unix)]
+impl StdioGuard {
+    /// Make the current redirects permanent: just close the saved originals
+    /// instead of restoring them on drop. Used by the no-command form of
+    /// `exec` (`exec > file`, bare `exec`), the one case where a builtin's
+    /// redirects are meant to outlive the call.
+    fn disarm(&mut self) {
+        for (_, saved) in self.saved.drain(..) {
+            unsafe {
+                libc::close(saved);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]

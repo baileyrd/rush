@@ -650,7 +650,7 @@ fn reclaim_terminal() {
     give_terminal(shell_pgid);
 }
 
-fn job_control_enabled() -> bool {
+pub(crate) fn job_control_enabled() -> bool {
     STATE.with(|s| s.borrow().job_control)
 }
 

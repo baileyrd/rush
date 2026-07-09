@@ -107,6 +107,8 @@ commands only and `&` is rejected.
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture, data-flow
   diagrams, module reference, and roadmap.
+- **[docs/CAPABILITY_GAPS.md](docs/CAPABILITY_GAPS.md)** — capability
+  assessment against dash/bash/ksh93/zsh/fish: 32 ranked gaps, by consequence.
 - **[CHANGELOG.md](CHANGELOG.md)** — what's been built, by area.
 
 ## Project Layout

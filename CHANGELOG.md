@@ -532,3 +532,24 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   first failure", not "any failure", specifically the one closest to the
   end (verified directly against real bash with a distinct exit code at
   each position to disambiguate) — or 0 if every stage succeeded.
+
+### `set -x` (xtrace) (C20)
+- `vars::set_xtrace`/`xtrace` (mirroring the other `set` flags' own
+  thread-local state) and `exec::trace_pipeline`, called from the one place
+  both the foreground and `$(...)`-capture paths funnel every
+  already-expanded `Pipeline` through (`run_foreground`/`capture_pipeline`)
+  — covers a plain command, each stage of a real pipeline, an
+  assignment-only statement, and a compound's own condition (`if`/`while`/
+  `until`, which run through this same machinery), all from one hook.
+- Each traced line is prefixed with `$PS4` (default `+ `, falling back to
+  the environment like `$PS1` does); a leading `NAME=value` assignment
+  traces on its own line before the command it applies to; a word
+  containing whitespace or a shell-special character is re-quoted with
+  single quotes for display.
+- Nesting inside `$(...)` repeats `$PS4`'s first character once per level
+  (`vars::with_deeper_trace`, wrapping `expand::command_substitute`) — `++`
+  one level down, `+++` two, matching real bash exactly, verified directly
+  including two-deep nesting and a custom `$PS4`.
+- Known gap, accepted for this scope: a compound's own *header* line (`for
+  i in 1 2`, `case a in`) isn't traced, only the commands actually inside
+  its body — which do trace correctly, per iteration/branch.

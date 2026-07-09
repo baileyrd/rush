@@ -491,6 +491,57 @@ fn should_run(connector: Connector, prev_status: i32) -> bool {
     }
 }
 
+/// `set -x`: print each simple stage of `pipeline` to stderr before it
+/// runs, matching real bash's format — `$PS4` (default `+ `), each leading
+/// `NAME=value` assignment on its own line, then the command word and its
+/// arguments, each re-quoted with single quotes if it contains whitespace
+/// or a shell-special character (verified directly against real bash). A
+/// no-op unless `set -x` is on.
+fn trace_pipeline(pipeline: &Pipeline) {
+    if !crate::vars::xtrace() {
+        return;
+    }
+    let prefix = trace_prefix();
+    for stage in &pipeline.commands {
+        if let Stage::Simple(cmd) = stage {
+            for (name, value) in &cmd.assignments {
+                eprintln!("{prefix}{name}={value}");
+            }
+            if !cmd.argv.is_empty() {
+                let words: Vec<String> = cmd.argv.iter().map(|w| trace_quote(w)).collect();
+                eprintln!("{prefix}{}", words.join(" "));
+            }
+        }
+    }
+}
+
+/// `$PS4` (default `+ `) with its first character repeated once per level
+/// of `$(...)` command substitution currently being expanded — matching
+/// real bash's own nesting-depth indicator, verified directly.
+fn trace_prefix() -> String {
+    let ps4 = crate::vars::get("PS4").or_else(|| std::env::var("PS4").ok()).unwrap_or_else(|| "+ ".to_string());
+    let mut chars = ps4.chars();
+    match chars.next() {
+        Some(c) => {
+            let rest: String = chars.collect();
+            format!("{}{rest}", c.to_string().repeat(crate::vars::trace_depth() as usize + 1))
+        }
+        None => String::new(),
+    }
+}
+
+/// Re-quote a word for `set -x` display: wrapped in single quotes if it
+/// contains whitespace or a shell-special character, else printed as-is.
+fn trace_quote(word: &str) -> String {
+    let needs_quote = word.is_empty()
+        || word.chars().any(|c| c.is_whitespace() || "'\"$&|;<>()`\\*?[]{}~#".contains(c));
+    if needs_quote {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    } else {
+        word.to_string()
+    }
+}
+
 /// A single command that is only `NAME=value` assignments (no program word):
 /// `FOO=bar`. These set shell variables rather than spawning anything.
 fn assignment_only(pipeline: &Pipeline) -> bool {
@@ -530,6 +581,7 @@ fn command_bypass(cmd: &Command) -> Option<Command> {
 fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
+    trace_pipeline(&pipeline);
 
     if assignment_only(&pipeline) {
         apply_assignments(&pipeline);
@@ -808,6 +860,7 @@ fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> 
 
     crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
+    trace_pipeline(&pipeline);
     if assignment_only(&pipeline) {
         apply_assignments(&pipeline);
         let status = crate::vars::take_last_subst_status().unwrap_or(0);

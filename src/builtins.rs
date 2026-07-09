@@ -1354,8 +1354,10 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 /// unset variable is an error (see `expand::var_lookup_checked`). `set -o
 /// pipefail` / `set +o pipefail` — a pipeline's own exit status is the
 /// rightmost non-zero stage rather than just its last (see
-/// `exec::pipeline_status`). Other flags/`-o` names aren't implemented yet;
-/// naming one is an error rather than a silently-ignored no-op.
+/// `exec::pipeline_status`). `set -x` / `set +x` — xtrace: echo each
+/// command to stderr before running it (see `exec::trace_command`). Other
+/// flags/`-o` names aren't implemented yet; naming one is an error rather
+/// than a silently-ignored no-op.
 fn set_cmd(argv: &[String]) -> i32 {
     let mut status = 0;
     let mut args = argv[1..].iter();
@@ -1365,6 +1367,8 @@ fn set_cmd(argv: &[String]) -> i32 {
             "+e" => crate::vars::set_errexit(false),
             "-u" => crate::vars::set_nounset(true),
             "+u" => crate::vars::set_nounset(false),
+            "-x" => crate::vars::set_xtrace(true),
+            "+x" => crate::vars::set_xtrace(false),
             "-o" | "+o" => {
                 let on = arg == "-o";
                 match args.next().map(String::as_str) {

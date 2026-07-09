@@ -227,3 +227,12 @@ git history for the commit-by-commit narrative.
 - Not extended to the capture path (`$(...)`): a compound as one stage among
   several *inside* a substitution, or on non-Unix (no `fork` there at all),
   still errors clearly — a narrower, separate remaining limitation.
+
+### `set -e` matches bash's positionally-last rule, not "whichever pipeline ran last" (C4)
+- A failing pipeline is now exempt from errexit unless it's positionally last
+  in its `&&`/`||` list — `set -e; false && true` survives (`false` isn't
+  last), `set -e; true && false` exits (`false` is), matching real bash.
+  `run_andor`/`run_job`/`exec_list_impl` (`exec.rs`) now report whether the
+  textually-last pipeline in a job's and-or chain actually ran (`last_ran`),
+  so short-circuiting an earlier failure no longer trips errexit. `if`/`while`
+  conditions remain separately exempt via the pre-existing `exec_cond` path.

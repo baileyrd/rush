@@ -54,7 +54,7 @@ among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6 (3 done)
+- **Tier I — correctness/POSIX risk:** 6 (4 done)
 - **Tier II — missing standard builtins:** 11
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
@@ -107,12 +107,21 @@ piped. **Not yet extended** to the capture path (`$(...)`) — a compound as
 one stage among several *inside* a substitution, or on non-Unix (no `fork`
 there at all), still errors clearly rather than silently misbehaving.
 
-### C4 — `set -e` doesn't match bash/POSIX's exact rule (tracked)
+### C4 — `set -e` doesn't match bash/POSIX's exact rule (tracked) ✅ done
 Correct in dash, bash, ksh, zsh: a failing command is exempt from errexit
 unless it's positionally last in an `&&`/`||` list. Rush's simplified rule
-fires on any job's *final* nonzero status instead — `set -e; false && true`
-exits under rush but not under real bash. A script tested against bash's
-actual semantics can abort earlier than its author intended. **Effort: M.**
+fired on any job's *final* nonzero status instead — `set -e; false && true`
+used to exit under rush but not under real bash. A script tested against
+bash's actual semantics could abort earlier than its author intended.
+**Effort: M.**
+
+Implemented: `run_andor`/`run_job`/`exec_list_impl` (`exec.rs`) now return
+whether the textually-last pipeline in a job's `&&`/`||` chain actually ran
+(`last_ran`), not merely whichever pipeline happened to run last under
+short-circuiting. `errexit` now only fires when a *reached* final pipeline
+fails — `set -e; false && true` survives, `set -e; true && false` exits,
+matching bash exactly. `if`/`while` conditions remain separately exempt via
+the pre-existing `exec_cond` path, unaffected by this change.
 
 ### C5 — Real `$IFS`-driven word-splitting
 POSIX-mandated; present in dash/bash/ksh/zsh. Rush hardcodes ASCII whitespace

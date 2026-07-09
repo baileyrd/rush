@@ -82,29 +82,33 @@ fn exec_cond(list: &CommandList) -> Result<i32, String> {
     exec_list_impl(list, false)
 }
 
-/// This is a simplification of bash's `errexit`: it fires on any job (a
-/// `;`-separated top-level command) whose *final* status is nonzero, which
-/// doesn't fully match bash's more nuanced "except a command that isn't the
-/// last in an `&&`/`||` list" rule (e.g. bash's `set -e; false && true`
-/// doesn't exit, because `false` isn't positionally last — this does exit,
-/// since `false` is the last pipeline that actually ran). Good enough for the
-/// common case of a single failing command; the finer distinction is a
-/// follow-up.
+/// Matches bash's actual `errexit` rule: a failing pipeline is exempt unless
+/// it's positionally last in its `&&`/`||` list — `set -e; false && true`
+/// does *not* exit (`false` isn't last), but `set -e; true && false` does
+/// (`false` is). `run_job`/`run_andor` report whether the textually-last
+/// pipeline in a job's and-or chain actually ran, alongside its status, so
+/// this only fires when a *reached* final command fails — not merely
+/// whichever pipeline happened to run last (which, under short-circuiting,
+/// can be an earlier one in the source).
 fn exec_list_impl(list: &CommandList, check_errexit: bool) -> Result<i32, String> {
     let mut status = 0;
     for job in &list.jobs {
-        status = run_job(job)?;
+        let (job_status, last_ran) = run_job(job)?;
+        status = job_status;
         if crate::vars::flow_pending() {
             break;
         }
-        if check_errexit && crate::vars::errexit() && status != 0 {
+        if check_errexit && crate::vars::errexit() && status != 0 && last_ran {
             crate::trap::exit_shell(status);
         }
     }
     Ok(status)
 }
 
-fn run_job(job: &Job) -> Result<i32, String> {
+/// Returns `(status, last_ran)`: `last_ran` is whether the textually-last
+/// pipeline in the job's `&&`/`||` chain actually ran (as opposed to being
+/// skipped by short-circuiting) — see `exec_list_impl`.
+fn run_job(job: &Job) -> Result<(i32, bool), String> {
     if job.background {
         // Backgrounding an `&&`/`||` list would need a subshell; we support the
         // common case of a single (possibly piped) command.
@@ -114,30 +118,38 @@ fn run_job(job: &Job) -> Result<i32, String> {
         let pipeline = crate::expand::expand(&job.list.first)?;
         run_background(&pipeline)?;
         crate::vars::set_last_status(0);
-        Ok(0)
+        Ok((0, true))
     } else {
         run_andor(&job.list)
     }
 }
 
-fn run_andor(list: &AndOrList) -> Result<i32, String> {
+fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     // Update `$?` after every pipeline, so a later one in the same line can read
     // it (e.g. `false || echo $?`).
     let mut status = run_pipeline_node(&list.first)?;
     crate::vars::set_last_status(status);
+    // If there's no `rest`, `first` *is* the last pipeline, and it just ran.
+    let mut last_ran = list.rest.is_empty();
     if crate::vars::flow_pending() {
-        return Ok(status);
+        return Ok((status, last_ran));
     }
-    for (connector, raw) in &list.rest {
+    let final_idx = list.rest.len().wrapping_sub(1);
+    for (i, (connector, raw)) in list.rest.iter().enumerate() {
         if should_run(*connector, status) {
             status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
+            last_ran = i == final_idx;
             if crate::vars::flow_pending() {
                 break;
             }
+        } else {
+            // Short-circuited: this pipeline (whether or not it's the final
+            // one) didn't run.
+            last_ran = false;
         }
     }
-    Ok(status)
+    Ok((status, last_ran))
 }
 
 /// A pipeline that is a single compound command (`if`/`while`/`for`) is run

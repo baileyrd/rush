@@ -34,7 +34,7 @@ applicable to that shell's own model.
 | Capability | rush | dash | bash | ksh93 | zsh | fish |
 |---|---|---|---|---|---|---|
 | Real pipes / job control / forked subshells | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `#`/`##`/`%`/`%%` param. expansion | ❌ | ✅ | ✅ | ✅ | ✅ | — |
+| `#`/`##`/`%`/`%%` param. expansion | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `read` / `printf` / `shift` / `getopts` | ❌ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | `local` function-scoped vars | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `wait` / `disown` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -51,7 +51,7 @@ applicable to that shell's own model.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6
+- **Tier I — correctness/POSIX risk:** 6 (1 done)
 - **Tier II — missing standard builtins:** 11
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
@@ -65,13 +65,16 @@ These don't just lack a feature — a script that assumes them can silently do
 the wrong thing under rush instead of erroring, which is the worse failure
 mode.
 
-### C1 — Suffix/prefix parameter expansion: `${v%pat}` `${v%%pat}` `${v#pat}` `${v##pat}`
-POSIX-mandated; present in dash, bash, ksh93, zsh. `expand_braced` currently
-only recognizes `-`/`=`/`+`/`?` after an optional `:`, plus `${#name}` for
-length — the whole pattern-stripping family is absent. This is the standard,
+### C1 — Suffix/prefix parameter expansion: `${v%pat}` `${v%%pat}` `${v#pat}` `${v##pat}` ✅ done
+POSIX-mandated; present in dash, bash, ksh93, zsh. This is the standard,
 portable way to strip an extension or a path (`${file%.txt}`,
 `${path##*/}`) without spawning `basename`/`sed`, and it's everywhere in real
 scripts. **Effort: M.**
+
+Implemented: `#`/`%` remove the shortest matching prefix/suffix, `##`/`%%`
+the longest, using the same glob matcher `case` patterns use
+(`strip_prefix_pattern`/`strip_suffix_pattern` in `expand.rs`). No colon
+form — bash doesn't define one for this family either.
 
 ### C2 — `for name; do …; done` should iterate `"$@"`
 POSIX-mandated shorthand, present in dash/bash/ksh/zsh. Today, omitting the

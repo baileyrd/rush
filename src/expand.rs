@@ -478,9 +478,12 @@ fn is_valid_name(s: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-/// Expand the inside of a `${...}`: a plain name, `${#name}` (length), or one of
-/// the default/alternate operators `:-` `-` `:=` `=` `:+` `+` `:?` `?`. With a
-/// colon the test is "unset *or* empty"; without, just "unset".
+/// Expand the inside of a `${...}`: a plain name, `${#name}` (length), one of
+/// the pattern-removal operators `#` `##` `%` `%%`, or one of the
+/// default/alternate operators `:-` `-` `:=` `=` `:+` `+` `:?` `?`. With a
+/// colon the test is "unset *or* empty"; without, just "unset". (Unlike the
+/// default/alternate family, `#`/`##`/`%`/`%%` have no colon form — bash
+/// doesn't define one either.)
 fn expand_braced(inner: &str) -> Result<String, String> {
     // Special parameters: `${#}`, `${@}`/`${*}`, and numeric `${10}`.
     match inner {
@@ -511,6 +514,25 @@ fn expand_braced(inner: &str) -> Result<String, String> {
     }
     if rest.is_empty() {
         return Ok(var_lookup(name));
+    }
+
+    // Pattern-removal: `##`/`%%` before `#`/`%` so the doubled (greedy) form
+    // isn't mistaken for the single form plus a literal leading `#`/`%`.
+    if let Some(word_src) = rest.strip_prefix("##") {
+        let pattern = expand_dollars(word_src)?;
+        return Ok(strip_prefix_pattern(&var_lookup(name), &pattern, true));
+    }
+    if let Some(word_src) = rest.strip_prefix('#') {
+        let pattern = expand_dollars(word_src)?;
+        return Ok(strip_prefix_pattern(&var_lookup(name), &pattern, false));
+    }
+    if let Some(word_src) = rest.strip_prefix("%%") {
+        let pattern = expand_dollars(word_src)?;
+        return Ok(strip_suffix_pattern(&var_lookup(name), &pattern, true));
+    }
+    if let Some(word_src) = rest.strip_prefix('%') {
+        let pattern = expand_dollars(word_src)?;
+        return Ok(strip_suffix_pattern(&var_lookup(name), &pattern, false));
     }
 
     let colon = rest.starts_with(':');
@@ -553,6 +575,45 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         }
         _ => Err(format!("${{{inner}}}: bad substitution")),
     }
+}
+
+/// `${var#pattern}` (shortest) / `${var##pattern}` (longest, `greedy`): strip
+/// a matching prefix. Tries prefixes of increasing length (shortest first) or
+/// decreasing length (longest first) against `pattern` as a whole — a glob
+/// pattern, via the same matcher `case` patterns use — and removes the first
+/// one that fully matches. No match: the value is returned unchanged.
+fn strip_prefix_pattern(value: &str, pattern: &str, greedy: bool) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let lens: Box<dyn Iterator<Item = usize>> = if greedy {
+        Box::new((0..=chars.len()).rev())
+    } else {
+        Box::new(0..=chars.len())
+    };
+    for l in lens {
+        let prefix: String = chars[..l].iter().collect();
+        if crate::glob::match_component(pattern, &prefix) {
+            return chars[l..].iter().collect();
+        }
+    }
+    value.to_string()
+}
+
+/// `${var%pattern}` (shortest) / `${var%%pattern}` (longest, `greedy`): strip
+/// a matching suffix — the mirror image of [`strip_prefix_pattern`].
+fn strip_suffix_pattern(value: &str, pattern: &str, greedy: bool) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let starts: Box<dyn Iterator<Item = usize>> = if greedy {
+        Box::new(0..=chars.len())
+    } else {
+        Box::new((0..=chars.len()).rev())
+    };
+    for start in starts {
+        let suffix: String = chars[start..].iter().collect();
+        if crate::glob::match_component(pattern, &suffix) {
+            return chars[..start].iter().collect();
+        }
+    }
+    value.to_string()
 }
 
 fn home_dir() -> Option<String> {
@@ -708,6 +769,32 @@ mod tests {
         let list = parser::parse("echo ${RUSH_Q:?missing}").unwrap();
         let err = expand(&list.jobs[0].list.first).unwrap_err();
         assert!(err.contains("missing"));
+    }
+
+    #[test]
+    fn braced_prefix_and_suffix_pattern_removal() {
+        crate::vars::set("RUSH_P", "/usr/local/bin/rush");
+        // `#`/`%` remove the shortest match; `##`/`%%` the longest.
+        assert_eq!(one("echo ${RUSH_P#*/}"), vec!["echo", "usr/local/bin/rush"]);
+        assert_eq!(one("echo ${RUSH_P##*/}"), vec!["echo", "rush"]);
+
+        crate::vars::set("RUSH_P", "archive.tar.gz");
+        assert_eq!(one("echo ${RUSH_P%.*}"), vec!["echo", "archive.tar"]);
+        assert_eq!(one("echo ${RUSH_P%%.*}"), vec!["echo", "archive"]);
+
+        // No match: the value is returned unchanged.
+        crate::vars::set("RUSH_P", "hello");
+        assert_eq!(one("echo ${RUSH_P#foo}"), vec!["echo", "hello"]);
+
+        // `*` can match zero characters, so the shortest-match forms are a
+        // no-op while the longest-match forms consume the whole value.
+        // Quoted so the brackets can't be mistaken for a glob character class.
+        assert_eq!(one("echo \"[${RUSH_P#*}]\""), vec!["echo", "[hello]"]);
+        assert_eq!(one("echo \"[${RUSH_P##*}]\""), vec!["echo", "[]"]);
+
+        // Unset: empty string in, empty string out.
+        crate::vars::unset("RUSH_P");
+        assert_eq!(one("echo \"[${RUSH_P#foo}]\""), vec!["echo", "[]"]);
     }
 
     // Globbing tests run from the crate root against stable repo fixtures.

@@ -198,3 +198,10 @@ git history for the commit-by-commit narrative.
   environment, and a Wine install hit an unrelated package error) —
   unnecessary for the conclusion above, since it's decided by what compiles
   in, not by anything only observable at runtime.
+
+### Prefix/suffix parameter expansion: `${v#pat}` `${v##pat}` `${v%pat}` `${v%%pat}` (C1)
+- `#`/`%` remove the shortest matching prefix/suffix; `##`/`%%` remove the
+  longest. The operand is a glob pattern — the same matcher `case` patterns
+  already use — matched by trying candidate cut points (shortest-first or
+  longest-first) and taking the first one that fully matches. No colon form,
+  matching bash (which doesn't define one for this family either).

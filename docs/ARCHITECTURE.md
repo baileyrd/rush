@@ -213,8 +213,15 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
   else the environment, else empty. `$?` is the last exit status; `$0`–`$9`/
   `${10}` the positional parameters; `$#` their count; `$@`/`$*` all of them
   (a standalone `"$@"` keeps each parameter as its own argument). `${...}` also supports the default/alternate operators `:-` `-` `:=`
-  `=` `:+` `+` `:?` `?` (a colon also treats *empty* as unset) and `${#name}`
-  for length (`expand_braced`). Leading `NAME=value` words on a command are
+  `=` `:+` `+` `:?` `?` (a colon also treats *empty* as unset), `${#name}` for
+  length, and the pattern-removal family `#`/`##`/`%`/`%%` — no colon form,
+  since bash doesn't define one either — which strip a matching prefix/suffix
+  (`strip_prefix_pattern`/`strip_suffix_pattern`): the operand is a glob
+  pattern (the same matcher `case` patterns use), and `#`/`%` remove the
+  *shortest* match while `##`/`%%` remove the *longest*, found by trying
+  candidate cut points in the corresponding direction and taking the first
+  one that fully matches (`expand_braced`). Leading `NAME=value` words on a
+  command are
   split off as assignments (`expand_command`): with no program word they set
   shell variables, otherwise they seed that command's environment (alongside
   exported variables).

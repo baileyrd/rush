@@ -33,6 +33,16 @@ thread_local! {
     // `$0` (shell/script name) and `$1`, `$2`, … (positional parameters).
     static SHELL_NAME: RefCell<String> = RefCell::new("rush".to_string());
     static ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    // `set -e`: a failing command exits the shell (see exec::exec_list_impl).
+    static ERREXIT: RefCell<bool> = const { RefCell::new(false) };
+}
+
+pub fn set_errexit(on: bool) {
+    ERREXIT.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn errexit() -> bool {
+    ERREXIT.with(|e| *e.borrow())
 }
 
 /// Set `$0` and the positional parameters (`$1`…).

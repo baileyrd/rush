@@ -60,13 +60,36 @@ pub fn run_list(list: &CommandList) -> Result<i32, String> {
 }
 
 /// Run a list, stopping early if `break`/`continue`/`return` becomes pending —
-/// used for both the top level and the bodies of compound commands.
+/// used for the top level and most compound-command bodies. Checks `errexit`
+/// (`set -e`) after each job.
 fn exec_list(list: &CommandList) -> Result<i32, String> {
+    exec_list_impl(list, true)
+}
+
+/// Like `exec_list`, but never triggers `errexit` — for `if`/`while`/`until`
+/// conditions, which bash explicitly exempts (a failing condition is the
+/// normal, expected way to end a loop or skip a branch, not a script error).
+fn exec_cond(list: &CommandList) -> Result<i32, String> {
+    exec_list_impl(list, false)
+}
+
+/// This is a simplification of bash's `errexit`: it fires on any job (a
+/// `;`-separated top-level command) whose *final* status is nonzero, which
+/// doesn't fully match bash's more nuanced "except a command that isn't the
+/// last in an `&&`/`||` list" rule (e.g. bash's `set -e; false && true`
+/// doesn't exit, because `false` isn't positionally last — this does exit,
+/// since `false` is the last pipeline that actually ran). Good enough for the
+/// common case of a single failing command; the finer distinction is a
+/// follow-up.
+fn exec_list_impl(list: &CommandList, check_errexit: bool) -> Result<i32, String> {
     let mut status = 0;
     for job in &list.jobs {
         status = run_job(job)?;
         if crate::vars::flow_pending() {
             break;
+        }
+        if check_errexit && crate::vars::errexit() && status != 0 {
+            crate::trap::exit_shell(status);
         }
     }
     Ok(status)
@@ -121,7 +144,7 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
     match compound {
         Compound::If { branches, else_body } => {
             for (cond, body) in branches {
-                if exec_list(cond)? == 0 {
+                if exec_cond(cond)? == 0 {
                     return exec_list(body);
                 }
             }
@@ -133,7 +156,7 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
         Compound::Loop { until, cond, body } => {
             let mut status = 0;
             loop {
-                let met = exec_list(cond)? == 0;
+                let met = exec_cond(cond)? == 0;
                 if met == *until {
                     break; // while: stop when not met; until: stop when met
                 }
@@ -207,10 +230,11 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
     match unsafe { libc::fork() } {
         -1 => Err(std::io::Error::last_os_error().to_string()),
         0 => {
-            // Child: run the body, then exit with its status. The `exit`
-            // builtin's `std::process::exit` now only ends this child.
+            // Child: run the body, then exit with its status — firing its own
+            // (forked, independent) copy of any EXIT trap. The `exit`
+            // builtin's `trap::exit_shell` now only ends this child.
             let status = exec_list(list).unwrap_or(1);
-            std::process::exit(status);
+            crate::trap::exit_shell(status);
         }
         pid => {
             let mut status: libc::c_int = 0;

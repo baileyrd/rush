@@ -35,13 +35,19 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Feature | Status | Notes |
 |---|---|---|
 | REPL with line editing | ✅ | via [`rustyline`](https://crates.io/crates/rustyline) |
+| Tab completion | ✅ | builtins and `$PATH` executables in command position; files elsewhere |
 | Persistent history | ✅ | stored in `~/.rush_history` |
+| Startup file | ✅ | sources `~/.rushrc` (if present) at interactive startup |
+| Prompt customization | ✅ | `PS1` (var or env), with `\w`/`\W`/`\u`/`\h`/`\$`/`\?`/`\n`/`\\`; falls back to `cwd $ ` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit` (+ `jobs`/`fg`/`bg`/`kill` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap` (+ `jobs`/`fg`/`bg`/`kill` on Unix) |
+| Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
+| `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions |
+| `trap` | ✅ | `EXIT` (every exit path) and `INT` (Ctrl-C at an idle prompt) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
@@ -108,6 +114,7 @@ commands only and `&` is rejected.
 ```
 src/
   main.rs       entry point: argv dispatch (script / -c / REPL), read→parse→run loop
+  completion.rs tab completion: builtins/$PATH in command position, files elsewhere
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
   parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for/case/functions)
   expand.rs     expansion: $VAR, ${…}, ~, $(...), $((...)), word-split, globs → concrete Pipeline

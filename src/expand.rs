@@ -87,6 +87,15 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
         argv.extend(expand_argv_word(word)?);
     }
 
+    // A single, non-recursive alias substitution: `ll -a` with `alias
+    // ll='ls -l'` becomes `ls -l -a`. The expanded words aren't re-checked
+    // against the alias table, so `alias ls='ls --color=auto'` can't loop.
+    if let Some(value) = argv.first().and_then(|first| crate::alias::get(first)) {
+        let mut expanded: Vec<String> = value.split_whitespace().map(String::from).collect();
+        expanded.extend(argv.into_iter().skip(1));
+        argv = expanded;
+    }
+
     let mut redirects = Vec::with_capacity(rc.redirects.len());
     let mut heredoc = None;
     for r in &rc.redirects {

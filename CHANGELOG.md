@@ -100,3 +100,39 @@ git history for the commit-by-commit narrative.
   equivalent). Only covers a builtin as the sole command of a pipeline; one in
   the middle of a multi-stage pipe (`echo hi | cd`) is unaffected — still the
   pre-existing punt (rush tries to exec it as an external program).
+
+### Tab completion (G5)
+- A custom rustyline `Helper` (`completion.rs`) replaces `DefaultEditor`. In
+  command position (a rough, not lexer-accurate check — see the module doc),
+  Tab completes builtin names and executables found scanning `$PATH`;
+  elsewhere it defers to rustyline's own `FilenameCompleter` for files.
+
+### Startup file (G6)
+- Interactive sessions source `~/.rushrc`, if present, before the REPL loop
+  starts — same as a script, so a var/function/alias set there takes effect.
+  A missing or unreadable file is silently fine; an error inside it prints to
+  stderr but doesn't stop the shell from starting.
+
+### Prompt customization (G7)
+- `$PS1` (shell variable or environment) replaces the hardcoded prompt when
+  set, with a small escape set: `\w`/`\W` (cwd, cwd basename), `\u`/`\h` (user,
+  host), `\$` (`#` for root, else `$`), `\?` (last exit status — a
+  rush-specific extension, not a real bash escape), `\n`, `\\`. Falls back to
+  the original `cwd $ ` when unset. Settable persistently via `~/.rushrc`.
+
+### Aliases, `set -e`, `trap` (G8)
+- **Aliases** — `alias name=value` / `alias` (list) / `alias name` (show) /
+  `unalias name` / `unalias -a`. A single, non-recursive substitution at the
+  start of a simple command, so `alias ls='ls --color=auto'` can't self-loop.
+- **`set -e` / `set +e`** — errexit: a failing command exits the shell.
+  Exempts `if`/`while`/`until` conditions (bash does too). A simplification of
+  bash's finer "except a command that isn't positionally last in an `&&`/`||`
+  list" rule — see `exec.rs`'s `exec_list_impl` doc comment. Naming any other
+  `set` flag is an error, not a silently-ignored no-op.
+- **`trap`** — `trap 'command' NAME` / `trap` (list) / `trap - NAME` (reset).
+  Only `EXIT` (every exit path — the `exit` builtin, `errexit`, a forked
+  subshell's own exit, and script/`-c`/interactive-Ctrl-D completion) and
+  `INT` (Ctrl-C at an idle prompt only — a running foreground job is a child
+  process under job control and never delivers `SIGINT` to the shell itself)
+  are fired. Guarded against re-entrancy, so an `EXIT` trap that itself calls
+  `exit` can't recurse forever.

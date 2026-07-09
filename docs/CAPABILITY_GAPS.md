@@ -19,8 +19,9 @@ the cross-shell context that shows why they matter, not newly discovered.
 **Bottom line:** rush's actual scope today is closest to **dash** — a solid,
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top, and a few POSIX-mandated pieces (`read`, `${var%pattern}`, `for name;
-do`) still missing entirely.
+on top. Tier I (correctness/POSIX-risk) is now fully closed; the remaining
+gap is Tier II's missing standard builtins — `read` above all, since nothing
+else in that tier blocks as much everyday scripting on its own.
 
 ---
 
@@ -54,7 +55,7 @@ among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6 (5 done)
+- **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
 - **Tier II — missing standard builtins:** 11
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
@@ -142,11 +143,20 @@ one at the very end does not. `$*`/`${*}` now join with `$IFS`'s first
 character (space if unset, nothing if IFS is empty) instead of a hardcoded
 space; `$@` is unaffected, matching bash.
 
-### C6 — `test`/`[` logical combinators `-a` / `-o` (tracked)
+### C6 — `test`/`[` logical combinators `-a` / `-o` (tracked) ✅ done
 POSIX-mandated, present in dash/bash/ksh/zsh (bash discourages but still
 ships them). Lower risk than the rest of this tier — absence is a hard usage
 error, not silent wrongness — but still a real portability gap for scripts
 targeting strict POSIX sh. **Effort: S.**
+
+Implemented: `test_eval` (`builtins.rs`) is now a small recursive-descent
+parser (`test_or` → `test_and` → `test_not` → `test_primary`) instead of a
+fixed-arity match, matching bash's actual grammar and precedence — `-a`
+binds tighter than `-o` (`1 = 2 -o 1 = 1 -a 1 = 2` groups as `(1 = 2) -o ((1
+= 1) -a (1 = 2))`), and `!` negates only the next primary, not a whole
+trailing `-a`/`-o` chain (verified against real bash directly). All prior
+single-expression forms (`-z`, `a = b`, `! EXPR`, a lone string) are
+unaffected.
 
 ---
 

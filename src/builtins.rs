@@ -190,17 +190,71 @@ fn test_dispatch(argv: &[String], bracket: bool) -> i32 {
     }
 }
 
+const UNARY_OPS: &[&str] = &["-z", "-n", "-e", "-f", "-d", "-s", "-r", "-w", "-x"];
+const BINARY_OPS: &[&str] =
+    &["=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
+
+/// `EXPR1 -o EXPR2` (lowest precedence, left-assoc): true if either side is.
 fn test_eval(args: &[String]) -> Result<bool, String> {
-    match args {
-        [] => Ok(false),
-        // `! EXPR`
-        [first, rest @ ..] if first == "!" => test_eval(rest).map(|b| !b),
-        // A lone string: true when non-empty.
-        [s] => Ok(!s.is_empty()),
-        [op, operand] => test_unary(op, operand),
-        [a, op, b] => test_binary(a, op, b),
-        _ => Err("too many arguments".into()),
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut pos = 0;
+    let result = test_or(&words, &mut pos)?;
+    if pos != words.len() {
+        return Err("too many arguments".into());
     }
+    Ok(result)
+}
+
+fn test_or(a: &[&str], pos: &mut usize) -> Result<bool, String> {
+    let mut result = test_and(a, pos)?;
+    while *pos < a.len() && a[*pos] == "-o" {
+        *pos += 1;
+        result = test_and(a, pos)? || result;
+    }
+    Ok(result)
+}
+
+/// `EXPR1 -a EXPR2` (binds tighter than `-o`, left-assoc): true if both are.
+fn test_and(a: &[&str], pos: &mut usize) -> Result<bool, String> {
+    let mut result = test_not(a, pos)?;
+    while *pos < a.len() && a[*pos] == "-a" {
+        *pos += 1;
+        result = test_not(a, pos)? && result;
+    }
+    Ok(result)
+}
+
+/// `! EXPR` negates only the next primary (bash's actual behavior — it does
+/// *not* negate a whole trailing `-a`/`-o` chain).
+fn test_not(a: &[&str], pos: &mut usize) -> Result<bool, String> {
+    if *pos < a.len() && a[*pos] == "!" {
+        *pos += 1;
+        return test_not(a, pos).map(|b| !b);
+    }
+    test_primary(a, pos)
+}
+
+fn test_primary(a: &[&str], pos: &mut usize) -> Result<bool, String> {
+    if *pos >= a.len() {
+        return Ok(false); // an empty expression is false
+    }
+    if UNARY_OPS.contains(&a[*pos]) && *pos + 1 < a.len() {
+        let (op, operand) = (a[*pos], a[*pos + 1]);
+        *pos += 2;
+        return test_unary(op, operand);
+    }
+    if *pos + 1 < a.len() && BINARY_OPS.contains(&a[*pos + 1]) {
+        if *pos + 2 >= a.len() {
+            return Err(format!("`{}': argument expected", a[*pos + 1]));
+        }
+        let (x, op, y) = (a[*pos], a[*pos + 1], a[*pos + 2]);
+        *pos += 3;
+        return test_binary(x, op, y);
+    }
+    // A lone string: true when non-empty.
+    let s = a[*pos];
+    *pos += 1;
+    Ok(!s.is_empty())
 }
 
 fn test_unary(op: &str, s: &str) -> Result<bool, String> {
@@ -390,5 +444,29 @@ mod tests {
         assert_eq!(ev(&["-f", "Cargo.toml"]), Ok(true));
         assert_eq!(ev(&["-d", "src"]), Ok(true));
         assert_eq!(ev(&["-e", "no-such-file-xyz"]), Ok(false));
+    }
+
+    #[test]
+    fn test_logical_combinators() {
+        // `-a` (AND) / `-o` (OR).
+        assert_eq!(ev(&["x", "-a", "y"]), Ok(true));
+        assert_eq!(ev(&["x", "-a", ""]), Ok(false));
+        assert_eq!(ev(&["", "-o", "y"]), Ok(true));
+        assert_eq!(ev(&["", "-o", ""]), Ok(false));
+
+        // `-a` binds tighter than `-o`, matching bash: `1 = 2 -o 1 = 1 -a 1 =
+        // 2` groups as `(1 = 2) -o ((1 = 1) -a (1 = 2))` = F -o F = false.
+        assert_eq!(ev(&["1", "=", "2", "-o", "1", "=", "1", "-a", "1", "=", "2"]), Ok(false));
+        assert_eq!(ev(&["1", "=", "1", "-o", "1", "=", "1", "-a", "1", "=", "2"]), Ok(true));
+
+        // `!` negates only the next primary, not a whole trailing `-a`/`-o`
+        // chain — matches real bash (verified against it directly): `! F -a
+        // F` is `(!F) -a F` = `T -a F` = false, not `!(F -a F)` = true.
+        assert_eq!(ev(&["!", "", "-a", ""]), Ok(false));
+        assert_eq!(ev(&["!", "", "-a", "!", ""]), Ok(true));
+
+        // Unary/binary operators still combine with `-a`/`-o`.
+        assert_eq!(ev(&["-f", "Cargo.toml", "-a", "-d", "src"]), Ok(true));
+        assert_eq!(ev(&["-f", "Cargo.toml", "-a", "-f", "no-such-file-xyz"]), Ok(false));
     }
 }

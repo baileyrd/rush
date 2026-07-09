@@ -251,3 +251,15 @@ git history for the commit-by-commit narrative.
   in `expand.rs`. `$*`/`${*}` now join positional parameters with `$IFS`'s
   first character (space if unset, nothing if IFS is empty) instead of a
   hardcoded space; `$@` is unaffected, matching bash.
+
+### `test`/`[` logical combinators `-a` / `-o` (C6)
+- `test`/`[` now understand `EXPR1 -a EXPR2` (AND) and `EXPR1 -o EXPR2` (OR),
+  with `-a` binding tighter than `-o` and `!` negating only the next
+  expression rather than a whole trailing `-a`/`-o` chain — both verified to
+  match real bash exactly. `test_eval` (`builtins.rs`) is now a small
+  recursive-descent parser (`test_or` → `test_and` → `test_not` →
+  `test_primary`) instead of a fixed-arity match; all prior single-expression
+  forms are unaffected.
+
+This closes out **Tier I** (correctness/POSIX risk) — see
+`docs/CAPABILITY_GAPS.md` — entirely: C1 through C6 are all done.

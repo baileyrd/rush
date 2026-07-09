@@ -22,10 +22,11 @@ subshells) with almost none of the bash/ksh/zsh-family conveniences layered
 on top. Tier I's original 6 items are done; three more (C35, a real
 quoting bug; C37, an unknown-command-aborts-the-script bug; C38, redirects
 to fd 3+ silently landing on fd 1) turned up while closing out Tier II,
-which is now five-sixths done — `local`, `getopts`, `command`/`type`/
-`hash`, `wait` (with its own prerequisite, `$!`), `source`/`.`, `eval`, and
-`exec` all landed alongside `read`/`printf`/`shift`. C36 (a PATH-visibility
-bug in `command`/`type`/`hash`) turned up while closing out `source`; C37
+which is now down to a single open item (C36) — `local`, `getopts`,
+`command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
+`source`/`.`, `eval`, `exec`, and `umask` all landed alongside
+`read`/`printf`/`shift`. C36 (a PATH-visibility bug in
+`command`/`type`/`hash`) turned up while closing out `source`; C37
 while closing out `eval`; C38 while closing out `exec`.
 
 ---
@@ -47,6 +48,7 @@ applicable to that shell's own model.
 | `source` / `.` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `eval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `exec` (process replacement) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `umask` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -71,7 +73,7 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
-- **Tier II — missing standard builtins:** 12 (10 done)
+- **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -497,10 +499,23 @@ where it blocks a headline idiom (`exec 3>file` holding an arbitrary
 descriptor open) rather than being an edge case. Tracked separately as C38.
 **Effort: M.**
 
-### C17 — `umask`
+### C17 — `umask` ✅ done
 Needed by any script that creates files or directories with specific
-permissions — currently no way to influence default permissions from
-inside a rush script at all. **Effort: S.**
+permissions — previously no way to influence default permissions from
+inside a rush script at all.
+
+Added `builtins::umask_cmd` (Unix only): a real `libc::umask()` call, so
+it actually changes the permissions every subsequent file/directory this
+process (or anything it execs/spawns) creates — not just a shell-internal
+display value. No argument reports the current mask (plain 4-digit octal,
+e.g. `0022`, or `u=rwx,g=rx,o=rx`-style with `-S`, both verified directly
+against real bash); reading it without changing it means setting it right
+back, since `umask()` itself only ever *sets*, returning the previous
+value. One argument sets it from an octal string; an out-of-range or
+malformed mode fails with status 1 without touching the mask. Symbolic
+*setting* (`umask u=rwx,g=rx,o=`) isn't supported, only octal — the
+overwhelming common case in real scripts, matching this item's **Effort:
+S** scope.
 
 ---
 

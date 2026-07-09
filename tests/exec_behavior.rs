@@ -285,6 +285,59 @@ fn shift_builtin() {
 }
 
 #[test]
+fn getopts_builtin() {
+    // Combined short flags (`-abc` = `-a -b -c`): `$OPTIND` stays put while
+    // still inside the same word, advancing only once it's exhausted.
+    let (out, _) = rush_argv(
+        "while getopts \"abc\" opt; do echo \"opt=$opt OPTIND=$OPTIND\"; done",
+        &["dummy", "-abc", "foo"],
+    );
+    assert_eq!(out, "opt=a OPTIND=1\nopt=b OPTIND=1\nopt=c OPTIND=2\n");
+
+    // An option requiring an argument: attached to the same word, or taken
+    // from the next word.
+    let (out, _) = rush_argv(
+        "while getopts \"b:\" opt; do echo \"opt=$opt arg=$OPTARG\"; done",
+        &["dummy", "-bfoo"],
+    );
+    assert_eq!(out, "opt=b arg=foo\n");
+    let (out, _) = rush_argv(
+        "while getopts \"b:c:\" opt; do echo \"opt=$opt arg=$OPTARG\"; done",
+        &["dummy", "-b", "foo", "-c", "bar"],
+    );
+    assert_eq!(out, "opt=b arg=foo\nopt=c arg=bar\n");
+
+    // `--` ends option processing without being consumed as an option; the
+    // rest (including anything looking like an option) becomes ordinary
+    // positional args from here on.
+    let (out, _) = rush_argv(
+        "while getopts \"ab\" opt; do echo \"opt=$opt\"; done; echo \"rest=$@\"",
+        &["dummy", "-a", "--", "-b"],
+    );
+    assert_eq!(out, "opt=a\nrest=-a -- -b\n");
+
+    // Silent mode (`optstring` starts with `:`): unknown option and missing
+    // argument each get their own distinguishable `name` value, with no
+    // diagnostic printed. Uses `getopts`'s own explicit `arg...` form rather
+    // than positional params, since these are single-shot (no loop).
+    let (out, status) = rush("getopts \":ab\" opt -z; echo \"$?:[$opt][$OPTARG]\"");
+    assert_eq!(out, "0:[?][z]\n");
+    assert_eq!(status, 0);
+    let (out, _) = rush("getopts \":b:\" opt -b; echo \"[$opt][$OPTARG]\"");
+    assert_eq!(out, "[:][b]\n");
+
+    // The headline idiom this connects: a real CLI-argument-parsing loop,
+    // consuming recognized flags then handing the rest to the caller via
+    // `shift $((OPTIND-1))`.
+    let (out, _) = rush_argv(
+        "verbose=0; while getopts \"vo:\" opt; do case $opt in v) verbose=1;; o) outfile=$OPTARG;; esac; done; \
+         shift $((OPTIND-1)); echo \"verbose=$verbose outfile=$outfile rest=$@\"",
+        &["dummy", "-v", "-o", "out.txt", "file1", "file2"],
+    );
+    assert_eq!(out, "verbose=1 outfile=out.txt rest=file1 file2\n");
+}
+
+#[test]
 fn local_builtin_scopes_variables_to_the_function_call() {
     // The headline case: a function's own counter no longer clobbers the
     // caller's variable of the same name.

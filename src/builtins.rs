@@ -32,6 +32,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "printf" => Some(printf_cmd(argv)),
         "shift" => Some(shift_cmd(argv)),
         "local" => Some(local_cmd(argv)),
+        "getopts" => Some(getopts_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -41,6 +42,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
+    "getopts",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -909,6 +911,105 @@ fn local_cmd(argv: &[String]) -> i32 {
         }
     }
     status
+}
+
+/// `getopts optstring name [arg...]` — POSIX option parsing: `-a`, `-b
+/// value`, and combined short flags (`-ab` means `-a -b`). `optstring`
+/// lists recognized letters; a letter followed by `:` requires an argument
+/// (taken from the rest of the same word if there's more after the letter,
+/// else the next whole word). A leading `:` in `optstring` enables
+/// "silent" mode: an unknown option sets `name` to `?` and `$OPTARG` to the
+/// offending character with no diagnostic printed; a missing argument sets
+/// `name` to `:` (same `$OPTARG`). Without a leading `:` (the default),
+/// both cases print a diagnostic, set `name` to `?`, and leave `$OPTARG`
+/// unset. `$OPTIND` (1-based index of the next word to process) and
+/// `$OPTARG` are ordinary shell variables — resetting `OPTIND=1` starts a
+/// fresh pass. With no explicit `arg...`, parses the positional parameters.
+/// A lone `--` or the first non-option word ends option processing without
+/// being consumed, leaving the rest available as ordinary positional args.
+fn getopts_cmd(argv: &[String]) -> i32 {
+    let (Some(optstring), Some(name)) = (argv.get(1), argv.get(2)) else {
+        eprintln!("getopts: usage: getopts optstring name [arg ...]");
+        return 2;
+    };
+    let args: Vec<String> = if argv.len() > 3 { argv[3..].to_vec() } else { crate::vars::args() };
+
+    let silent = optstring.starts_with(':');
+    let opts = optstring.trim_start_matches(':');
+
+    let optind = crate::vars::get("OPTIND").and_then(|s| s.parse().ok()).unwrap_or(1).max(1);
+    let char_pos = crate::vars::getopts_char_pos(optind);
+
+    // `(new_optind, new_char_pos, exit_status, name's new value, $OPTARG)`.
+    let (new_optind, new_char_pos, status, name_value, optarg): (usize, usize, i32, String, Option<String>) = 'outcome: {
+        if char_pos == 0 {
+            match args.get(optind - 1).map(String::as_str) {
+                None => break 'outcome (optind, 0, 1, "?".to_string(), None),
+                Some("--") => break 'outcome (optind + 1, 0, 1, "?".to_string(), None),
+                Some(w) if !w.starts_with('-') || w == "-" => {
+                    break 'outcome (optind, 0, 1, "?".to_string(), None);
+                }
+                _ => {}
+            }
+        }
+
+        let chars: Vec<char> = args[optind - 1].chars().collect();
+        let pos = if char_pos == 0 { 1 } else { char_pos };
+        let opt_char = chars[pos];
+        let opt_idx = opts.find(opt_char);
+        let takes_arg = opt_idx.is_some_and(|i| opts.as_bytes().get(i + 1) == Some(&b':'));
+
+        if opt_idx.is_none() {
+            let optarg = if silent {
+                Some(opt_char.to_string())
+            } else {
+                eprintln!("getopts: illegal option -- {opt_char}");
+                None
+            };
+            let (ni, np) = advance_option_pos(optind, &chars, pos);
+            break 'outcome (ni, np, 0, "?".to_string(), optarg);
+        }
+
+        if takes_arg {
+            let rest: String = chars[pos + 1..].iter().collect();
+            if !rest.is_empty() {
+                break 'outcome (optind + 1, 0, 0, opt_char.to_string(), Some(rest));
+            }
+            if let Some(next) = args.get(optind) {
+                break 'outcome (optind + 2, 0, 0, opt_char.to_string(), Some(next.clone()));
+            }
+            let (name_value, optarg) = if silent {
+                (":".to_string(), Some(opt_char.to_string()))
+            } else {
+                eprintln!("getopts: option requires an argument -- {opt_char}");
+                ("?".to_string(), None)
+            };
+            break 'outcome (optind + 1, 0, 0, name_value, optarg);
+        }
+
+        let (ni, np) = advance_option_pos(optind, &chars, pos);
+        (ni, np, 0, opt_char.to_string(), None)
+    };
+
+    crate::vars::set("OPTIND", &new_optind.to_string());
+    crate::vars::set_getopts_char_pos(new_optind, new_char_pos);
+    crate::vars::set(name, &name_value);
+    match optarg {
+        Some(v) => crate::vars::set("OPTARG", &v),
+        None => crate::vars::unset("OPTARG"),
+    }
+    status
+}
+
+/// Move past the option character at `chars[pos]`: to the next character in
+/// the same word if more remain (a combined flag cluster like `-ab`), else
+/// to the start of the next word.
+fn advance_option_pos(optind: usize, chars: &[char], pos: usize) -> (usize, usize) {
+    if pos + 1 < chars.len() {
+        (optind, pos + 1)
+    } else {
+        (optind + 1, 0)
+    }
 }
 
 fn exit(argv: &[String]) -> Option<i32> {

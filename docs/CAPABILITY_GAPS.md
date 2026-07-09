@@ -51,15 +51,15 @@ applicable to that shell's own model.
 \* Done for the interactive/script job-control path; a compound as one stage
 among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
-† `read` (with `-r` and `$IFS` splitting) and `printf` (sans `%e`/`%f`/`%g`)
-are done; `shift`/`getopts` remain missing.
+† `read` (with `-r` and `$IFS` splitting), `printf` (sans `%e`/`%f`/`%g`),
+and `shift` are done; `getopts` remains missing.
 
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11 (2 done)
+- **Tier II — missing standard builtins:** 11 (3 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -230,10 +230,18 @@ erroring. Not yet implemented: `%e`/`%f`/`%g` (floating point) and `*`
 pieces (rush's arithmetic is integer-only, so the former is lower-value
 here than in a shell with float support).
 
-### C9 — `shift [n]`
+### C9 — `shift [n]` ✅ done
 The missing piece connecting positional parameters and `case` (both already
 supported) into the ubiquitous `while [ $# -gt 0 ]; do case $1 in …; esac;
 shift; done` argument-parsing loop. **Effort: S.**
+
+Implemented (`vars::shift`, `builtins::shift_cmd`): drops the first `n`
+(default 1) positional parameters. A negative or non-numeric `n` is a hard
+usage error (status 1, with a message); `n` greater than `$#` fails
+*silently* — no message, just status 1 — matching a real bash quirk
+verified directly: that's the everyday way an argument-parsing loop notices
+it's out of arguments, so bash doesn't warn about it the way it does for a
+genuinely malformed count.
 
 ### C10 — `local` (function-scoped variables)
 Near-universal extension (dash, bash, ksh, zsh); fish scopes by default.

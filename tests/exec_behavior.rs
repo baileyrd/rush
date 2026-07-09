@@ -256,6 +256,35 @@ fn for_loop_without_in_clause_iterates_positional_params() {
 }
 
 #[test]
+fn shift_builtin() {
+    let (out, _) = rush_argv("shift; echo \"$@/$#\"", &["dummy", "a", "b", "c"]);
+    assert_eq!(out, "b c/2\n");
+
+    let (out, _) = rush_argv("shift 2; echo \"$@/$#\"", &["dummy", "a", "b", "c"]);
+    assert_eq!(out, "c/1\n");
+
+    // `shift 0` is a no-op, status 0.
+    let (out, status) = rush_argv("shift 0; echo \"status=$?/$@/$#\"", &["dummy", "a", "b"]);
+    assert_eq!(out, "status=0/a b/2\n");
+    assert_eq!(status, 0);
+
+    // Count greater than `$#`: fails *silently* (no shift, status 1) — bash
+    // has no error message for this specific case, only for a genuinely
+    // malformed (negative/non-numeric) count.
+    let (out, status) = rush_argv("shift 5; echo \"status=$?/$@/$#\"", &["dummy", "a", "b"]);
+    assert_eq!(out, "status=1/a b/2\n");
+    assert_eq!(status, 0); // the *script's* last command (echo) still succeeds
+
+    // The headline idiom this connects: an argument-parsing loop over
+    // positional params via `case`/`shift`.
+    let (out, _) = rush_argv(
+        "while [ $# -gt 0 ]; do case $1 in -a) echo flag_a;; *) echo \"arg:$1\";; esac; shift; done",
+        &["dummy", "-a", "x", "y"],
+    );
+    assert_eq!(out, "flag_a\narg:x\narg:y\n");
+}
+
+#[test]
 fn ifs_driven_word_splitting() {
     // POSIX field splitting honors `$IFS`, not a hardcoded whitespace set.
     assert_eq!(

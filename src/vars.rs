@@ -96,6 +96,20 @@ pub fn args() -> Vec<String> {
     ARGS.with(|a| a.borrow().clone())
 }
 
+/// `shift n`: drop the first `n` positional parameters. Returns `false` (and
+/// leaves them untouched) if `n` is greater than `$#` — the `shift` builtin
+/// reports that as a usage error, matching bash.
+pub fn shift(n: usize) -> bool {
+    ARGS.with(|a| {
+        let mut a = a.borrow_mut();
+        if n > a.len() {
+            return false;
+        }
+        a.drain(0..n);
+        true
+    })
+}
+
 /// Record a pending loop-control request (from the `break`/`continue` builtins).
 pub fn set_loop_ctl(ctl: Option<LoopCtl>) {
     LOOP_CTL.with(|c| *c.borrow_mut() = ctl);
@@ -229,5 +243,26 @@ mod tests {
 
         unset("RUSH_V");
         assert_eq!(get("RUSH_V"), None);
+    }
+
+    #[test]
+    fn shift_drops_leading_positional_params() {
+        set_args("prog".to_string(), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        assert!(shift(1));
+        assert_eq!(args(), vec!["b", "c"]);
+
+        assert!(shift(0)); // no-op, always succeeds
+        assert_eq!(args(), vec!["b", "c"]);
+
+        // Greater than the remaining count: rejected, nothing shifted.
+        assert!(!shift(3));
+        assert_eq!(args(), vec!["b", "c"]);
+
+        assert!(shift(2));
+        assert!(args().is_empty());
+        assert!(!shift(1)); // now empty: even 1 is too many
+
+        set_args("prog".to_string(), Vec::new());
     }
 }

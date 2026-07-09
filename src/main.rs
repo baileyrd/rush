@@ -123,6 +123,12 @@ fn prompt_char() -> char {
 }
 
 fn main() -> rustyline::Result<()> {
+    // `TERM`/`HUP` traps (C21) need to work in every mode, not just
+    // interactively — the target use case (a container's PID 1 catching
+    // `TERM` to shut down gracefully) has no terminal at all.
+    #[cfg(unix)]
+    trap::install_signal_handlers();
+
     let args: Vec<String> = std::env::args().collect();
 
     // Non-interactive modes: `rush -c "cmd" [name args…]` and `rush FILE [args…]`.
@@ -193,6 +199,10 @@ fn interactive() -> rustyline::Result<()> {
         // Report any background jobs that finished or stopped since last prompt.
         #[cfg(unix)]
         job::reap_background();
+        // Fire (or default-terminate on) any TERM/HUP received since the last
+        // prompt — same idea as `reap_background`, for signals instead of jobs.
+        #[cfg(unix)]
+        trap::check_pending();
 
         let prompt = if buffer.is_empty() { prompt() } else { "> ".to_string() };
         match rl.readline(&prompt) {

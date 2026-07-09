@@ -382,6 +382,33 @@ commands, even a lone one — narrower than the documented "compound as one
 stage among several in a pipeline" limitation above.)
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
+
+**Windows strategy (G11):** `#[cfg(unix)]`/`#[cfg(not(unix))]` are decided by
+the Rust *target triple*, not the build/shell environment — there's no
+"building under MSYS2" distinct from "building for Windows normally." MSYS2
+just packages the same mingw-w64 GNU toolchain rustup uses for the standard
+`x86_64-pc-windows-gnu` target, which — like `x86_64-pc-windows-msvc` — has
+`cfg(windows)`, never `cfg(unix)`. Verified directly, not just reasoned:
+cross-compiling with that same mingw-w64 toolchain (`rustup target add
+x86_64-pc-windows-gnu`, `apt install mingw-w64`, `cargo build --release
+--target x86_64-pc-windows-gnu`) succeeds and produces a genuine `PE32+
+executable ... for MS Windows`; `cargo tree --target x86_64-pc-windows-gnu`
+confirms rush's own `libc` dependency (`[target.'cfg(unix)'.dependencies]` in
+`Cargo.toml`) is excluded for that target, so `job.rs` (`#[cfg(unix)] mod
+job;` in `main.rs`) never compiles in — there is no code path, on any
+Rust-supported Windows target, that can produce a job-control-capable
+Windows binary. So **the "MSYS2 = full job control" half of this gap's
+original framing doesn't hold**: every Windows build, via MSYS2 or otherwise,
+is foreground-only, unconditionally, by construction — not merely "by
+design" as a choice not yet revisited, but because `job.rs`'s POSIX
+`libc` calls (`setpgid`, `tcsetpgrp`, `WIFSTOPPED`, …) have no Windows
+equivalent wired up, and no supported target sets `cfg(unix)` on Windows to
+even reach that code. (Not validated: actually *running* the cross-compiled
+binary — this sandbox has no Windows machine, and a Wine install attempt
+failed on an unrelated package-repository error. Unnecessary for the
+job-control conclusion above, though, since that's decided statically by
+which code compiles in, not by anything only observable at runtime.)
+
 Implements the parts that need POSIX process groups and signals, via the `libc`
 crate, following the classic glibc job-control structure:
 - `init` (called once at startup, only when stdin is a tty) ignores the

@@ -157,3 +157,19 @@ git history for the commit-by-commit narrative.
   it doesn't track `$?` across jobs within a substitution, and it rejects
   *any* compound command, even a lone one (not just one mid-pipeline, which
   was already documented).
+
+### Windows/MSYS2 build strategy (G11)
+- Validated, not just documented: cross-compiled rush for
+  `x86_64-pc-windows-gnu` with the same mingw-w64 toolchain MSYS2 packages —
+  it builds and links into a genuine `PE32+` Windows executable, and
+  `cargo tree` confirms rush's own `libc` dependency (and so `job.rs`) is
+  excluded for that target. This corrects the gap's original framing: there
+  is no "MSYS2 build with full job control" — `cfg(unix)`/`cfg(windows)`
+  are decided by the target triple, not the build environment, and no
+  Rust-supported Windows target sets `cfg(unix)`. Every Windows build is
+  foreground-only, unconditionally, by construction — see `docs/
+  ARCHITECTURE.md`'s `job.rs` section for the full writeup. Not validated:
+  actually running the cross-compiled binary (no Windows machine in this
+  environment, and a Wine install hit an unrelated package error) —
+  unnecessary for the conclusion above, since it's decided by what compiles
+  in, not by anything only observable at runtime.

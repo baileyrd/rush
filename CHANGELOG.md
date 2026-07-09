@@ -236,3 +236,18 @@ git history for the commit-by-commit narrative.
   textually-last pipeline in a job's and-or chain actually ran (`last_ran`),
   so short-circuiting an earlier failure no longer trips errexit. `if`/`while`
   conditions remain separately exempt via the pre-existing `exec_cond` path.
+
+### Real `$IFS`-driven word-splitting (C5)
+- Field splitting of an unquoted expansion now honors `$IFS` instead of a
+  hardcoded whitespace set. Unset `IFS` still defaults to space/tab/newline;
+  an explicit empty `IFS=` disables splitting entirely (the whole expansion
+  is one field); any other value splits on exactly its characters —
+  space/tab/newline within it collapse like the default (no empty fields
+  from a run), while every other character is a "non-whitespace" delimiter
+  where each occurrence opens a field on its own, even empty (`IFS=,` on
+  `a,,b` is three fields, not two) — except a single trailing one at the
+  very end, which produces no trailing empty field, matching a real
+  asymmetry in bash's own behavior. New `Ifs` type and rewritten `Splitter`
+  in `expand.rs`. `$*`/`${*}` now join positional parameters with `$IFS`'s
+  first character (space if unset, nothing if IFS is empty) instead of a
+  hardcoded space; `$@` is unaffected, matching bash.

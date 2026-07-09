@@ -11,9 +11,10 @@
 //! Single-quoted and backslash-escaped text is taken verbatim, and only
 //! metacharacters originating from *unquoted* text are active for globbing
 //! (`"*.rs"` is literal). Globbing can turn one word into several arguments;
-//! a pattern that matches nothing is left as its literal text. We do *not* do
-//! whitespace word-splitting of expansion results yet. A bare expansion that
-//! comes out empty drops out the way `echo $UNSET` does in a real shell.
+//! a pattern that matches nothing is left as its literal text. An unquoted
+//! expansion is also split into fields on `$IFS` (default: space/tab/newline;
+//! see `Ifs`) — a bare expansion that comes out empty drops out the way
+//! `echo $UNSET` does in a real shell.
 
 use std::iter::Peekable;
 use std::str::Chars;
@@ -169,6 +170,7 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
         }
     }
 
+    let ifs = Ifs::current();
     let mut sp = Splitter::default();
 
     for (i, part) in word.iter().enumerate() {
@@ -177,13 +179,25 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
             WordPart::Quoted(s) => sp.add_unsplit(&expand_dollars(s)?),
             WordPart::Unquoted(s) => {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
-                sp.add_split(&expand_dollars(&text)?);
+                sp.add_split(&expand_dollars(&text)?, &ifs);
             }
         }
     }
 
+    // A single trailing non-whitespace IFS delimiter at the very end of the
+    // text doesn't produce a trailing empty field — real bash keeps a
+    // *leading* one (`IFS=,`'s `,a` is `""`, `a`) but drops a *trailing* one
+    // (`a,` is just `a`, not `a`, `""`) even though internal and repeated
+    // trailing delimiters still do (`a,,` is `a`, `""`). The last field is
+    // exactly this "opened by a hard boundary, never touched again" case iff
+    // it's still unquoted and empty by the time every part's been processed.
+    let mut fields = sp.fields;
+    if matches!(fields.last(), Some(f) if f.explicit && f.plain.is_empty() && !f.quoted) {
+        fields.pop();
+    }
+
     let mut out = Vec::new();
-    for field in sp.fields {
+    for field in fields {
         if field.globbable {
             let matches = crate::glob::glob(&field.pattern);
             if !matches.is_empty() {
@@ -191,41 +205,104 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
                 continue;
             }
         }
-        if field.plain.is_empty() && !field.quoted {
-            continue; // unquoted-empty field drops out
+        if field.plain.is_empty() && !field.quoted && !field.explicit {
+            continue; // unquoted-empty field drops out, unless $IFS itself demarcated it
         }
         out.push(field.plain);
     }
     Ok(out)
 }
 
+/// `$IFS`'s field-splitting rules (POSIX §2.6.5). Unset IFS defaults to
+/// space/tab/newline. An explicit empty IFS (`IFS=`) disables field
+/// splitting entirely. Otherwise, space/tab/newline characters *present in
+/// the value* are the collapsing "IFS whitespace" class (runs collapse, and
+/// leading/trailing runs vanish with no empty field); every other character
+/// in the value is a "non-whitespace" delimiter where *each occurrence*
+/// starts a new field on its own, even with nothing in it — `IFS=,` on
+/// `a,,b` is three fields (`a`, ``, `b`), not two.
+struct Ifs {
+    whitespace: Vec<char>,
+    other: Vec<char>,
+    disabled: bool,
+    /// The separator unquoted `$*` joins positional parameters with: IFS's
+    /// first character, a space if IFS is unset, or nothing if IFS is set
+    /// but empty.
+    star_sep: String,
+}
+
+impl Ifs {
+    fn current() -> Ifs {
+        match var_raw("IFS") {
+            None => Ifs {
+                whitespace: vec![' ', '\t', '\n'],
+                other: Vec::new(),
+                disabled: false,
+                star_sep: " ".to_string(),
+            },
+            Some(s) if s.is_empty() => Ifs {
+                whitespace: Vec::new(),
+                other: Vec::new(),
+                disabled: true,
+                star_sep: String::new(),
+            },
+            Some(s) => {
+                let mut whitespace = Vec::new();
+                let mut other = Vec::new();
+                for c in s.chars() {
+                    let bucket = if matches!(c, ' ' | '\t' | '\n') { &mut whitespace } else { &mut other };
+                    if !bucket.contains(&c) {
+                        bucket.push(c);
+                    }
+                }
+                let star_sep = s.chars().next().unwrap().to_string();
+                Ifs { whitespace, other, disabled: false, star_sep }
+            }
+        }
+    }
+
+    fn is_whitespace(&self, c: char) -> bool {
+        self.whitespace.contains(&c)
+    }
+
+    fn is_delim(&self, c: char) -> bool {
+        self.whitespace.contains(&c) || self.other.contains(&c)
+    }
+}
+
 /// One argument under construction: its literal text, its glob pattern (with
-/// non-active metacharacters escaped), and whether any of it was quoted or has
-/// active glob metacharacters.
+/// non-active metacharacters escaped), whether any of it was quoted or has
+/// active glob metacharacters, and whether `$IFS` itself demarcated this
+/// field (kept even if empty, unlike an ordinary empty unquoted expansion).
 #[derive(Default)]
 struct Field {
     plain: String,
     pattern: String,
     quoted: bool,
     globbable: bool,
+    explicit: bool,
 }
 
-/// Assembles a word's parts into fields, splitting on whitespace from unquoted
+/// Assembles a word's parts into fields, splitting on `$IFS` from unquoted
 /// expansions.
 #[derive(Default)]
 struct Splitter {
     fields: Vec<Field>,
-    /// A field boundary is pending: the next content starts a new field.
-    delim: bool,
+    /// An IFS-whitespace run was seen: the *next* real content opens a new
+    /// field, but nothing is forced if none follows (trailing whitespace
+    /// produces no empty field). A non-whitespace IFS delimiter is handled
+    /// separately by `hard_boundary`, which opens (and closes) a field
+    /// immediately, empty or not.
+    soft_pending: bool,
 }
 
 impl Splitter {
     /// The field currently accepting content, opening a new one if a boundary
     /// is pending or none exists yet.
     fn current(&mut self) -> &mut Field {
-        if self.delim || self.fields.is_empty() {
+        if self.soft_pending || self.fields.is_empty() {
             self.fields.push(Field::default());
-            self.delim = false;
+            self.soft_pending = false;
         }
         self.fields.last_mut().unwrap()
     }
@@ -238,19 +315,48 @@ impl Splitter {
         f.quoted = true;
     }
 
-    /// Add the result of an unquoted expansion: whitespace becomes field
-    /// boundaries, and metacharacters stay active for globbing.
-    fn add_split(&mut self, text: &str) {
+    /// Add the result of an unquoted expansion: `$IFS` characters become
+    /// field boundaries (whitespace collapses; non-whitespace delimiters
+    /// don't), and metacharacters stay active for globbing.
+    fn add_split(&mut self, text: &str, ifs: &Ifs) {
+        if ifs.disabled {
+            let f = self.current();
+            f.plain.push_str(text);
+            f.pattern.push_str(text);
+            if text.contains(['*', '?', '[']) {
+                f.globbable = true;
+            }
+            return;
+        }
+
         let mut chars = text.chars().peekable();
         while let Some(&c) = chars.peek() {
-            if c.is_whitespace() {
-                while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            if ifs.is_delim(c) {
+                // A maximal run of IFS characters: each non-whitespace one is
+                // its own delimiter (hard boundary); whitespace anywhere in
+                // the run is filler, absorbed rather than adding a boundary
+                // of its own — but only when at least one non-whitespace
+                // delimiter is actually present in this run.
+                let mut hard = 0usize;
+                while let Some(&next) = chars.peek() {
+                    if !ifs.is_delim(next) {
+                        break;
+                    }
+                    if !ifs.is_whitespace(next) {
+                        hard += 1;
+                    }
                     chars.next();
                 }
-                self.delim = true;
+                if hard > 0 {
+                    for _ in 0..hard {
+                        self.hard_boundary();
+                    }
+                } else {
+                    self.soft_pending = true;
+                }
             } else {
                 let mut chunk = String::new();
-                while matches!(chars.peek(), Some(c) if !c.is_whitespace()) {
+                while matches!(chars.peek(), Some(&c) if !ifs.is_delim(c)) {
                     chunk.push(chars.next().unwrap());
                 }
                 let f = self.current();
@@ -261,6 +367,18 @@ impl Splitter {
                 }
             }
         }
+    }
+
+    /// A non-whitespace `$IFS` character always delimits a field on its own,
+    /// even with nothing on one (or both) sides.
+    fn hard_boundary(&mut self) {
+        if self.fields.is_empty() {
+            self.fields.push(Field::default());
+        }
+        self.fields.last_mut().unwrap().explicit = true;
+        self.fields.push(Field::default());
+        self.fields.last_mut().unwrap().explicit = true;
+        self.soft_pending = false;
     }
 }
 
@@ -343,11 +461,17 @@ fn expand_dollars(text: &str) -> Result<String, String> {
                 chars.next();
                 out.push_str(&crate::vars::arg_count().to_string());
             }
-            // `$@` / `$*` — all positional parameters, space-joined here. (A
+            // `$@` — all positional parameters, space-joined here. (A
             // standalone `"$@"` keeps each parameter separate; see below.)
-            Some('@') | Some('*') => {
+            Some('@') => {
                 chars.next();
                 out.push_str(&crate::vars::args().join(" "));
+            }
+            // `$*` — all positional parameters, joined with `$IFS`'s first
+            // character (space if unset, nothing if IFS is set but empty).
+            Some('*') => {
+                chars.next();
+                out.push_str(&crate::vars::args().join(&Ifs::current().star_sep));
             }
             // `$0`–`$9` — positional parameters.
             Some(&c) if c.is_ascii_digit() => {
@@ -491,7 +615,8 @@ fn expand_braced(inner: &str) -> Result<String, String> {
     // Special parameters: `${#}`, `${@}`/`${*}`, and numeric `${10}`.
     match inner {
         "#" => return Ok(crate::vars::arg_count().to_string()),
-        "@" | "*" => return Ok(crate::vars::args().join(" ")),
+        "@" => return Ok(crate::vars::args().join(" ")),
+        "*" => return Ok(crate::vars::args().join(&Ifs::current().star_sep)),
         _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
             let n: usize = inner.parse().map_err(|_| format!("${{{inner}}}: bad substitution"))?;
             return Ok(crate::vars::arg(n).unwrap_or_default());
@@ -693,6 +818,62 @@ mod tests {
     }
 
     #[test]
+    fn custom_ifs_field_splitting() {
+        // A non-whitespace `$IFS` character: each occurrence delimits a
+        // field on its own, unlike whitespace's collapsing — `a,,b` is three
+        // fields, not two with a merged gap.
+        crate::vars::set("IFS", ",");
+        crate::vars::set("RUSH_CSV", "a,,b,c");
+        assert_eq!(one("echo $RUSH_CSV"), vec!["echo", "a", "", "b", "c"]);
+
+        // A leading delimiter produces a leading empty field; a single
+        // *trailing* one at the very end does not (matches real bash) — but
+        // a repeated trailing one still leaves one behind.
+        crate::vars::set("RUSH_CSV", ",a,");
+        assert_eq!(one("echo $RUSH_CSV"), vec!["echo", "", "a"]);
+        crate::vars::set("RUSH_CSV", "a,,");
+        assert_eq!(one("echo $RUSH_CSV"), vec!["echo", "a", ""]);
+
+        // Mixed whitespace + non-whitespace IFS: whitespace immediately
+        // adjacent to a non-whitespace delimiter is absorbed into it rather
+        // than adding its own extra boundary.
+        crate::vars::set("IFS", " ,");
+        crate::vars::set("RUSH_CSV", "a, b,, c");
+        assert_eq!(one("echo $RUSH_CSV"), vec!["echo", "a", "b", "", "c"]);
+
+        // `IFS=` (explicitly empty) disables field splitting entirely — the
+        // whole expansion is one field, whitespace and all.
+        crate::vars::set("IFS", "");
+        crate::vars::set("RUSH_CSV", "a  b");
+        assert_eq!(one("echo $RUSH_CSV"), vec!["echo", "a  b"]);
+
+        crate::vars::unset("IFS");
+    }
+
+    #[test]
+    fn star_join_honors_ifs_first_char() {
+        crate::vars::set_args("rush".to_string(), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        // Unset IFS: `$*`/`${*}` join with a space, same as always.
+        crate::vars::unset("IFS");
+        assert_eq!(one("echo \"$*\""), vec!["echo", "a b c"]);
+        assert_eq!(one("echo \"${*}\""), vec!["echo", "a b c"]);
+
+        // Custom IFS: joined with its *first* character, not a literal space.
+        crate::vars::set("IFS", ":");
+        assert_eq!(one("echo \"$*\""), vec!["echo", "a:b:c"]);
+        assert_eq!(one("echo \"${*}\""), vec!["echo", "a:b:c"]);
+
+        // `$@` is unaffected — always space-joined regardless of IFS (when
+        // not the standalone `"$@"` idiom, which instead yields separate
+        // arguments — see `variable_tilde_and_quoting`-adjacent behavior).
+        assert_eq!(one("echo \"x$@y\""), vec!["echo", "xa b cy"]);
+
+        crate::vars::unset("IFS");
+        crate::vars::set_args("rush".to_string(), Vec::new());
+    }
+
+    #[test]
     fn lone_dollar_is_literal() {
         assert_eq!(one("echo $"), vec!["echo", "$"]);
         assert_eq!(one("echo a$ b"), vec!["echo", "a$", "b"]);
@@ -822,3 +1003,4 @@ mod tests {
         assert_eq!(one("ls no-such-*.zzz"), vec!["ls", "no-such-*.zzz"]);
     }
 }
+

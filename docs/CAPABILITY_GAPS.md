@@ -54,7 +54,7 @@ among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6 (4 done)
+- **Tier I — correctness/POSIX risk:** 6 (5 done)
 - **Tier II — missing standard builtins:** 11
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
@@ -123,11 +123,24 @@ fails — `set -e; false && true` survives, `set -e; true && false` exits,
 matching bash exactly. `if`/`while` conditions remain separately exempt via
 the pre-existing `exec_cond` path, unaffected by this change.
 
-### C5 — Real `$IFS`-driven word-splitting
-POSIX-mandated; present in dash/bash/ksh/zsh. Rush hardcodes ASCII whitespace
+### C5 — Real `$IFS`-driven word-splitting ✅ done
+POSIX-mandated; present in dash/bash/ksh/zsh. Rush hardcoded ASCII whitespace
 as the split set. `IFS=','`-style field splitting — a standard, portable
-parsing technique — silently does the wrong thing rather than honoring the
-variable. **Effort: M.**
+parsing technique — used to silently do the wrong thing rather than honoring
+the variable. **Effort: M.**
+
+Implemented (`expand.rs`'s new `Ifs` type and rewritten `Splitter`): unset
+`$IFS` still defaults to space/tab/newline; an *explicit* empty `IFS=`
+disables field splitting entirely (matching POSIX, not merely "no-op
+default"); any other value splits on exactly its characters, with
+space/tab/newline within it forming the collapsing "whitespace" class (runs
+collapse, no empty fields) and every other character forming "non-whitespace"
+delimiters where *each occurrence* opens a field on its own, even empty
+(`IFS=,` on `a,,b` is three fields) — matching bash's asymmetry that a
+*leading* delimiter produces a leading empty field but a single *trailing*
+one at the very end does not. `$*`/`${*}` now join with `$IFS`'s first
+character (space if unset, nothing if IFS is empty) instead of a hardcoded
+space; `$@` is unaffected, matching bash.
 
 ### C6 — `test`/`[` logical combinators `-a` / `-o` (tracked)
 POSIX-mandated, present in dash/bash/ksh/zsh (bash discourages but still

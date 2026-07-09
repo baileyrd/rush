@@ -213,6 +213,28 @@ fn for_loop_without_in_clause_iterates_positional_params() {
     assert_eq!(out, "after\n");
 }
 
+#[test]
+fn ifs_driven_word_splitting() {
+    // POSIX field splitting honors `$IFS`, not a hardcoded whitespace set.
+    assert_eq!(
+        rush("IFS=,; x=a,,b,c; for w in $x; do echo \"[$w]\"; done").0,
+        "[a]\n[]\n[b]\n[c]\n"
+    );
+
+    // `IFS=` (explicitly empty, not unset) disables splitting entirely: the
+    // whole expansion is one field.
+    assert_eq!(
+        rush("IFS=; x=\"a  b\"; for w in $x; do echo \"[$w]\"; done").0,
+        "[a  b]\n"
+    );
+
+    // Restoring default behavior (IFS unset) still splits on whitespace.
+    assert_eq!(
+        rush("x=\"a  b   c\"; for w in $x; do echo \"[$w]\"; done").0,
+        "[a]\n[b]\n[c]\n"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn compound_command_as_one_stage_of_a_real_pipeline() {

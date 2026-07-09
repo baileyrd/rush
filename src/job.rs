@@ -97,7 +97,8 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
 
     for (i, cmd) in pipeline.commands.iter().enumerate() {
         let is_last = i == n - 1;
-        let mut command = crate::exec::build_stage(cmd, prev_stdout.take(), is_last, false)?;
+        let (mut command, real_pipe_read) =
+            crate::exec::build_stage(cmd, prev_stdout.take(), is_last, false)?;
 
         // `0` for the leader means "new group whose id is my pid".
         let target_pgid = pgid;
@@ -124,7 +125,11 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
             libc::setpgid(pid, pgid);
         }
 
-        if !is_last {
+        if let Some(read) = real_pipe_read {
+            // `2>&1` forced a real pipe (see `build_stage`): its read end
+            // feeds the next stage's stdin.
+            prev_stdout = Some(Stdio::from(read));
+        } else if !is_last {
             prev_stdout = child.stdout.take().map(Stdio::from);
         }
         pids.push(pid);
@@ -459,7 +464,7 @@ fn state_label(state: JobState) -> &'static str {
     }
 }
 
-fn exit_code(status: c_int) -> i32 {
+pub(crate) fn exit_code(status: c_int) -> i32 {
     if wifexited(status) {
         libc::WEXITSTATUS(status)
     } else if wifsignaled(status) {

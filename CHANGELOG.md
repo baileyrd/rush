@@ -65,9 +65,27 @@ git history for the commit-by-commit narrative.
 - README feature matrix and `docs/ARCHITECTURE.md` kept current throughout.
 
 ### Notes & known limitations
-- Subshells isolate state rather than forking, so `exit` inside one exits the
-  whole shell.
-- Duping a *piped* fd can't be shared with `std` before spawn, so
-  `cmd 2>&1 | next` leaves stderr on the terminal.
-- Compound commands can't yet be placed inside a pipeline or command
-  substitution (no real fork).
+- Compound commands can't yet be placed as one stage among several in a
+  multi-command pipeline (e.g. `(cmd) | grep x`) — only a pipeline that is a
+  single compound is supported today.
+
+## [Unreleased] — since 0.1.1
+
+### Packaging & release (G1–G4)
+- MIT `LICENSE` and `license`/`description`/`repository` `Cargo.toml` metadata.
+- Tagged releases build a Windows zip artifact (`.github/workflows/release.yml`).
+- README status block: explicit "experimental" status, Windows foreground-only
+  limitation stated in plain terms.
+- `cd -` returns to (and prints) `$OLDPWD`, tracked on every successful `cd`.
+
+### Real fd semantics (G10)
+- `2>&1` combined with a pipe or command substitution now genuinely routes
+  stderr through: `cmd 2>&1 | next` and `x=$(cmd 2>&1)` both capture the merged
+  stream correctly. Fixed by materializing a real OS pipe by hand (Unix only)
+  when a `Dup` redirect targets a sink `Stdio::piped()` can't share before
+  spawn — see `exec.rs`'s `make_pipe`/`clone_or_materialize`.
+- Subshells (`(...)`) now fork a real child on Unix instead of approximating
+  isolation via state save/restore: `(cd x; …)`, `(VAR=…; …)`, and `exit`
+  inside `(…)` are genuinely isolated and can't leak back to the parent shell.
+  The old snapshot/restore approximation remains as the non-Unix fallback
+  (still can't contain an `exit`).

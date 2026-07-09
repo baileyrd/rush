@@ -238,11 +238,13 @@ A from-scratch globber, no external crate:
 
 ### `vars.rs` — shell state
 Thread-local state that outlives a single command: the last exit status (`$?`),
-shell variables (value + exported flag, with `snapshot`/`restore` for
-subshells), positional parameters (`$0`, `$1`…), and the pending control-flow
-request (`break`/`continue`/`return`) that `exec` consults via `flow_pending()`.
-Lookups for `$VAR` consult this map first and fall back to the environment; only
-*exported* variables are pushed into child processes.
+shell variables (value + exported flag), positional parameters (`$0`, `$1`…),
+and the pending control-flow request (`break`/`continue`/`return`) that `exec`
+consults via `flow_pending()`. Lookups for `$VAR` consult this map first and
+fall back to the environment; only *exported* variables are pushed into child
+processes. `snapshot`/`restore` (`#[cfg(not(unix))]`) back the non-Unix
+subshell approximation — see `exec.rs`'s `Compound::Subshell` notes below; a
+real fork needs neither.
 
 ### `exec.rs` — runtime
 Sequences a `CommandList` and turns each pipeline into running processes:
@@ -261,8 +263,16 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   source order — so `> f 2>&1` sends both to `f` (the dup `try_clone`s the file
   handle) while `2>&1 > f` leaves stderr on the terminal. A non-final stage (or
   any stage when capturing) defaults fd 1 to a pipe. Shared by the plain runner
-  and the Unix job runner. (Duping a *piped* fd can't be shared with `std`
-  pre-spawn, so `cmd 2>&1 | next` leaves stderr inherited — a known limitation.)
+  and the Unix job runner. `Stdio::piped()` doesn't expose its pipe's write end
+  before spawn, so a plain `Sink::Pipe` can't be shared with a second
+  descriptor as-is; when `2>&1` targets one, `clone_or_materialize` builds a
+  real OS pipe by hand (`make_pipe`, Unix only) so stdout and stderr get
+  independent fds onto the *same* pipe — `cmd 2>&1 | next` and
+  `x=$(cmd 2>&1)` both route stderr through correctly. The manually-created
+  pipe's write end must be dropped in the parent (`drop(command)`) before
+  reading the read end back — an ordinary file redirect doesn't care, but a
+  parent-side copy of a *pipe's* write end left open stops the reader from
+  ever seeing EOF.
 - On Unix, foreground/background spawning, terminal control, and waiting live in
   `job` (below). Off Unix, `run` spawns each stage, threads stdout→stdin, waits,
   and reports the last stage's exit code as the pipeline status.
@@ -272,6 +282,15 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   (`if`/`while` branch on a list's exit status; `for` expands its word list via
   `expand::expand_words` and sets the loop variable each iteration; `case`
   matches the subject against each pattern with `glob::match_component`).
+  `Compound::Subshell` forks a real child on Unix (`run_subshell_forked`): the
+  parent just waits and adopts the child's exit status, so `(cd x; …)`,
+  `(VAR=…; …)`, and even `exit` inside `(…)` are genuinely isolated — none of
+  it can leak back, because it happens in a separate process. Off Unix (no
+  `fork`), it falls back to `vars::snapshot`/`restore` plus saving/restoring
+  the cwd, which can't contain an `exit`. A compound as *one stage among
+  several* in a multi-command pipeline (e.g. `(cmd) | grep x`) is still
+  rejected by `expand::expand` — only a pipeline that is a single compound is
+  supported today; forking a compound mid-pipeline is a follow-up.
 - **`break`/`continue`/`return`:** those builtins set a thread-local request in
   `vars`; `exec_list`/`run_andor` stop early when `flow_pending()` is true. Each
   loop's `loop_step` consumes one `break`/`continue` level (so `break 2` escapes

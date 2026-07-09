@@ -136,9 +136,13 @@ pub fn export(name: &str) {
     });
 }
 
-/// A snapshot of all variables, for isolating a subshell.
+/// A snapshot of all variables, for isolating a subshell on platforms without
+/// `fork` (see `exec::run_compound`'s `Compound::Subshell` arm) — Unix forks a
+/// real child instead, so these are unused there.
+#[cfg(not(unix))]
 pub type Snapshot = Vec<(String, String, bool)>;
 
+#[cfg(not(unix))]
 pub fn snapshot() -> Snapshot {
     VARS.with(|v| {
         v.borrow()
@@ -148,6 +152,7 @@ pub fn snapshot() -> Snapshot {
     })
 }
 
+#[cfg(not(unix))]
 pub fn restore(snap: Snapshot) {
     VARS.with(|v| {
         let mut m = v.borrow_mut();

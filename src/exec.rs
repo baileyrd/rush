@@ -25,11 +25,22 @@ use crate::parser::{AndOrList, CommandList, Compound, Connector, Job, RawCommand
 pub struct Command {
     pub argv: Vec<String>,
     pub redirects: Vec<Redirect>,
-    /// Leading `NAME=value` assignments. With no `argv` they set shell variables;
-    /// otherwise they apply to this command's environment only.
-    pub assignments: Vec<(String, String)>,
+    /// Leading `NAME=value`/`NAME=(a b c)` assignments. With no `argv` they
+    /// set shell variables (any kind — scalar or array, see
+    /// `crate::vars::assign`); otherwise only a *scalar* one applies to this
+    /// command's own environment (see `build_stage`) — an array can't be
+    /// represented in a child's environment at all, so it's simply skipped
+    /// there rather than set anywhere.
+    pub assignments: Vec<(String, crate::vars::AssignOp)>,
     /// A here-document body (already expanded) to feed on stdin, if any.
     pub heredoc: Option<String>,
+    /// Only populated when `argv == ["local"]`: each declared name with its
+    /// optional assignment (`None` for a bare `local name`) — a separate
+    /// field (rather than reusing `assignments`, or making `local`'s own
+    /// builtin re-parse `argv` strings) specifically so `local arr=(a b c)`
+    /// can carry a real array literal, which a plain `Vec<String>` argv
+    /// can't represent at all. See `builtins::local_cmd`.
+    pub local_decls: Vec<(String, Option<crate::vars::AssignOp>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -510,8 +521,8 @@ fn trace_pipeline(pipeline: &Pipeline) {
     let prefix = trace_prefix();
     for stage in &pipeline.commands {
         if let Stage::Simple(cmd) = stage {
-            for (name, value) in &cmd.assignments {
-                eprintln!("{prefix}{name}={value}");
+            for (name, op) in &cmd.assignments {
+                eprintln!("{prefix}{}", trace_assignment(name, op));
             }
             if !cmd.argv.is_empty() {
                 let words: Vec<String> = cmd.argv.iter().map(|w| trace_quote(w)).collect();
@@ -548,6 +559,28 @@ fn trace_quote(word: &str) -> String {
     }
 }
 
+/// Render one `set -x`-traced assignment: `name=value`, `name+=value`,
+/// `name=(a b c)`, or `name+=(a b c)` — matching real bash's own format for
+/// each (verified directly), modulo one small, accepted difference: bash
+/// re-quotes an array element containing whitespace with *double* quotes
+/// there specifically, where this reuses `trace_quote`'s single-quote
+/// convention (the same one already used for a plain command's own argv).
+fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
+    use crate::vars::{AssignOp, AssignValue};
+    match op {
+        AssignOp::Set(AssignValue::Scalar(v)) => format!("{name}={v}"),
+        AssignOp::Append(AssignValue::Scalar(v)) => format!("{name}+={v}"),
+        AssignOp::Set(AssignValue::Array(vs)) => {
+            format!("{name}=({})", vs.iter().map(|v| trace_quote(v)).collect::<Vec<_>>().join(" "))
+        }
+        AssignOp::Append(AssignValue::Array(vs)) => {
+            format!("{name}+=({})", vs.iter().map(|v| trace_quote(v)).collect::<Vec<_>>().join(" "))
+        }
+        AssignOp::SetIndex(i, v) => format!("{name}[{i}]={v}"),
+        AssignOp::AppendIndex(i, v) => format!("{name}[{i}]+={v}"),
+    }
+}
+
 /// A single command that is only `NAME=value` assignments (no program word):
 /// `FOO=bar`. These set shell variables rather than spawning anything.
 fn assignment_only(pipeline: &Pipeline) -> bool {
@@ -559,8 +592,8 @@ fn assignment_only(pipeline: &Pipeline) -> bool {
 
 fn apply_assignments(pipeline: &Pipeline) {
     if let [Stage::Simple(cmd)] = pipeline.commands.as_slice() {
-        for (name, value) in &cmd.assignments {
-            crate::vars::set(name, value);
+        for (name, op) in &cmd.assignments {
+            crate::vars::assign(name, op);
         }
     }
 }
@@ -647,7 +680,7 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     #[cfg(unix)]
     {
         let mut guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
-        let status = builtins::try_run(&cmd.argv).unwrap_or(1);
+        let status = dispatch_builtin(cmd);
         // The no-command form of `exec` (`exec > file`, `exec 3<&-`, bare
         // `exec`) exists specifically to make its redirects permanent — the
         // opposite of every other builtin, whose redirects are always
@@ -662,8 +695,20 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     {
         // No raw `dup2` equivalent in play here, so a builtin's redirects are
         // silently ignored on this platform (see docs/ARCHITECTURE.md).
-        Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
+        Ok(dispatch_builtin(cmd))
     }
+}
+
+/// Run a builtin from its expanded `Command` — every builtin but `local`
+/// just runs on `cmd.argv` (plain strings) as always; `local` is the one
+/// exception, since `local arr=(a b c)`'s array literal can't survive being
+/// flattened into `Vec<String>` argv at all (see `Command::local_decls`'s
+/// own doc comment and `expand::expand_simple`, which builds it).
+fn dispatch_builtin(cmd: &Command) -> i32 {
+    if cmd.argv.first().map(String::as_str) == Some("local") {
+        return builtins::local_from_decls(&cmd.local_decls);
+    }
+    builtins::try_run(&cmd.argv).unwrap_or(1)
 }
 
 /// Temporarily redirect the shell's own fd 0/1/2 to match `redirects` (plus
@@ -1044,6 +1089,28 @@ pub(crate) fn pipeline_status(stage_statuses: &[i32]) -> i32 {
 /// materialize a real pipe for fd 1 (see `clone_or_materialize`) — the caller
 /// must use it as the next stage's stdin (or read it directly, when capturing)
 /// instead of taking `child.stdout`.
+/// The value a command-prefix assignment (`NAME=value cmd`) contributes to
+/// the spawned child's own environment — `None` for an array (see
+/// `build_stage`'s own comment). `+=` reads the *shell's* current value (if
+/// any) and appends to it, without touching the shell's own variable table
+/// — prefix assignments never persist past the one command, matching the
+/// plain `=` case's existing behavior.
+fn prefix_env_value(name: &str, op: &crate::vars::AssignOp) -> Option<String> {
+    use crate::vars::{AssignOp, AssignValue};
+    match op {
+        AssignOp::Set(AssignValue::Scalar(v)) => Some(v.clone()),
+        AssignOp::Append(AssignValue::Scalar(v)) => {
+            Some(format!("{}{v}", crate::vars::get(name).unwrap_or_default()))
+        }
+        // An array (whole or one element) isn't representable in a child's
+        // environment — same reasoning as `exported()`'s own array skip.
+        AssignOp::Set(AssignValue::Array(_))
+        | AssignOp::Append(AssignValue::Array(_))
+        | AssignOp::SetIndex(..)
+        | AssignOp::AppendIndex(..) => None,
+    }
+}
+
 pub(crate) fn build_stage(
     cmd: &Command,
     stdin_src: Option<Stdio>,
@@ -1058,9 +1125,16 @@ pub(crate) fn build_stage(
     command.args(&cmd.argv[1..]);
 
     // Seed the environment: exported shell variables first, then this command's
-    // own `NAME=value` prefixes (which override).
+    // own `NAME=value` prefixes (which override). An array-valued prefix
+    // (`arr=(a b c) cmd`) is silently skipped — there's no portable
+    // representation for an array as an environment variable, same as
+    // `exported()` already skips one held in the shell's own table.
     command.envs(crate::vars::exported());
-    command.envs(cmd.assignments.iter().map(|(k, v)| (k, v)));
+    for (name, op) in &cmd.assignments {
+        if let Some(value) = prefix_env_value(name, op) {
+            command.env(name, value);
+        }
+    }
 
     // Resolve the three standard descriptors. fd1 defaults to a pipe when this
     // stage feeds another (or is being captured); the redirects below override

@@ -26,6 +26,14 @@ pub enum WordPart {
     /// Double-quoted text. Subject to `$`/`$(...)` expansion, but no tilde and
     /// (later) no globbing.
     Quoted(String),
+    /// `(a "b c" d)` immediately after `NAME=`/`NAME+=` with no space — an
+    /// array-literal assignment (`arr=(a b c)`). Each element is its own
+    /// `Word` (so quoting/expansion inside one element still works); only
+    /// ever appears as the part right after an `Unquoted` part ending in
+    /// `=`/`+=` (see `looks_like_array_assign_prefix`), so every other
+    /// consumer of `Word`/`WordPart` can treat it as effectively
+    /// unreachable outside `expand::assignment_split`.
+    ArrayLiteral(Vec<Word>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +349,14 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
     loop {
         match chars.peek() {
             None => break,
+            // `NAME=(` / `NAME+=(` with no space: an array-literal
+            // assignment, not a subshell/group — swallow the whole `(...)`
+            // as one `WordPart` instead of stopping the word here. Checked
+            // before the generic `(` word-boundary arm below.
+            Some(&'(') if looks_like_array_assign_prefix(&parts) => {
+                let elements = lex_array_literal(chars)?;
+                parts.push(WordPart::ArrayLiteral(elements));
+            }
             Some(&c)
                 if c == ' '
                     || c == '\t'
@@ -422,6 +438,62 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
     }
 
     Ok(parts)
+}
+
+/// Whether `parts`, lexed so far, is exactly one `Unquoted` part shaped like
+/// `NAME=` or `NAME+=` — the only situation where an immediately-following
+/// `(` starts an array literal rather than ending the word at a subshell
+/// boundary. Deliberately a lexer-level heuristic (real validation happens
+/// again in `expand::assignment_split`): it only needs to be right about
+/// *whether to keep lexing as one word*, not about whether the eventual
+/// assignment is well-formed.
+fn looks_like_array_assign_prefix(parts: &Word) -> bool {
+    let [WordPart::Unquoted(s)] = parts.as_slice() else {
+        return false;
+    };
+    let name = s.strip_suffix("+=").or_else(|| s.strip_suffix('='));
+    match name {
+        Some(name) => is_array_assign_name(name),
+        None => false,
+    }
+}
+
+fn is_array_assign_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Lex an array literal's element list, cursor on the opening `(`: skips
+/// whitespace/newlines between elements (bash allows a literal to span
+/// several lines), reuses `lex_word` for each element (so quoting inside
+/// one still works, and it naturally stops at the next whitespace or `)`),
+/// and consumes the closing `)`.
+fn lex_array_literal(chars: &mut Peekable<Chars>) -> Result<Vec<Word>, LexError> {
+    chars.next(); // consume '('
+    let mut elements = Vec::new();
+    loop {
+        while matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            chars.next();
+        }
+        match chars.peek() {
+            None => return Err(LexError::Incomplete),
+            Some(')') => {
+                chars.next();
+                return Ok(elements);
+            }
+            _ => {
+                let word = lex_word(chars, None)?;
+                if word.is_empty() {
+                    // `lex_word` consumed nothing (e.g. a stray `|`/`&`
+                    // that isn't whitespace or `)`) — bail out rather than
+                    // spin forever re-hitting the same character.
+                    return Err(LexError::Syntax("unexpected token in array literal".into()));
+                }
+                elements.push(word);
+            }
+        }
+    }
 }
 
 /// Append a balanced `(...)` region (including the parens) to `out`, starting

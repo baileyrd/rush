@@ -732,6 +732,7 @@ mod tests {
             redirects: vec![],
             assignments: vec![],
             heredoc: None,
+            local_decls: vec![],
         })
     }
 

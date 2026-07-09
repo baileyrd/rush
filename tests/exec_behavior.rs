@@ -296,6 +296,101 @@ fn term_and_hup_traps_fire_and_can_interrupt_a_blocking_wait() {
 }
 
 #[test]
+fn indexed_arrays_basic_literal_index_and_whole_array_reads() {
+    // A literal, plain indexing, and the count.
+    assert_eq!(rush(r#"arr=(a b c); echo "${arr[0]}" "${arr[2]}""#).0, "a c\n");
+    assert_eq!(rush(r#"arr=(a b c); echo "count=${#arr[@]}""#).0, "count=3\n");
+    // Out of range: empty, not an error.
+    assert_eq!(rush(r#"arr=(a b c); echo "[${arr[10]}]"; echo status:$?"#).0, "[]\nstatus:0\n");
+    // `$arr` (bare, no subscript) == `${arr[0]}`.
+    assert_eq!(rush(r#"arr=(a b c); echo "$arr""#).0, "a\n");
+    // A subscript is evaluated as arithmetic, bare or `$`-prefixed.
+    assert_eq!(rush(r#"i=1; arr=(a b c); echo "${arr[i+1]}""#).0, "c\n");
+    assert_eq!(rush(r#"i=1; arr=(a b c); echo "${arr[$i]}""#).0, "b\n");
+    // A never-arrayed scalar behaves like a 1-element array at index 0.
+    assert_eq!(
+        rush(r#"x=hello; echo "[${x[0]}]" "[${x[1]}]" "count=${#x[@]}""#).0,
+        "[hello] [] count=1\n"
+    );
+}
+
+#[test]
+fn indexed_arrays_at_vs_star_and_quoting() {
+    // `"${arr[@]}"`: one argument per element, spaces and all — like `"$@"`.
+    assert_eq!(
+        rush(r#"arr=(a "b c" d); for x in "${arr[@]}"; do echo "[$x]"; done"#).0,
+        "[a]\n[b c]\n[d]\n"
+    );
+    // `"${arr[*]}"`: always one joined string, regardless of quoting.
+    assert_eq!(rush(r#"arr=(a "b c" d); echo "${arr[*]}""#).0, "a b c d\n");
+    assert_eq!(rush(r#"arr=(a b); IFS=,; echo "${arr[*]}""#).0, "a,b\n");
+    // Unquoted, `@` and `*` behave identically — both fully IFS-split, losing
+    // the original element boundaries.
+    assert_eq!(
+        rush(r#"arr=("a b" "c d"); for x in ${arr[@]}; do echo "[$x]"; done"#).0,
+        "[a]\n[b]\n[c]\n[d]\n"
+    );
+}
+
+#[test]
+fn indexed_arrays_are_sparse() {
+    // `arr[5]=x` on a 2-element array doesn't create indices 2-4; the count
+    // is the number of *set* indices, and `${arr[@]}`/`${!arr[@]}` skip the
+    // gap entirely.
+    assert_eq!(
+        rush(r#"arr=(a b); arr[5]=x; echo "${!arr[@]}" "count=${#arr[@]}""#).0,
+        "0 1 5 count=3\n"
+    );
+    assert_eq!(rush(r#"arr=(a b); arr[5]=x; echo "${arr[@]}""#).0, "a b x\n");
+
+    // `unset 'arr[i]'` removes just that one element, a real gap — not
+    // merely emptying it.
+    assert_eq!(
+        rush(r#"arr=(a b c); unset "arr[1]"; echo "${!arr[@]}" "count=${#arr[@]}""#).0,
+        "0 2 count=2\n"
+    );
+    // `unset` evaluates its own subscript arithmetic independently of shell
+    // quoting — `$i` resolves even single-quoted (verified directly).
+    assert_eq!(
+        rush("arr=(a b c); i=1; unset 'arr[$i]'; echo \"${!arr[@]}\"").0,
+        "0 2\n"
+    );
+
+    // Plain `unset arr` removes the whole thing.
+    assert_eq!(rush(r#"arr=(a b c); unset arr; echo "count=${#arr[@]}""#).0, "count=0\n");
+}
+
+#[test]
+fn indexed_arrays_element_and_whole_array_assignment() {
+    // `arr[i]=x` sets one element, auto-vivifying if `arr` didn't exist.
+    assert_eq!(rush(r#"unset arr; arr[2]=x; echo "${#arr[@]}" "${arr[2]}""#).0, "1 x\n");
+    // A scalar indexed at a non-zero position is promoted to an array,
+    // keeping its old value at index 0.
+    assert_eq!(rush(r#"x=5; x[3]=hi; echo "${x[0]}" "${x[3]}""#).0, "5 hi\n");
+    // A plain `arr=x` (no brackets) on an existing array only replaces
+    // element 0, leaving the rest alone.
+    assert_eq!(rush(r#"arr=(a b c); arr=x; echo "${arr[@]}""#).0, "x b c\n");
+
+    // `arr+=(...)` appends; `arr[i]+=x` appends to just that one element.
+    assert_eq!(rush(r#"arr=(a b c); arr+=(d e); echo "${arr[@]}""#).0, "a b c d e\n");
+    assert_eq!(rush(r#"arr=(a b c); arr[1]+=X; echo "${arr[@]}""#).0, "a bX c\n");
+    // `arr+=x` (no parens) appends the *string* to element 0, not a new
+    // element — a real bash quirk, verified directly.
+    assert_eq!(rush(r#"arr=(a b c); arr+=X; echo "${arr[@]}""#).0, "aX b c\n");
+
+    // Glob/command-substitution expansion inside an array literal.
+    assert_eq!(rush(r#"arr=($(printf "one two\nthree\n")); echo "${arr[@]}""#).0, "one two three\n");
+}
+
+#[test]
+fn local_array_scopes_to_the_function_call() {
+    assert_eq!(
+        rush(r#"arr=(outer); f() { local arr=(inner1 inner2); echo "in f: ${arr[@]}"; }; f; echo "after: ${arr[@]}""#).0,
+        "in f: inner1 inner2\nafter: outer\n"
+    );
+}
+
+#[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used
     // to leak stderr straight to the terminal instead of routing it through

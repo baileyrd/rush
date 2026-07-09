@@ -579,3 +579,50 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   all.
 - Out of scope: `ERR`/`DEBUG` (bash/ksh/zsh extensions, not POSIX-mandated)
   remain unimplemented.
+
+### Indexed arrays (C22)
+- **Storage** (`vars.rs`): a variable's payload is now `enum VarValue {
+  Scalar(String), Array(BTreeMap<usize, String>) }` — `BTreeMap` for real
+  sparse-array semantics (`arr[5]=x` on a 2-element array doesn't create
+  indices 2–4), with free sorted iteration for `${arr[@]}`/`${!arr[@]}`.
+  Every existing scalar function branches on this now, alongside new
+  array-specific ones (`set_array`, `array_get`/`array_set`/`array_append`/
+  `array_append_index`, `array_values`/`array_indices`/`array_len`,
+  `array_unset_index`, `declare_local_array`) and a shared `assign(name,
+  &AssignOp)` covering all four assignment shapes (scalar/array × set/
+  append) plus the two indexed ones (`arr[i]=`/`arr[i]+=`).
+- **Lexer**: a new `WordPart::ArrayLiteral(Vec<Word>)` — `arr=(a b c)`
+  needed a lexer-level heuristic recognizing a word ending in `=`/`+=` with
+  no space before an immediately-following `(`, consuming the whole
+  parenthesized list (spanning newlines, each element its own `Word`) as
+  one `WordPart` instead of breaking the word at the paren the way a
+  subshell/case-group `(`/`)` normally would.
+- **Expansion**: `assignment_split` recognizes `NAME=(...)`/`NAME+=(...)`
+  (elements individually glob/command-substitution-expanded), plain
+  `NAME=value`/`NAME+=value`, and `NAME[subscript]=value`/
+  `NAME[subscript]+=value` — the subscript evaluated as arithmetic via the
+  same two-step pipeline `$((...))` itself uses, so both `${arr[i+1]}`
+  (bare) and `${arr[$i]}`/`arr[$i]=x` (`$`-prefixed) resolve. `expand_braced`
+  gained `${arr[N]}`, `${arr[@]}`/`${arr[*]}` (mirroring `$@`/`$*`'s own
+  join-vs-preserve distinction, including a `"${arr[@]}"`-is-like-`"$@"`
+  special case for quoted whole-array expansion), `${#arr[@]}`/`${#arr[N]}`,
+  and `${!arr[@]}`. `arr=x` on an *existing* array targets element 0 only,
+  leaving the rest alone (lives in the ordinary `set()`, so it applies
+  anywhere a scalar assignment targets an already-array name).
+- **`local`**: `local arr=(a b c)` needed special handling since a plain
+  `Vec<String>` argv can't carry an array literal — `expand_simple`
+  recognizes the command word "local" and parses its declarations into a
+  new `Command::local_decls` field, dispatched via a new
+  `builtins::local_from_decls` straight from `exec::dispatch_builtin`
+  rather than through the ordinary string-argv builtin path.
+- Every case — literal assignment, all three read forms, sparse arrays,
+  element/whole-array set and append, `unset` (whole array and single
+  index, including `unset 'arr[$i]'`'s own independent subscript
+  evaluation), scalar↔array promotion, and `local` — was verified directly
+  against real bash.
+- Explicitly out of scope, each a documented, accepted gap: negative
+  indices, `${arr[@]:offset:length}` slicing, a subscript combined with
+  pattern-removal/default-alternate operators, `declare -a`/`declare -p`
+  (no `declare` builtin exists at all), `local arr[i]=x`, exporting an
+  array to a spawned child's environment, arithmetic side effects inside a
+  subscript.

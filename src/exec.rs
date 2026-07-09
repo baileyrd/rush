@@ -316,20 +316,25 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
     }
 }
 
-/// Run a defined function: swap in the call's arguments as `$1`…, run the body
-/// (a `return` ends it), then restore the previous positional parameters.
+/// Run a defined function: swap in the call's arguments as `$1`…, push a
+/// fresh `local` frame (C10), run the body (a `return` ends it), then
+/// restore the previous positional parameters and pop the `local` frame —
+/// restoring whatever any `local name` in the body shadowed back to the
+/// caller's own value (or removing it, if it didn't have one).
 fn call_function(argv: &[String]) -> Result<i32, String> {
     let body = crate::func::get(&argv[0]).expect("function is defined");
 
     let name0 = crate::vars::arg(0).unwrap_or_else(|| "rush".to_string());
     let saved = crate::vars::args();
     crate::vars::set_args(name0.clone(), argv[1..].to_vec());
+    crate::vars::push_local_frame();
 
     let result = exec_list(&body);
 
     let returned = crate::vars::returning();
     crate::vars::set_returning(None);
     crate::vars::set_args(name0, saved);
+    crate::vars::pop_local_frame();
 
     Ok(returned.unwrap_or(result?))
 }

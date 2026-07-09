@@ -285,6 +285,46 @@ fn shift_builtin() {
 }
 
 #[test]
+fn local_builtin_scopes_variables_to_the_function_call() {
+    // The headline case: a function's own counter no longer clobbers the
+    // caller's variable of the same name.
+    assert_eq!(
+        rush(
+            "i=100; f() { local i=0; while [ $i -lt 3 ]; do i=$((i+1)); done; echo \"in f: $i\"; }; \
+             f; echo \"top: $i\""
+        )
+        .0,
+        "in f: 3\ntop: 100\n"
+    );
+
+    // A bare `local name` (no `=value`) leaves it genuinely unset within the
+    // function, not merely `""` — `${x-unset}` only fires for a truly unset
+    // variable.
+    assert_eq!(
+        rush("x=outer; f() { local x; echo \"[${x-unset}]\"; }; f").0,
+        "[unset]\n"
+    );
+
+    // Nested calls: an inner function's own `local` of the same name
+    // shadows further, and restores to the *enclosing* call's local value
+    // (not the top-level one) when it returns.
+    assert_eq!(
+        rush(
+            "x=top; f() { local x=in_f; echo \"f before g: $x\"; g; echo \"f after g: $x\"; }; \
+             g() { local x=in_g; echo \"in g: $x\"; }; f; echo \"top: $x\""
+        )
+        .0,
+        "f before g: in_f\nin g: in_g\nf after g: in_f\ntop: top\n"
+    );
+
+    // `local` at the top level (not inside any function) is a usage error
+    // and does not fall through to setting a plain global variable.
+    let (out, status) = rush("local x=1; echo \"status=$?/[$x]\"");
+    assert_eq!(out, "status=1/[]\n");
+    assert_eq!(status, 0); // the script's last command (echo) still succeeds
+}
+
+#[test]
 fn ifs_driven_word_splitting() {
     // POSIX field splitting honors `$IFS`, not a hardcoded whitespace set.
     assert_eq!(

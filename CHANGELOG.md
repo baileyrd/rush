@@ -328,3 +328,18 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   message) — a real bash quirk verified directly, since running past the
   end this way is the everyday way an argument-parsing loop notices it's
   done.
+
+### `local` builtin — function-scoped variables (C10)
+- Every rush function used to share the caller's entire variable namespace,
+  so a function's own `i=0` permanently clobbered the caller's `i`. Fixed:
+  each function call now gets a stack frame (`vars::push_local_frame`/
+  `pop_local_frame`, wired into `exec::call_function`) recording, for every
+  name `local` shadows in that call, whatever the name was before (or its
+  absence) — restored automatically when the call returns. Nesting falls
+  out for free: an inner call's own `local x` shadows further and restores
+  to the *enclosing* call's local value on return, not the top-level one
+  (verified against real bash directly). A bare `local x` (no `=value`)
+  leaves `x` genuinely unset within the function — `${x-default}` inside it
+  sees it as unset, not merely set to `""` — matching bash exactly. `local`
+  outside any function call is a usage error and doesn't fall through to
+  setting a plain global variable.

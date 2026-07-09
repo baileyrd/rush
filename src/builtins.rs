@@ -31,6 +31,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "read" => Some(read_cmd(argv)),
         "printf" => Some(printf_cmd(argv)),
         "shift" => Some(shift_cmd(argv)),
+        "local" => Some(local_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -39,7 +40,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 /// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
-    ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift",
+    ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -882,6 +883,32 @@ fn shift_cmd(argv: &[String]) -> i32 {
         return 1;
     }
     0
+}
+
+/// `local [name[=value]]...` — declare function-scoped variables: each
+/// name's prior value (or absence, for a name that didn't exist yet) is
+/// restored automatically when the enclosing function call returns, so a
+/// function's own `i=0` no longer permanently clobbers the caller's `i`. A
+/// bare `local name` (no `=value`) leaves `name` genuinely unset within the
+/// function, matching bash, not merely set to `""`. Only valid inside a
+/// function call.
+fn local_cmd(argv: &[String]) -> i32 {
+    if argv.len() == 1 {
+        eprintln!("local: usage: local name[=value] ...");
+        return 1;
+    }
+    let mut status = 0;
+    for arg in &argv[1..] {
+        let declared = match arg.split_once('=') {
+            Some((name, value)) => crate::vars::declare_local(name, Some(value)),
+            None => crate::vars::declare_local(arg, None),
+        };
+        if !declared {
+            eprintln!("local: can only be used in a function");
+            status = 1;
+        }
+    }
+    status
 }
 
 fn exit(argv: &[String]) -> Option<i32> {

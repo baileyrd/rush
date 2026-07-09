@@ -413,3 +413,29 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   a `$` inside double quotes (`"\$?"`, `"\$FOO"`) doesn't produce a literal
   `$` the way POSIX requires — the backslash is dropped and the parameter
   still expands. Tracked separately as C35 in `docs/CAPABILITY_GAPS.md`.
+
+### `.` / `source` builtin (C14)
+- `exec::source_file`, wired to both `.` and `source` (exact synonyms, one
+  `source_cmd` builtin): runs a file's commands in the *current* shell
+  environment — no fork, no new variable scope. A bare filename (no `/`) is
+  searched on `$PATH` for a *readable* file (checked via `is_file()`, not
+  the execute bit — sourcing works on a file lacking `+x`, unlike running it
+  directly); a name containing `/` is used as a literal path.
+- Positional-parameter handling matches bash exactly: with no extra
+  arguments, the caller's own `$1`… show through unchanged inside the
+  sourced file; with extra arguments, they temporarily replace the
+  caller's, restored after the file finishes.
+- `return` inside the sourced file ends only the sourcing — the calling
+  context keeps running; `break`/`continue` are *not* consumed and
+  propagate transparently to an enclosing loop back in the caller, both
+  verified directly against real bash.
+- Found and fixed along the way: `resolve_source_path`'s PATH search
+  initially read `std::env::var_os("PATH")` — the raw OS process
+  environment — so an in-shell `PATH=$PATH:dir` assignment (exported or
+  not) was invisible to it, since rush only threads exported variables into
+  a *spawned child's* environment rather than syncing them back into this
+  process's own. Switched to the same `vars::get("PATH").or_else(||
+  std::env::var("PATH").ok())` fallback `expand.rs` already uses for `$PATH`
+  expansion. The same root-cause bug still affects `command -v`/`type`/
+  `hash` (C12, already shipped) — tracked separately as C36 in
+  `docs/CAPABILITY_GAPS.md`.

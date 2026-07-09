@@ -339,6 +339,54 @@ fn call_function(argv: &[String]) -> Result<i32, String> {
     Ok(returned.unwrap_or(result?))
 }
 
+/// `. name [args...]` / `source name [args...]` — run `name`'s commands in
+/// the *current* shell (no fork, no new variable scope): assignments,
+/// `cd`, function definitions, etc. all persist in the caller. If `args`
+/// are given, they become the positional parameters for the duration,
+/// restored after (like a function call's own `$1`…) — with none, the
+/// sourced file just sees the caller's own positional parameters
+/// unchanged (verified against real bash directly, alongside everything
+/// else here). A `return` inside it ends just the sourcing (consumed here,
+/// the same way `call_function` consumes its own); `break`/`continue` are
+/// *not* consumed — they propagate to an enclosing loop in the *calling*
+/// context if the sourced file doesn't have a loop of its own to catch
+/// them first. A bare filename (no `/`) is searched on `$PATH`, same as an
+/// ordinary command — but for a *readable* file, not an executable one,
+/// since its content is parsed and run directly, never exec'd (unlike a
+/// plain command, sourcing doesn't need the execute bit set).
+pub fn source_file(name: &str, args: &[String]) -> Result<i32, String> {
+    let path = resolve_source_path(name).ok_or_else(|| "No such file or directory".to_string())?;
+    let src = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let list = crate::parser::parse(&src).map_err(|e| e.to_string())?;
+
+    let name0 = crate::vars::arg(0).unwrap_or_else(|| "rush".to_string());
+    let saved_args = (!args.is_empty()).then(crate::vars::args);
+    if !args.is_empty() {
+        crate::vars::set_args(name0.clone(), args.to_vec());
+    }
+
+    let result = exec_list(&list);
+
+    let returned = crate::vars::returning();
+    crate::vars::set_returning(None);
+    if let Some(saved) = saved_args {
+        crate::vars::set_args(name0, saved);
+    }
+
+    Ok(returned.unwrap_or(result?))
+}
+
+/// Resolve a `source`/`.` filename: a bare name (no `/`) is searched on
+/// `$PATH` for a readable file; anything else is used as a literal path.
+fn resolve_source_path(name: &str) -> Option<std::path::PathBuf> {
+    if name.contains('/') {
+        let p = std::path::Path::new(name);
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let path = crate::vars::get("PATH").or_else(|| std::env::var("PATH").ok())?;
+    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|c| c.is_file())
+}
+
 /// After running a loop body, consume one level of any pending `break`/
 /// `continue`. Returns `true` if this loop should stop iterating.
 fn loop_step() -> Result<bool, String> {

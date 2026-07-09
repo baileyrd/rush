@@ -20,15 +20,17 @@ the cross-shell context that shows why they matter, not newly discovered.
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
 on top. Tier I's original 6 items are done; a 7th (C35, a real quoting bug)
-turned up while closing out Tier II, which is now more than half done —
-`local`, `getopts`, `command`/`type`/`hash`, and `wait` (with its own
-prerequisite, `$!`) all landed alongside `read`/`printf`/`shift`.
+turned up while closing out Tier II, which is now more than two-thirds
+done — `local`, `getopts`, `command`/`type`/`hash`, `wait` (with its own
+prerequisite, `$!`), and `source`/`.` all landed alongside
+`read`/`printf`/`shift`. A follow-on (C36, a PATH-visibility bug in
+`command`/`type`/`hash`) turned up while closing out `source`.
 
 ---
 
 ## Comparison matrix
 
-A cross-section, not the full 32 below — enough to place rush relative to a
+A cross-section, not the full 36 below — enough to place rush relative to a
 strict POSIX shell (dash), the bash family, and the interactive-first shells
 (zsh, fish). ✅ full · 🟡 partial/simplified · ❌ not implemented · — not
 applicable to that shell's own model.
@@ -40,6 +42,7 @@ applicable to that shell's own model.
 | `read` / `printf` / `shift` / `getopts` | ✅† | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | `local` function-scoped vars | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `wait` / `disown` | 🟡‡ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `source` / `.` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -64,7 +67,7 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 7 (6 done)
-- **Tier II — missing standard builtins:** 11 (7 done)
+- **Tier II — missing standard builtins:** 12 (8 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -355,11 +358,50 @@ POSIX requires — the backslash is dropped and the parameter still expands.
 Pre-existing, general (not specific to `$!`), and unrelated to job control;
 worth its own future item.
 
-### C14 — `source` / `.`
-Rush already has the machinery — it sources `~/.rushrc` internally via its
-own `run_source` helper — but exposes none of it as a user-invokable
+### C14 — `source` / `.` — ✅ done
+Rush already had the machinery — it sources `~/.rushrc` internally via its
+own `run_source` helper — but exposed none of it as a user-invokable
 command. Splitting a script into a reusable library via `. lib.sh` is one
-of the most basic shell idioms there is. **Effort: S.**
+of the most basic shell idioms there is.
+
+Added `exec::source_file` (`.`/`source` are exact synonyms, both wired to
+the same `source_cmd` builtin): runs the file's commands in the *current*
+environment, no new variable scope, matching every verified bash behavior —
+a bare filename is searched on `$PATH` for a *readable* file (checking the
+file, not the execute bit, unlike `command`'s executable-only search); with
+no extra args the caller's own positional params show through unchanged;
+extra args temporarily replace them and are restored afterward; `return`
+inside the sourced file ends only the sourcing (the caller keeps running);
+`break`/`continue` are *not* consumed and propagate transparently to an
+enclosing loop back in the calling context; a missing file fails with
+status 1.
+
+Found and fixed along the way: the new `resolve_source_path`'s first draft
+read `$PATH` via `std::env::var_os`, the raw OS process environment — so a
+plain (or even `export`ed) in-shell `PATH=$PATH:dir` assignment was
+invisible to it, since rush only threads exported vars into a *spawned
+child's* environment (`exec::build_stage`'s `command.envs(...)`) rather than
+syncing them back into this process's own env. Switched to the same
+`vars::get("PATH").or_else(|| std::env::var("PATH").ok())` fallback
+`expand.rs` already uses for `$PATH` expansion, so `source`'s own PATH
+search now sees the shell's actual PATH. The same root-cause bug still
+affects `command -v`/`type`/`hash` (C12, already shipped) — left alone here
+as out of scope for this item; worth its own future fix.
+
+### C36 — `command -v`/`type`/`hash` don't see in-shell `PATH` changes (tracked)
+Found while fixing C14's own PATH search (see above): `builtins::resolve_in_path`
+(backing `command -v`/`command -V`/`type`/`hash`) and `completion.rs`'s
+`$PATH`-scanner all call `std::env::var_os("PATH")` directly — the *real*
+OS process environment — rather than the shell's own `PATH` variable. A
+script that does a plain (or even `export`ed) `PATH=$PATH:dir` assignment
+and then runs `command -v tool`/`type tool`/`hash tool` for something in
+`dir` gets a false "not found", even though actually *running* `tool`
+works fine (spawning goes through `exec::build_stage`, which correctly
+threads exported vars into the child's environment). Silent wrongness for
+any script that extends `PATH` before checking a command's availability.
+**Effort: S** — same one-line fix as C14's (`vars::get("PATH").or_else(||
+std::env::var("PATH").ok())`), applied at each of the two remaining call
+sites.
 
 ### C15 — `eval`
 Needed for constructing and running commands dynamically. Rush's

@@ -106,3 +106,9 @@ git history for the commit-by-commit narrative.
   command position (a rough, not lexer-accurate check — see the module doc),
   Tab completes builtin names and executables found scanning `$PATH`;
   elsewhere it defers to rustyline's own `FilenameCompleter` for files.
+
+### Startup file (G6)
+- Interactive sessions source `~/.rushrc`, if present, before the REPL loop
+  starts — same as a script, so a var/function/alias set there takes effect.
+  A missing or unreadable file is silently fine; an error inside it prints to
+  stderr but doesn't stop the shell from starting.

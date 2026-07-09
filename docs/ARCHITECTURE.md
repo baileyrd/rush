@@ -121,6 +121,10 @@ positional parameters and run a source string/file non-interactively (via
 read-eval-print loop and all I/O concerns:
 - Builds the prompt from the current working directory (`cwd $ `).
 - Loads `~/.rush_history` at startup and saves it on exit.
+- Sources `~/.rushrc` at startup, if it exists — via the same `run_source`
+  used for scripts and `-c`, so an error inside it prints to stderr but
+  doesn't stop the shell from starting. A missing or unreadable file is
+  silently fine.
 - Translates `rustyline` signals: **Ctrl-C** (`Interrupted`) abandons the line
   and continues; **Ctrl-D** (`Eof`) on an empty line breaks the loop.
 - Delegates parsing and execution, printing any error as `rush: …` to stderr

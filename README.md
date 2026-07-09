@@ -37,6 +37,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | REPL with line editing | ✅ | via [`rustyline`](https://crates.io/crates/rustyline) |
 | Tab completion | ✅ | builtins and `$PATH` executables in command position; files elsewhere |
 | Persistent history | ✅ | stored in `~/.rush_history` |
+| Startup file | ✅ | sources `~/.rushrc` (if present) at interactive startup |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |

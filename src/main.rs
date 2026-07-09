@@ -34,6 +34,12 @@ fn history_path() -> Option<PathBuf> {
     Some(p)
 }
 
+fn rc_path() -> Option<PathBuf> {
+    let mut p = PathBuf::from(std::env::var_os("HOME")?);
+    p.push(".rushrc");
+    Some(p)
+}
+
 fn prompt() -> String {
     let cwd = std::env::current_dir()
         .ok()
@@ -95,6 +101,15 @@ fn interactive() -> rustyline::Result<()> {
     // Claim the terminal and set up signal handling for job control.
     #[cfg(unix)]
     job::init();
+
+    // Source ~/.rushrc, if any — same as a script, errors go to stderr but
+    // don't stop the shell from starting. Missing/unreadable is silently fine
+    // (like a fresh install with no rc file yet).
+    if let Some(rc) = rc_path()
+        && let Ok(src) = std::fs::read_to_string(&rc)
+    {
+        run_source(&src);
+    }
 
     // Accumulates lines until a complete command is parsed — so an `if`/`while`
     // can span several lines, with a `> ` continuation prompt.

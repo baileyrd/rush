@@ -56,7 +56,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Arithmetic (`$((...))`) | ✅ | `+ - * / %`, comparisons, `&& \|\| !`, parentheses, variables (`i=$((i+1))`) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
-| Control flow | ✅ | `if`/`while`/`until`/`for`, `case … esac`, `break`/`continue [n]`; single- or multi-line |
+| Control flow | ✅ | `if`/`while`/`until`/`for` (`for x; do` with no `in` iterates `"$@"`), `case … esac`, `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`; brace groups `{ …; }` |
 | Subshells | ✅ | `( … )` forks a real child on Unix (genuine isolation, incl. `exit`); state save/restore fallback elsewhere |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |

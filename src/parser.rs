@@ -104,10 +104,14 @@ pub enum Compound {
         cond: CommandList,
         body: CommandList,
     },
-    /// `for NAME in WORDS; do BODY; done`.
+    /// `for NAME in WORDS; do BODY; done`. `has_in` distinguishes an omitted
+    /// `in` clause (iterate `"$@"`, POSIX's `for NAME; do …`) from an explicit
+    /// `in` with an empty word list (loop runs zero times) — both otherwise
+    /// leave `words` empty.
     For {
         var: String,
         words: Vec<Word>,
+        has_in: bool,
         body: CommandList,
     },
     /// `case WORD in PATTERN|… ) BODY ;; … esac`.
@@ -415,7 +419,8 @@ impl Parser {
         let var = self.expect_name()?;
 
         let mut words = Vec::new();
-        if self.peek_keyword() == Some("in") {
+        let has_in = self.peek_keyword() == Some("in");
+        if has_in {
             self.pos += 1;
             while let Some(Token::Word(_)) = self.peek() {
                 let Some(Token::Word(w)) = self.advance() else {
@@ -430,7 +435,7 @@ impl Parser {
         self.expect_keyword("do")?;
         let body = self.parse_list()?;
         self.expect_keyword("done")?;
-        Ok(RawCommand::Compound(Box::new(Compound::For { var, words, body })))
+        Ok(RawCommand::Compound(Box::new(Compound::For { var, words, has_in, body })))
     }
 
     fn parse_case(&mut self) -> Result<RawCommand, ParseError> {
@@ -724,9 +729,26 @@ mod tests {
         let p = parse_ok("for x in a b c; do echo $x; done");
         match first_cmd(&p) {
             RawCommand::Compound(c) => match c.as_ref() {
-                Compound::For { var, words, .. } => {
+                Compound::For { var, words, has_in, .. } => {
                     assert_eq!(var, "x");
                     assert_eq!(words.len(), 3);
+                    assert!(has_in);
+                }
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn for_without_in_clause_has_no_words() {
+        let p = parse_ok("for x; do echo $x; done");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.as_ref() {
+                Compound::For { var, words, has_in, .. } => {
+                    assert_eq!(var, "x");
+                    assert!(words.is_empty());
+                    assert!(!has_in);
                 }
                 _ => panic!(),
             },

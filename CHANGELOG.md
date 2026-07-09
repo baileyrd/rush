@@ -205,3 +205,10 @@ git history for the commit-by-commit narrative.
   already use — matched by trying candidate cut points (shortest-first or
   longest-first) and taking the first one that fully matches. No colon form,
   matching bash (which doesn't define one for this family either).
+
+### `for name; do` (no `in`) iterates `"$@"` (C2)
+- Per POSIX: omitting the `in` clause now iterates the positional parameters,
+  as if `in "$@"` had been written, instead of silently running the loop body
+  zero times. Distinct from an *explicit* `in` with no words (`for x in; do
+  ...`), which is still a real empty list — the parser records whether `in`
+  was present at all (`Compound::For`'s new `has_in` field).

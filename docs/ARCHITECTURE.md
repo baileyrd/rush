@@ -371,8 +371,12 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   by `run_compound`, which recurses through `run_list` on the condition and body
   lists — so control flow nests naturally and reuses the same status plumbing
   (`if`/`while` branch on a list's exit status; `for` expands its word list via
-  `expand::expand_words` and sets the loop variable each iteration; `case`
-  matches the subject against each pattern with `glob::match_component`).
+  `expand::expand_words` and sets the loop variable each iteration — unless
+  the `in` clause was omitted entirely (`Compound::For`'s `has_in` flag, set
+  by the parser), in which case it iterates `vars::args()` (`"$@"`) instead,
+  per POSIX — distinct from an *explicit* `in` with zero words, which is a
+  real empty list; `case` matches the subject against each pattern with
+  `glob::match_component`).
   `Compound::Subshell` forks a real child on Unix (`run_subshell_forked`): the
   parent just waits and adopts the child's exit status, so `(cd x; …)`,
   `(VAR=…; …)`, and even `exit` inside `(…)` are genuinely isolated — none of

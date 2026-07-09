@@ -167,9 +167,13 @@ fn run_compound(compound: &Compound) -> Result<i32, String> {
             }
             Ok(status)
         }
-        Compound::For { var, words, body } => {
+        Compound::For { var, words, has_in, body } => {
+            // POSIX: omitting `in` iterates the positional parameters ("$@"),
+            // as if `in "$@"` had been written; an explicit `in` with no
+            // words (`for x in; do ...`) is a real empty list instead.
+            let values = if *has_in { crate::expand::expand_words(words)? } else { crate::vars::args() };
             let mut status = 0;
-            for value in crate::expand::expand_words(words)? {
+            for value in values {
                 crate::vars::set(var, &value);
                 status = exec_list(body)?;
                 if loop_step()? {

@@ -136,3 +136,24 @@ git history for the commit-by-commit narrative.
   process under job control and never delivers `SIGINT` to the shell itself)
   are fired. Guarded against re-entrancy, so an `EXIT` trap that itself calls
   `exit` can't recurse forever.
+
+### Test coverage for `exec.rs` and `job.rs` (G9)
+- `exec.rs` — previously zero tests on the runtime core — is now covered
+  black-box in `tests/exec_behavior.rs`, against the compiled binary rather
+  than an in-crate module: pipeline wiring, redirection routing, exit-status
+  propagation and short-circuiting, compound status, and two G10 regression
+  locks (`2>&1` into a pipe, and a forked subshell's `exit` not killing the
+  outer shell). The in-process alternative (`parser::parse` +
+  `run_list`/`capture_list`) turned out to have real footguns: `capture_list`
+  never tracks `$?` across jobs and rejects any compound command outright,
+  and a builtin's redirects are wired up via a process-wide `dup2` that races
+  across `cargo test`'s concurrent threads. A real subprocess per test
+  sidesteps all of that.
+- `job.rs` — also previously zero tests — gets an in-crate `#[cfg(test)]`
+  module: `run_foreground`'s exit-status reporting (single command,
+  multi-stage pipeline, signal death), and the job-table bookkeeping
+  (`update_by_pid`/`notify_and_prune`) that backs `jobs`/`fg`/`bg`.
+- Two narrower gaps `capture_list` surfaced along the way, not fixed here:
+  it doesn't track `$?` across jobs within a substitution, and it rejects
+  *any* compound command, even a lone one (not just one mid-pipeline, which
+  was already documented).

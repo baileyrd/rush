@@ -364,6 +364,23 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   job whose *final* status is nonzero, not bash's finer "except a command
   that isn't positionally last in an `&&`/`||` list."
 
+**Tests:** `exec.rs`'s own runtime behavior — pipeline wiring, redirection
+routing, exit-status propagation and short-circuiting, compound status,
+`2>&1`-into-a-pipe (G10 regression lock-in), forked-subshell `exit` isolation
+(G10 regression lock-in) — is covered black-box, against the compiled binary,
+in `tests/exec_behavior.rs` rather than an in-crate `#[cfg(test)]` module.
+That turned out to matter: a hand-rolled in-process helper (`parser::parse` +
+`run_list`/`capture_list`) has real footguns for this — `capture_list` never
+tracks `$?` across jobs (it's built only for concatenating `$(...)` output,
+not for replaying whole-script semantics) and rejects any compound command
+outright, and a builtin's redirects are wired up via a process-wide `dup2`
+around the call (`run_builtin_foreground`) that races across `cargo test`'s
+concurrently-running threads since fd 0/1/2 aren't per-thread. A genuinely
+separate process per test sidesteps all of that. (Two things this surfaced,
+still open: `capture_list`'s `$?` gap and its blanket rejection of compound
+commands, even a lone one — narrower than the documented "compound as one
+stage among several in a pipeline" limitation above.)
+
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 Implements the parts that need POSIX process groups and signals, via the `libc`
 crate, following the classic glibc job-control structure:
@@ -380,6 +397,21 @@ crate, following the classic glibc job-control structure:
   `reap_background` sweep run before each prompt (a non-blocking `waitpid` that
   reports finished, stopped, and continued jobs). `kill [-SIG] %n|pid` signals a
   job's process group (via `killpg`) or a process.
+
+**Tests:** an in-crate `#[cfg(test)] mod tests` at the end of this file,
+constructing `exec::Pipeline`/`Command` values directly (both are plain
+public structs) rather than going through the parser — covers
+`run_foreground`'s exit-status reporting for a single command, a multi-stage
+pipeline (only the last stage's status counts), and a signal-killed child
+(the conventional `128 + signal`, via a real `SIGTERM`, not a hand-encoded
+wait status). None of these call `init()` with a real tty (there isn't one
+under `cargo test`), so `job_control_enabled()` stays false throughout —
+`give_terminal`/`reclaim_terminal` are no-ops, same as running rush
+non-interactively, which is exactly the path exercised. A fourth test drives
+the job-table bookkeeping (`update_by_pid`/`notify_and_prune`) directly
+rather than through the public `reap_background`, since *that* function does
+gate on `job_control_enabled()` (real job control needs a tty to hand the
+terminal back to) and would silently no-op here.
 
 ### `builtins.rs` — in-process commands
 `try_run` returns `Some(code)` if `argv[0]` is a builtin, else `None`:

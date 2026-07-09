@@ -58,7 +58,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
 | Control flow | ✅ | `if`/`while`/`until`/`for`, `case … esac`, `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`; brace groups `{ …; }` |
-| Subshells | ✅ | `( … )` isolates cwd and variables (state save/restore, not a fork) |
+| Subshells | ✅ | `( … )` forks a real child on Unix (genuine isolation, incl. `exit`); state save/restore fallback elsewhere |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
 
 ## Build & Run
@@ -120,9 +120,14 @@ src/
   expand.rs     expansion: $VAR, ${…}, ~, $(...), $((...)), word-split, globs → concrete Pipeline
   arith.rs      integer arithmetic evaluator for $((...))
   func.rs       shell function registry (name() { ... })
+  alias.rs      alias table: name -> value, substituted at command-word position
+  trap.rs       signal-name traps (EXIT, INT): name -> command
   glob.rs       hand-rolled filename matcher (*, ?, [..]) + directory walk
   vars.rs       shell state outliving a command: $?, variables, positional params, flow control
   exec.rs       runtime: sequence the list, run compounds, spawn processes, wire fds
   job.rs        Unix job control: process groups, terminal, signals, fg/bg/jobs/kill
   builtins.rs   in-process commands: cd, pwd, echo, export, test, … (+ jobs/fg/bg/kill on Unix)
+
+tests/
+  exec_behavior.rs   black-box coverage of exec.rs's runtime, against the compiled binary
 ```

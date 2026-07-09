@@ -495,3 +495,73 @@ fn wifstopped(status: c_int) -> bool {
 fn wifcontinued(status: c_int) -> bool {
     libc::WIFCONTINUED(status)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::Command;
+
+    fn cmd(argv: &[&str]) -> Command {
+        Command {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            redirects: vec![],
+            assignments: vec![],
+            heredoc: None,
+        }
+    }
+
+    // None of these call `init()` with a real tty (there isn't one under
+    // `cargo test`), so `job_control_enabled()` stays false throughout —
+    // `give_terminal`/`reclaim_terminal` are no-ops, same as running rush
+    // non-interactively (`-c`/a script). That's exactly the path these
+    // exercise: spawn, wire process groups, wait, decode the status.
+
+    #[test]
+    fn foreground_single_command_reports_exit_status() {
+        let pipeline = Pipeline { commands: vec![cmd(&["true"])] };
+        assert_eq!(run_foreground(&pipeline).unwrap(), 0);
+
+        let pipeline = Pipeline { commands: vec![cmd(&["false"])] };
+        assert_eq!(run_foreground(&pipeline).unwrap(), 1);
+    }
+
+    #[test]
+    fn foreground_pipeline_reports_last_stage_status() {
+        let pipeline = Pipeline {
+            commands: vec![cmd(&["false"]), cmd(&["true"])],
+        };
+        // Every stage still runs (no short-circuiting within a pipeline);
+        // only the last stage's status is the pipeline's status.
+        assert_eq!(run_foreground(&pipeline).unwrap(), 0);
+    }
+
+    #[test]
+    fn foreground_pipeline_reports_signal_death() {
+        // A child killed by a signal reports the conventional 128+signal
+        // code — exercises `exit_code`'s `wifsignaled` branch via a real
+        // signaled process, not a hand-encoded status.
+        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "kill -TERM $$"])] };
+        assert_eq!(run_foreground(&pipeline).unwrap(), 128 + 15);
+    }
+
+    #[test]
+    fn job_table_tracks_and_prunes_finished_jobs() {
+        // `run_background` is safe to call directly (it doesn't gate on
+        // `job_control_enabled()`); but its own `reap_background` does (real
+        // job control needs a tty to hand the terminal back to), so it would
+        // silently no-op here. Drive the same underlying bookkeeping
+        // (`update_by_pid`/`notify_and_prune`) directly instead.
+        let pipeline = Pipeline { commands: vec![cmd(&["true"])] };
+        run_background(&pipeline).unwrap();
+
+        let pid = STATE.with(|s| s.borrow().jobs.last().unwrap().pids[0]);
+        let mut status: c_int = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid, "the background child should still be ours to reap");
+        update_by_pid(pid, status);
+        notify_and_prune();
+
+        let still_present = STATE.with(|s| s.borrow().jobs.iter().any(|j| j.pids.contains(&pid)));
+        assert!(!still_present, "a finished job should be pruned after notify_and_prune");
+    }
+}

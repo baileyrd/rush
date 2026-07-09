@@ -300,7 +300,16 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   pipeline) is handed to `run_background`.
 - `capture_list` runs every job in the foreground with a plain spawn-and-wait
   and concatenates stdout — the engine behind `$(...)` (the `&` marker is
-  ignored inside a substitution).
+  ignored inside a substitution). Like `run_andor`, `capture_pipeline` updates
+  `$?` after every pipeline, so e.g. `$(false; echo $?)` sees `1` from within
+  the substitution, not whatever `$?` was from outside it. A pipeline that's
+  a single compound command is captured via `capture_compound`: fork (Unix
+  only) and redirect the *child's* fd 1 to a pipe before running
+  `run_compound` there, so everything the child writes — in-process
+  (builtins) or via a further spawn that inherits its stdout — ends up
+  captured. Only a pipeline that *is* a single compound is handled this way;
+  one as one stage among several in a larger pipeline remains the documented,
+  separate limitation.
 - **Single-command fast path:** if a pipeline is one command naming a builtin
   (`builtins::is_builtin`), it runs via `run_builtin_foreground` so `cd`/
   `exit`/`jobs` affect the shell process (skipped when capturing, so
@@ -376,10 +385,15 @@ not for replaying whole-script semantics) and rejects any compound command
 outright, and a builtin's redirects are wired up via a process-wide `dup2`
 around the call (`run_builtin_foreground`) that races across `cargo test`'s
 concurrently-running threads since fd 0/1/2 aren't per-thread. A genuinely
-separate process per test sidesteps all of that. (Two things this surfaced,
-still open: `capture_list`'s `$?` gap and its blanket rejection of compound
-commands, even a lone one — narrower than the documented "compound as one
-stage among several in a pipeline" limitation above.)
+separate process per test sidesteps all of that. (Two things this surfaced —
+`capture_list`'s `$?` gap and its blanket rejection of compound commands,
+even a lone one — are now fixed; see `capture_pipeline`/`capture_compound`
+above. One further, deeper nuance surfaced while verifying those fixes and
+remains open: the exit status of a command substitution isn't propagated to
+an *assignment's own* exit status — `x=$(false); echo $?` still prints `0`,
+not `1` as POSIX/bash expect, since the assignment-only path in both
+`run_foreground` and `capture_pipeline` hardcodes `Ok(0)` regardless of what
+happened during expansion.)
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 

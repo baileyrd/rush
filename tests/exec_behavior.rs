@@ -89,3 +89,45 @@ fn forked_subshell_isolates_exit_from_the_shell() {
     assert_eq!(out, "3\n");
     assert_eq!(status, 0); // the outer script's own last command succeeded
 }
+
+#[test]
+fn command_substitution_tracks_exit_status_across_its_own_jobs() {
+    // Regression lock-in: capture_pipeline used to never update `$?`, so
+    // this would have seen whatever `$?` was from *outside* the
+    // substitution instead of `false`'s own status.
+    assert_eq!(rush(r#"echo "$(false; echo mid=$?)""#).0, "mid=1\n");
+}
+
+#[test]
+fn plain_assignment_still_resets_status_to_zero() {
+    // A value with no command substitution shouldn't leak a stale `$?` from
+    // a prior command now that capture_pipeline actively sets it elsewhere.
+    assert_eq!(rush("false; x=5; echo $?").0, "0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn command_substitution_captures_a_sole_compound_command() {
+    // Regression lock-in: capture_pipeline used to reject *any* compound
+    // command outright (not just one mid-pipeline) via a hard error from
+    // expand::expand, so $(if ...) / $(while ...) / $(( subshell )) simply
+    // didn't work at all.
+    assert_eq!(
+        rush("x=$(if true; then echo yes; else echo no; fi); echo $x").0,
+        "yes\n"
+    );
+    assert_eq!(
+        rush("x=$(i=0; while [ $i -lt 3 ]; do echo $i; i=$((i+1)); done); echo \"$x\"").0,
+        "0\n1\n2\n"
+    );
+    assert_eq!(rush("x=$( (echo a; echo b) ); echo \"$x\"").0, "a\nb\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn command_substitution_of_a_compound_composes_with_nesting() {
+    assert_eq!(
+        rush(r#"echo "$(echo outer:$(if true; then echo inner; fi))""#).0,
+        "outer:inner\n"
+    );
+}

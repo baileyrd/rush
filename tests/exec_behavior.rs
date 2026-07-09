@@ -103,6 +103,28 @@ fn real_fd_routing_for_2_and_1_into_a_pipe() {
 }
 
 #[test]
+fn test_builtin_logical_combinators() {
+    // `-a`/`-o`, real files, matching bash's actual behavior (`-a` binds
+    // tighter than `-o`, `!` negates only the next primary).
+    assert_eq!(
+        rush("if [ -f Cargo.toml -a -d src ]; then echo yes; else echo no; fi").0,
+        "yes\n"
+    );
+    assert_eq!(
+        rush("if [ -f Cargo.toml -a -f /no/such/file ]; then echo yes; else echo no; fi").0,
+        "no\n"
+    );
+    assert_eq!(
+        rush("if [ -f /no/such/file -o -d src ]; then echo yes; else echo no; fi").0,
+        "yes\n"
+    );
+    assert_eq!(
+        rush("if [ 1 = 2 -o 1 = 1 -a 1 = 2 ]; then echo yes; else echo no; fi").0,
+        "no\n"
+    );
+}
+
+#[test]
 fn compound_if_and_while_status() {
     assert_eq!(rush("if true; then echo yes; else echo no; fi").0, "yes\n");
     assert_eq!(rush("if false; then echo yes; else echo no; fi").0, "no\n");

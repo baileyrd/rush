@@ -51,7 +51,7 @@ applicable to that shell's own model.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6 (1 done)
+- **Tier I — correctness/POSIX risk:** 6 (2 done)
 - **Tier II — missing standard builtins:** 11
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
@@ -76,10 +76,14 @@ the longest, using the same glob matcher `case` patterns use
 (`strip_prefix_pattern`/`strip_suffix_pattern` in `expand.rs`). No colon
 form — bash doesn't define one for this family either.
 
-### C2 — `for name; do …; done` should iterate `"$@"`
-POSIX-mandated shorthand, present in dash/bash/ksh/zsh. Today, omitting the
-`in` clause leaves rush's word list empty, so the loop body silently never
-runs — not an error, just quietly wrong. **Effort: S.**
+### C2 — `for name; do …; done` should iterate `"$@"` ✅ done
+POSIX-mandated shorthand, present in dash/bash/ksh/zsh. Omitting the `in`
+clause used to leave rush's word list empty, so the loop body silently never
+ran — not an error, just quietly wrong. **Effort: S.**
+
+Implemented: the parser now records whether an `in` clause was present at
+all (`Compound::For`'s `has_in`), distinct from an *explicit* `in` with zero
+words (still a real empty list). No `in` → iterate `vars::args()` (`"$@"`).
 
 ### C3 — Compound command as one stage of a larger pipeline: `(cmd) | grep x` (tracked)
 Present in every comparison shell. Rush can capture a *lone* compound via

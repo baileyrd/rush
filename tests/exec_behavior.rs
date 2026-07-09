@@ -18,9 +18,16 @@ use std::process::Command;
 
 /// Runs `rush -c src`, returning `(stdout, exit status)`.
 fn rush(src: &str) -> (String, i32) {
+    rush_argv(src, &[])
+}
+
+/// Like [`rush`], but with `rush -c src [argv...]` — `argv[0]` becomes `$0`,
+/// the rest `$1`… (and so `"$@"`).
+fn rush_argv(src: &str, argv: &[&str]) -> (String, i32) {
     let output = Command::new(env!("CARGO_BIN_EXE_rush"))
         .arg("-c")
         .arg(src)
+        .args(argv)
         .output()
         .expect("spawn rush");
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
@@ -156,4 +163,20 @@ fn nested_substitution_status_reflects_its_own_last_command() {
     // The outer substitution's exit status is that of its own last command
     // ("echo inner"), not the inner assignment's ("y=$(false)").
     assert_eq!(rush("x=$(y=$(false); echo inner); echo $x:$?").0, "inner:0\n");
+}
+
+#[test]
+fn for_loop_without_in_clause_iterates_positional_params() {
+    // POSIX: `for name; do ...` (no `in`) iterates "$@", same as if `in "$@"`
+    // had been written. `argv[0]` becomes $0, so the loop only sees a, b, c.
+    let (out, _) = rush_argv("for x; do echo got:$x; done", &["dummy", "a", "b", "c"]);
+    assert_eq!(out, "got:a\ngot:b\ngot:c\n");
+
+    // No positional params at all: zero iterations, no error.
+    assert_eq!(rush("for x; do echo unreached; done; echo after").0, "after\n");
+
+    // An *explicit* `in` with no words is a real empty list, not "$@" — a
+    // different, pre-existing case this fix must not disturb.
+    let (out, _) = rush_argv("for x in; do echo unreached; done; echo after", &["dummy", "a", "b"]);
+    assert_eq!(out, "after\n");
 }

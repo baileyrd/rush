@@ -48,6 +48,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
 | `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions |
 | `set -u` (nounset) | ✅ | referencing an unset variable is an error; `:-`/`:=`/`:+`/`:?` and `$@`/`$*`/`$#`/`$?`/`$$` are exempt |
+| `set -o pipefail` | ✅ | a pipeline's status is the rightmost non-zero stage, not just its last; applies inside `$(...)` too |
 | `trap` | ✅ | `EXIT` (every exit path) and `INT` (Ctrl-C at an idle prompt) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |

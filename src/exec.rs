@@ -954,15 +954,27 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
         children.push(child);
     }
 
-    let mut status = 0;
-    for (i, mut child) in children.into_iter().enumerate() {
+    let mut statuses = Vec::with_capacity(n);
+    for mut child in children {
         let exit = child.wait().map_err(|e| e.to_string())?;
-        if i == n - 1 {
-            status = exit.code().unwrap_or(1);
-        }
+        statuses.push(exit.code().unwrap_or(1));
     }
 
-    Ok((status, captured))
+    Ok((pipeline_status(&statuses), captured))
+}
+
+/// The exit status reported for a whole pipeline of `stage_statuses`
+/// (stage order, first to last): without `set -o pipefail`, always the last
+/// stage's own status, matching every shell; with it, the *rightmost*
+/// non-zero status among all stages, or 0 if every stage succeeded —
+/// verified directly against real bash (not "the first failure", nor "any
+/// failure" — specifically the one closest to the end).
+pub(crate) fn pipeline_status(stage_statuses: &[i32]) -> i32 {
+    if crate::vars::pipefail() {
+        stage_statuses.iter().rev().find(|&&s| s != 0).copied().unwrap_or(0)
+    } else {
+        *stage_statuses.last().unwrap_or(&0)
+    }
 }
 
 /// Build the `std::process::Command` for one pipeline stage: program, args, and

@@ -283,9 +283,10 @@ enum Wait {
 
 /// Wait for a process group to finish or stop, reaping its members.
 fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
-    let last = *pids.last().expect("pipeline has at least one stage");
     let mut live: usize = pids.len();
-    let mut last_code = 0;
+    // Per-stage exit codes, in pipeline order — `set -o pipefail` needs all
+    // of them, not just the last stage's (see `exec::pipeline_status`).
+    let mut codes = vec![0; pids.len()];
 
     while live > 0 {
         let mut status: c_int = 0;
@@ -298,12 +299,12 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
         }
         // Exited or killed by a signal.
         live -= 1;
-        if wpid == last {
-            last_code = exit_code(status);
+        if let Some(i) = pids.iter().position(|&p| p == wpid) {
+            codes[i] = exit_code(status);
         }
     }
 
-    Wait::Done(last_code)
+    Wait::Done(crate::exec::pipeline_status(&codes))
 }
 
 /// Reap finished/stopped/continued background jobs without blocking, reporting

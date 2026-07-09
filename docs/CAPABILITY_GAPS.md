@@ -27,7 +27,9 @@ which is now down to a single open item (C36) — `local`, `getopts`,
 `source`/`.`, `eval`, `exec`, and `umask` all landed alongside
 `read`/`printf`/`shift`. C36 (a PATH-visibility bug in
 `command`/`type`/`hash`) turned up while closing out `source`; C37
-while closing out `eval`; C38 while closing out `exec`.
+while closing out `eval`; C38 while closing out `exec`. Tier III
+(`set -euo pipefail`, the header nearly every production shell script
+opens with) is now underway too — `set -u` (C18) is done.
 
 ---
 
@@ -49,7 +51,7 @@ applicable to that shell's own model.
 | `eval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `exec` (process replacement) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `umask` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
+| `set -e` / `-u` / `-o pipefail` | 🟡§ | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -68,13 +70,15 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 ‡ `wait` (`pid`/`%job`, or none) is done, along with its `$!` prerequisite;
 `disown` remains missing.
 
+§ `-e` and `-u` are both done; `-o pipefail` (C19) is still missing.
+
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
-- **Tier III — scripting-safety idioms:** 4
+- **Tier III — scripting-safety idioms:** 4 (1 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
 
@@ -525,10 +529,31 @@ The `set -euo pipefail` header is close to universal in production shell
 scripts. Rush currently implements one third of it, and a simplified third
 at that.
 
-### C18 — `set -u` (nounset)
+### C18 — `set -u` (nounset) ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh. Referencing an unset or
-misspelled variable currently expands silently to an empty string — `-u`
-turns that into an immediate, loud error instead. **Effort: M.**
+misspelled variable used to expand silently to an empty string — `-u`
+turns that into an immediate, loud error instead.
+
+Added `vars::set_nounset`/`nounset` (mirroring `errexit`'s own thread-local
+flag) plus two new checked lookups in `expand.rs` — `var_lookup_checked`,
+`arg_checked` — used everywhere a plain value is needed: `$name`/`${name}`,
+`${#name}`, and the `#`/`##`/`%`/`%%` pattern-removal operators, plus
+numbered positional parameters (`$1`, `${10}`). All verified directly
+against real bash, including the exact exemptions: the `:-`/`:=`/`:+`/`:?`
+default/alternate family defines its own unset-variable handling and stays
+untouched (`:?` still fires its own, different error either way); `$@`/
+`$*`/`$#`/`$?`/`$$` are always considered set, even with zero positional
+parameters, while a specific numbered one (`$1`, `${10}`) *is* still
+subject to the check when it doesn't exist; a set-but-empty variable is
+fine (the test is "unset", not "empty"); `set +u` turns it back off.
+
+One caveat, shared with the pre-existing `${VAR:?msg}` error rush already
+had: bash exits a non-interactive shell with status 127 for an unbound
+reference specifically, but rush's exits with 1 like most of its other
+expansion errors — the script still aborts right there either way (the
+part that actually matters), just with a different code. Not introduced
+by this change; not worth its own tracked item given how minor it is next
+to `set -u` actually existing at all.
 
 ### C19 — `set -o pipefail`
 Present in bash/ksh/zsh (notably *not* dash — bash-family parity, not

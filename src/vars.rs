@@ -35,6 +35,9 @@ thread_local! {
     static ARGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     // `set -e`: a failing command exits the shell (see exec::exec_list_impl).
     static ERREXIT: RefCell<bool> = const { RefCell::new(false) };
+    // `set -u`: referencing an unset variable is an error (see
+    // `expand::var_lookup_checked`).
+    static NOUNSET: RefCell<bool> = const { RefCell::new(false) };
     // The exit status of the most recent command substitution performed
     // while expanding a command's words, if any (see `reset_last_subst_status`).
     static LAST_SUBST_STATUS: RefCell<Option<i32>> = const { RefCell::new(None) };
@@ -64,6 +67,14 @@ pub fn set_errexit(on: bool) {
 
 pub fn errexit() -> bool {
     ERREXIT.with(|e| *e.borrow())
+}
+
+pub fn set_nounset(on: bool) {
+    NOUNSET.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn nounset() -> bool {
+    NOUNSET.with(|e| *e.borrow())
 }
 
 /// Clear the "did a command substitution just run" marker. Called right

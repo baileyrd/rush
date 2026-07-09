@@ -1350,14 +1350,18 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 }
 
 /// `set -e` / `set +e` — errexit: a failing command exits the shell (see
-/// `exec::exec_list_impl`). Other flags aren't implemented yet; naming one is
-/// an error rather than a silently-ignored no-op.
+/// `exec::exec_list_impl`). `set -u` / `set +u` — nounset: referencing an
+/// unset variable is an error (see `expand::var_lookup_checked`). Other
+/// flags aren't implemented yet; naming one is an error rather than a
+/// silently-ignored no-op.
 fn set_cmd(argv: &[String]) -> i32 {
     let mut status = 0;
     for arg in &argv[1..] {
         match arg.as_str() {
             "-e" => crate::vars::set_errexit(true),
             "+e" => crate::vars::set_errexit(false),
+            "-u" => crate::vars::set_nounset(true),
+            "+u" => crate::vars::set_nounset(false),
             other => {
                 eprintln!("set: {other}: not supported");
                 status = 1;

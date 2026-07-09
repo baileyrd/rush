@@ -51,15 +51,15 @@ applicable to that shell's own model.
 \* Done for the interactive/script job-control path; a compound as one stage
 among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
-† `read` (with `-r` and `$IFS` splitting) is done; `printf`/`shift`/`getopts`
-remain missing.
+† `read` (with `-r` and `$IFS` splitting) and `printf` (sans `%e`/`%f`/`%g`)
+are done; `shift`/`getopts` remain missing.
 
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11 (1 done)
+- **Tier II — missing standard builtins:** 11 (2 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -210,10 +210,25 @@ without `CLOEXEC`, a real child spawned from the compound's body before the
 writer thread finished would inherit its own copy of the write end, so the
 reader never saw EOF.
 
-### C8 — `printf`
+### C8 — `printf` ✅ done
 The portable, correct way to emit formatted output — real scripts avoid
 `echo` for exactly this reason, and rush's own `echo` has no `-e` at all,
 making this more urgent than usual. **Effort: M.**
+
+Implemented (`builtins.rs`'s `printf_cmd` and `printf` submodule): `%s`/`%b`
+(string, `%b` also processing backslash escapes in its argument),
+`%d`/`%i`/`%o`/`%u`/`%x`/`%X` (integer, decimal/octal/unsigned/hex — a
+negative number reinterpreted as unsigned, matching real `printf`'s two's
+complement behavior), `%c`, `%%`, the `-`/`0`/`+`/` ` flags, and a width
+and/or `.precision`. Format-string escapes (`\n`/`\t`/`\\`/`\a`/`\b`/`\f`/
+`\r`/`\v`/`\NNN` octal) are resolved once, up front. If there are more
+arguments than the format consumes, the whole format repeats against the
+rest (`printf "%s-%d\n" a 1 b 2 c` → `a-1`, `b-2`, `c-0`), matching real
+bash exactly; missing arguments mid-format default to `""`/`0` rather than
+erroring. Not yet implemented: `%e`/`%f`/`%g` (floating point) and `*`
+(width/precision taken from an argument) — narrower, separate remaining
+pieces (rush's arithmetic is integer-only, so the former is lower-value
+here than in a shell with float support).
 
 ### C9 — `shift [n]`
 The missing piece connecting positional parameters and `case` (both already

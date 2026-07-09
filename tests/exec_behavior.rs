@@ -387,6 +387,27 @@ fn redirect_trailing_a_compound_command_is_applied() {
     let _ = std::fs::remove_file(&out_path);
 }
 
+#[test]
+fn printf_builtin() {
+    // Cycling the format over extra arguments, and defaulting a missing one.
+    assert_eq!(rush(r#"printf "%s-%d\n" a 1 b 2 c"#).0, "a-1\nb-2\nc-0\n");
+
+    // Width/flags, hex/octal, `%c`, `%b`'s escape processing (vs. `%s`'s
+    // lack of it), and `%%`.
+    assert_eq!(rush(r#"printf "%5d|%-5d|%05d\n" 3 3 3"#).0, "    3|3    |00003\n");
+    assert_eq!(rush(r#"printf "%x %o %X\n" 255 8 255"#).0, "ff 10 FF\n");
+    assert_eq!(rush(r#"printf "%c\n" hello"#).0, "h\n");
+    assert_eq!(rush(r#"printf "%b\n" "a\tb\nc""#).0, "a\tb\nc\n");
+    assert_eq!(rush(r#"printf "%s\n" "a\tb""#).0, "a\\tb\n");
+    assert_eq!(rush(r#"printf "100%%\n""#).0, "100%\n");
+
+    // Malformed numeric input: still formats (as 0) and reports 1, not a
+    // hard error that aborts output.
+    let (out, status) = rush(r#"printf "%d\n" abc"#);
+    assert_eq!(out, "0\n");
+    assert_eq!(status, 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn heredoc_trailing_a_compound_command_feeds_it() {

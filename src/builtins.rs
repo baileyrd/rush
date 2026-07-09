@@ -60,8 +60,16 @@ fn other_builtin(_argv: &[String]) -> Option<i32> {
 }
 
 fn cd(argv: &[String]) -> i32 {
-    // `cd` with no args goes home; `cd -` is not yet supported.
+    // `cd -` goes to $OLDPWD and echoes it, like POSIX `cd`.
+    let going_back = argv.get(1).map(String::as_str) == Some("-");
     let target = match argv.get(1) {
+        Some(_) if going_back => match crate::vars::get("OLDPWD") {
+            Some(dir) => dir,
+            None => {
+                eprintln!("cd: OLDPWD not set");
+                return 1;
+            }
+        },
         Some(dir) => dir.clone(),
         None => match std::env::var("HOME") {
             Ok(h) => h,
@@ -72,9 +80,18 @@ fn cd(argv: &[String]) -> i32 {
         },
     };
 
+    let previous = std::env::current_dir().ok();
+
     if let Err(e) = std::env::set_current_dir(Path::new(&target)) {
         eprintln!("cd: {target}: {e}");
         return 1;
+    }
+
+    if let Some(dir) = previous {
+        crate::vars::set("OLDPWD", &dir.display().to_string());
+    }
+    if going_back {
+        println!("{target}");
     }
     0
 }

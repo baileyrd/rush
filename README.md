@@ -4,6 +4,12 @@
 
 A small, bash-compatible shell written in Rust — built to grow into a daily-use tool.
 
+**Status: experimental.** rush covers most of the core POSIX shell language and
+has a growing test suite, but it hasn't been hardened as a daily-driver shell
+yet — treat it as a project to explore and contribute to, not (yet) a drop-in
+`chsh` replacement. Job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`) is **Unix
+only**; on Windows, rush runs foreground commands only.
+
 `rush` reads a command line, lexes and parses it, expands it, then executes the
 result. It covers most of the core POSIX shell language: pipelines and
 redirection (including `2>`/`2>&1` and here-documents), the full set of

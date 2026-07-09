@@ -30,6 +30,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "trap" => Some(trap_cmd(argv)),
         "read" => Some(read_cmd(argv)),
         "printf" => Some(printf_cmd(argv)),
+        "shift" => Some(shift_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -38,7 +39,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 /// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
-    ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf",
+    ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -852,6 +853,33 @@ fn return_cmd(argv: &[String]) -> i32 {
 fn unset(argv: &[String]) -> i32 {
     for name in &argv[1..] {
         crate::vars::unset(name);
+    }
+    0
+}
+
+/// `shift [n]` — drop the first `n` (default 1) positional parameters,
+/// connecting them to `case` into the ubiquitous `while [ $# -gt 0 ]; do
+/// case $1 in …; esac; shift; done` argument-parsing loop. A negative `n`
+/// is a hard usage error; `n` greater than `$#` is *not* — bash just fails
+/// silently there (no message), since running past the end this way is the
+/// everyday way an argument-parsing loop notices it's done.
+fn shift_cmd(argv: &[String]) -> i32 {
+    let n: i64 = match argv.get(1) {
+        None => 1,
+        Some(s) => match s.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("shift: {s}: numeric argument required");
+                return 1;
+            }
+        },
+    };
+    if n < 0 {
+        eprintln!("shift: {n}: shift count out of range");
+        return 1;
+    }
+    if !crate::vars::shift(n as usize) {
+        return 1;
     }
     0
 }

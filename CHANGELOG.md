@@ -317,3 +317,14 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   erroring. Not yet implemented: `%e`/`%f`/`%g` (floating point, lower-value
   here since rush's arithmetic is integer-only) and `*` (width/precision
   taken from an argument).
+
+### `shift [n]` builtin (C9)
+- The missing piece connecting positional parameters and `case` (both
+  already supported) into the ubiquitous `while [ $# -gt 0 ]; do case $1 in
+  …; esac; shift; done` argument-parsing loop. `vars::shift` drops the first
+  `n` (default 1) positional parameters; `builtins::shift_cmd` wires up its
+  exit status: a negative or non-numeric `n` is a hard usage error (status 1
+  with a message), but `n` greater than `$#` fails *silently* (status 1, no
+  message) — a real bash quirk verified directly, since running past the
+  end this way is the everyday way an argument-parsing loop notices it's
+  done.

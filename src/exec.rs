@@ -106,6 +106,12 @@ fn exec_list_impl(list: &CommandList, check_errexit: bool) -> Result<i32, String
     for job in &list.jobs {
         let (job_status, last_ran) = run_job(job)?;
         status = job_status;
+        // A TERM/HUP that arrived while that job was running (and wasn't
+        // already caught mid-wait — see `job::wait_pgid`) gets handled here,
+        // at the next command boundary — same idea as `set -e`'s own check
+        // just below.
+        #[cfg(unix)]
+        crate::trap::check_pending();
         if crate::vars::flow_pending() {
             break;
         }

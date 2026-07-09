@@ -553,3 +553,29 @@ This closes out **Tier I** (correctness/POSIX risk) — see
 - Known gap, accepted for this scope: a compound's own *header* line (`for
   i in 1 2`, `case a in`) isn't traced, only the commands actually inside
   its body — which do trace correctly, per iteration/branch.
+
+### `TERM`/`HUP` traps actually firing (C21)
+- Real signal handlers (`trap::install_signal_handlers`), installed once at
+  startup in every mode — interactive or not, since the target use case (a
+  container's PID 1 catching `TERM` to shut down gracefully) has no
+  terminal at all. The handler itself only stores which signal arrived in
+  a plain `AtomicI32` (safe from signal context: no heap, no locks); `trap::
+  check_pending`, called back from ordinary code, does the real work —
+  firing the registered trap, or, if none is registered, terminating with
+  the conventional `128 + signal` status (still running any `EXIT` trap
+  first, exactly like real bash).
+- The headline behavior, verified directly against real bash: a trapped
+  signal interrupts a blocking wait *immediately*, not just once the
+  foreground job finishes on its own. `job::wait_pgid`/`wait_job_pgid`/
+  `wait_one`'s blocking `waitpid` loops now distinguish `EINTR` (retry
+  after handling the pending signal) from `ECHILD` (really done) — if the
+  trap body calls `exit`, the process is gone before the loop ever
+  resumes; if it doesn't, the wait simply resumes, exactly reproducing
+  bash's own "the sleep picks up where it left off" behavior.
+- `check_pending` is also called at every ordinary command boundary
+  (`exec::exec_list_impl`'s per-job loop, covering every script, loop
+  body, function body, sourced file, and `eval`'d string) and before each
+  interactive prompt, for signals that arrive when nothing is blocking at
+  all.
+- Out of scope: `ERR`/`DEBUG` (bash/ksh/zsh extensions, not POSIX-mandated)
+  remain unimplemented.

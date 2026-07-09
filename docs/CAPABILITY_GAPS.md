@@ -30,8 +30,10 @@ which is now down to a single open item (C36) — `local`, `getopts`,
 while closing out `eval`; C38 while closing out `exec`. `set -euo
 pipefail` — the header nearly every production shell script opens with —
 now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
-and `-x` (C20, xtrace) alongside them, leaving only trap signals beyond
-`EXIT`/`INT` (C21) open in this tier.
+and `-x` (C20, xtrace) alongside them. `TERM`/`HUP` traps (C21) now fire
+too — including interrupting a blocking wait immediately, the headline
+case for a container's graceful-shutdown pattern — closing Tier III out
+completely.
 
 ---
 
@@ -57,7 +59,7 @@ applicable to that shell's own model.
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Traps beyond EXIT/INT firing | 🟡 | ✅ | ✅ | ✅ | ✅ | — |
+| Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ❌ | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
@@ -76,13 +78,18 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 cover a compound's own header line (`for i in 1 2`, `case a in`), only the
 commands actually inside its body.
 
+‖ `EXIT`/`INT`/`TERM`/`HUP` all fire now — including interrupting a
+blocking wait immediately, not just once the foreground job finishes on
+its own; `ERR`/`DEBUG` (bash/ksh/zsh extensions, not POSIX) remain
+unimplemented.
+
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
-- **Tier III — scripting-safety idioms:** 4 (3 done)
+- **Tier III — scripting-safety idioms:** 4 (4 done — complete)
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
 
@@ -608,12 +615,39 @@ exact header format for every compound kind was a bigger lift than this
 item's effort budget justified next to the headline case (seeing every
 command that actually ran).
 
-### C21 — Trap signals beyond `EXIT`/`INT` actually firing (tracked)
+### C21 — Trap signals beyond `EXIT`/`INT` actually firing (tracked) ✅ done
 `TERM`/`HUP` are POSIX-mandated; `ERR`/`DEBUG` are bash/ksh/zsh extensions.
-Rush's `trap` builtin will happily *register* a handler for any name, but
-only ever *fires* `EXIT` and `INT` — a script trapping `TERM` for graceful
-shutdown (the standard container/daemon pattern) silently never gets
-called. **Effort: M.**
+Rush's `trap` builtin would happily *register* a handler for any name, but
+only ever *fired* `EXIT` and `INT` — a script trapping `TERM` for graceful
+shutdown (the standard container/daemon pattern) silently never got
+called.
+
+Added real signal handlers for `TERM`/`HUP` (`trap::install_signal_handlers`,
+called once at startup in every mode — interactive or not, since the target
+use case, a container's PID 1, has no terminal at all). The handler itself
+only stores which signal arrived in a plain `AtomicI32` (safe from signal
+context: no heap, no locks, nothing Rust-collection-shaped); `trap::
+check_pending` — called back from ordinary code — does the real work of
+firing the registered trap, or, if none is registered, terminating with the
+conventional `128 + signal` status (still running any `EXIT` trap first,
+exactly like real bash, verified directly).
+
+The headline behavior, verified directly against real bash in every case:
+a trapped signal interrupts a blocking wait *immediately*, not just once
+the foreground job finishes on its own. `job::wait_pgid`/`wait_job_pgid`/
+`wait_one`'s blocking `waitpid` loops now distinguish `EINTR` (retry after
+handling the pending signal) from `ECHILD` (really done); if the trap body
+itself calls `exit`, the process is gone before the loop ever resumes — if
+it doesn't, the wait simply resumes, exactly reproducing bash's own
+"the sleep picks up where it left off" behavior when a trap doesn't exit.
+`check_pending` is also called at every ordinary command boundary
+(`exec::exec_list_impl`'s per-job loop — covering every script, loop body,
+function body, sourced file, and `eval`'d string, since they all funnel
+through that one executor) and before each interactive prompt, for signals
+that arrive when nothing is blocking at all.
+
+Out of scope for this item, matching its stated boundary: `ERR`/`DEBUG`
+(bash/ksh/zsh extensions, not POSIX-mandated) remain unimplemented.
 
 ---
 

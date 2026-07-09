@@ -291,8 +291,14 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
     while live > 0 {
         let mut status: c_int = 0;
         let wpid = unsafe { libc::waitpid(-pgid, &mut status, libc::WUNTRACED) };
-        if wpid <= 0 {
-            break; // -1 (ECHILD) or 0: nothing left to wait for
+        if wpid == -1 {
+            if retry_after_interrupt() {
+                continue;
+            }
+            break; // ECHILD: nothing left to wait for
+        }
+        if wpid == 0 {
+            break;
         }
         if wifstopped(status) {
             return Wait::Stopped(128 + libc::WSTOPSIG(status) as i32);
@@ -305,6 +311,21 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
     }
 
     Wait::Done(crate::exec::pipeline_status(&codes))
+}
+
+/// `true` if the just-failed syscall was interrupted by a caught signal
+/// (`EINTR`) rather than a real error — and, if so, handles whatever
+/// TERM/HUP trap prompted it before reporting "go ahead and retry". This is
+/// what makes a trap fire *immediately*, mid-wait, instead of only once the
+/// foreground job finishes on its own — verified directly against real
+/// bash: if the trap doesn't itself exit, the wait simply resumes, exactly
+/// like this call site does.
+fn retry_after_interrupt() -> bool {
+    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+        return false;
+    }
+    crate::trap::check_pending();
+    true
 }
 
 /// Reap finished/stopped/continued background jobs without blocking, reporting
@@ -389,8 +410,14 @@ fn wait_job_pgid(pgid: pid_t) {
     loop {
         let mut status: c_int = 0;
         let wpid = unsafe { libc::waitpid(-pgid, &mut status, 0) };
-        if wpid <= 0 {
+        if wpid == -1 {
+            if retry_after_interrupt() {
+                continue;
+            }
             break; // ECHILD: nothing left in this group to reap
+        }
+        if wpid == 0 {
+            break;
         }
         update_by_pid(wpid, status);
     }
@@ -419,7 +446,13 @@ fn wait_one(target: &str) -> i32 {
         return code;
     }
     let mut status: c_int = 0;
-    let wpid = unsafe { libc::waitpid(pid, &mut status, 0) };
+    let wpid = loop {
+        let wpid = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if wpid == -1 && retry_after_interrupt() {
+            continue;
+        }
+        break wpid;
+    };
     if wpid <= 0 {
         eprintln!("wait: pid {pid} is not a child of this shell");
         return 127;

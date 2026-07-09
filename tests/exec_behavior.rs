@@ -238,6 +238,63 @@ fn xtrace_echoes_each_command_before_running_it() {
     assert_eq!(rush_stderr("set -x; set +x; echo hi").0, "+ set +x\n");
 }
 
+/// Spawn `rush -c src`, send it `sig` after `delay_ms`, and return its
+/// captured `(stdout, exit status)`. The script's own `sleep` durations
+/// are kept short (well under a second): killed early, an interrupted
+/// `sleep` is orphaned rather than reaped, and `wait_with_output` blocks on
+/// the piped stdout reaching EOF — which needs *every* holder of the pipe's
+/// write end, including that orphan, to close it. A long `sleep` there
+/// would make the test wait out its whole natural duration despite `rush`
+/// itself having already exited immediately, same as real bash would.
+#[cfg(unix)]
+fn rush_signaled(src: &str, sig: libc::c_int, delay_ms: u64) -> (String, i32) {
+    let child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg(src)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn rush");
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, sig);
+    }
+    let output = child.wait_with_output().expect("wait rush");
+    (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
+}
+
+#[cfg(unix)]
+#[test]
+fn term_and_hup_traps_fire_and_can_interrupt_a_blocking_wait() {
+    // A trap that itself calls `exit`: the signal interrupts the blocking
+    // wait for `sleep` immediately, rather than waiting for it to finish —
+    // verified directly against real bash, which behaves identically.
+    assert_eq!(
+        rush_signaled(r#"trap "echo caught; exit 5" TERM; sleep 0.6; echo unreached"#, libc::SIGTERM, 100),
+        ("caught\n".to_string(), 5)
+    );
+
+    // A trap that does *not* exit: the wait simply resumes afterward,
+    // rather than the script ending early — also matching real bash.
+    assert_eq!(
+        rush_signaled(r#"trap "echo caught" TERM; sleep 0.3; echo after"#, libc::SIGTERM, 100),
+        ("caught\nafter\n".to_string(), 0)
+    );
+
+    // Untrapped: terminates with the conventional 128+signal status, same
+    // as the signal's real default disposition — but any EXIT trap still
+    // runs first.
+    assert_eq!(
+        rush_signaled(r#"trap "echo bye" EXIT; sleep 0.6"#, libc::SIGTERM, 100),
+        ("bye\n".to_string(), 143)
+    );
+
+    // `HUP` works the same way as `TERM`.
+    assert_eq!(
+        rush_signaled(r#"trap "echo hup-caught; exit 7" HUP; sleep 0.6"#, libc::SIGHUP, 100),
+        ("hup-caught\n".to_string(), 7)
+    );
+}
+
 #[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used

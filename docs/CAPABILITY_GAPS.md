@@ -60,7 +60,7 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11 (5 done)
+- **Tier II — missing standard builtins:** 11 (6 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -282,10 +282,29 @@ consumed. All verified against real bash directly, including the full
 `while getopts ...; do case $opt in ...; esac; done; shift $((OPTIND-1))`
 idiom this and `shift` (C9) together unlock.
 
-### C12 — `command` / `type` / `hash`
+### C12 — `command` / `type` / `hash` ✅ done
 `command -v foo` is the standard portable existence check used constantly
 in install scripts and shell-form Makefiles. Without it, scripts fall back
 to fragile `which`-based checks. **Effort: S–M.**
+
+Implemented (`builtins.rs`'s `command_cmd`/`type_cmd`/`hash_cmd`/`Kind`
+classifier, plus `exec::command_bypass`): `command -v`/`-V name...`
+describes how each name would resolve — alias, function, builtin, or
+`$PATH` executable, in that precedence order (`-v`: terse, the standard
+existence-check form; `-V`/`type`: a human-readable sentence) — without
+running anything, failing if none resolve. `type` additionally recognizes
+shell keywords and has a `-t` form for just the one-word classification
+(`function`/`builtin`/`keyword`/`file`/`alias`). Plain `command name
+[args...]` (no `-v`/`-V`) actually *runs* `name`, bypassing a shadowing
+shell function of the same name — the headline reason `command` exists —
+handled at the exec dispatch level so it composes with real redirects and
+external spawns; a function's own reconstructed source (as bash prints
+after "is a function") isn't reproduced, a documented narrowing since rush
+functions store parsed `CommandList`, not original source text.
+`hash` is a genuine stub (rush never caches `$PATH` lookups, so there's
+nothing to actually hash): `-r` and a bare call are accepted no-ops,
+`hash name` at least reports via exit status whether it currently
+resolves. All verified against real bash directly.
 
 ### C13 — `wait [pid|%job]`
 A surprising gap given how much job-control machinery already exists (`&`,

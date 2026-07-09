@@ -44,7 +44,10 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit` (+ `jobs`/`fg`/`bg`/`kill` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap` (+ `jobs`/`fg`/`bg`/`kill` on Unix) |
+| Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
+| `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions |
+| `trap` | ✅ | `EXIT` (every exit path) and `INT` (Ctrl-C at an idle prompt) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |

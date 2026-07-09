@@ -9,6 +9,7 @@
 //! background and stopped jobs are managed with real job control (`fg`/`bg`/
 //! `jobs`, Ctrl-Z); other platforms run foreground-only.
 
+mod alias;
 mod arith;
 mod builtins;
 mod completion;
@@ -20,6 +21,7 @@ mod glob;
 mod job;
 mod lexer;
 mod parser;
+mod trap;
 mod vars;
 
 use std::path::PathBuf;
@@ -129,15 +131,15 @@ fn main() -> rustyline::Result<()> {
             let cmd = args.get(2).cloned().unwrap_or_default();
             let name = args.get(3).cloned().unwrap_or_else(|| "rush".to_string());
             vars::set_args(name, args.get(4..).unwrap_or(&[]).to_vec());
-            std::process::exit(run_source(&cmd));
+            trap::exit_shell(run_source(&cmd));
         }
         Some(file) => {
             vars::set_args(file.to_string(), args.get(2..).unwrap_or(&[]).to_vec());
             match std::fs::read_to_string(file) {
-                Ok(src) => std::process::exit(run_source(&src)),
+                Ok(src) => trap::exit_shell(run_source(&src)),
                 Err(e) => {
                     eprintln!("rush: {file}: {e}");
-                    std::process::exit(1);
+                    trap::exit_shell(1);
                 }
             }
         }
@@ -219,8 +221,10 @@ fn interactive() -> rustyline::Result<()> {
                     }
                 }
             }
-            // Ctrl-C: abandon the current (possibly multi-line) input.
+            // Ctrl-C at an idle prompt (not a running foreground job — that's
+            // a child process under job control, and never reaches here).
             Err(ReadlineError::Interrupted) => {
+                trap::fire("INT");
                 buffer.clear();
                 continue;
             }
@@ -236,6 +240,7 @@ fn interactive() -> rustyline::Result<()> {
     if let Some(ref h) = hist {
         let _ = rl.save_history(h);
     }
+    trap::fire("EXIT");
     Ok(())
 }
 

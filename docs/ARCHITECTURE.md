@@ -243,6 +243,30 @@ builtins/spawn) is run by `exec::call_function`, which swaps in the call's
 arguments as `$1`… (keeping `$0`), runs the body, consumes any pending `return`,
 and restores the previous positional parameters. Functions may recurse.
 
+### `alias.rs` — aliases
+A thread-local `name → value` table (`BTreeMap`, so listing is name-sorted).
+`expand.rs`'s `expand_simple` does the substitution: if a simple command's
+first word (after variable/glob expansion) names an alias, it's replaced by
+the alias value's whitespace-split words, in place, before the command is
+checked against functions/builtins/external programs. This is a *single*
+substitution — the expanded words aren't re-checked against the alias table —
+so `alias ls='ls --color=auto'` can't self-recurse. No support (yet) for a
+trailing-space alias expanding the *next* word too.
+
+### `trap.rs` — signal-name traps
+A thread-local `name → command` table for `trap 'command' NAME`. Only `EXIT`
+and `INT` are ever fired. `fire(name)` parses and runs the registered command
+(via `exec::run_list`, discarding its status), guarded against re-entrancy (a
+`FIRING` set) so an `EXIT` trap that itself calls `exit` can't recurse
+forever. `exit_shell(code)` — fire `EXIT`, then `std::process::exit(code)` —
+replaces every direct `std::process::exit` call on an expected exit path
+(the `exit` builtin, `errexit`, a forked subshell's own exit, and `main.rs`'s
+script/`-c`/interactive-Ctrl-D paths) so a registered `EXIT` trap reliably
+fires exactly once, from whichever path triggered it. `INT` fires from
+`main.rs`'s idle-prompt Ctrl-C handling only — a running foreground job is a
+child process under job control and never delivers `SIGINT` to the shell
+itself, so that case isn't (yet) covered.
+
 ### `arith.rs` — integer arithmetic
 A self-contained tokenizer + recursive-descent evaluator over `i64` for
 `$((...))`: `+ - * / %`, unary `+ - !`, comparisons, `&&`/`||`, parentheses, and
@@ -330,6 +354,15 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   loop's `loop_step` consumes one `break`/`continue` level (so `break 2` escapes
   two loops) and lets `return` pass through; `call_function` consumes `return`.
   The public `run_list` clears anything that escapes every loop and function.
+- **`errexit` (`set -e`):** `exec_list` is actually `exec_list_impl(list,
+  check_errexit)` — after each job, if `check_errexit && vars::errexit() &&
+  status != 0`, it calls `trap::exit_shell(status)`. `if`/`while`/`until`
+  conditions run through `exec_cond` (`check_errexit = false`) instead, since
+  bash exempts them — a failing condition is the normal way to end a loop or
+  skip a branch, not a script error. This is a simplification of bash's own
+  errexit rule (see the doc comment on `exec_list_impl`): it fires on any
+  job whose *final* status is nonzero, not bash's finer "except a command
+  that isn't positionally last in an `&&`/`||` list."
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 Implements the parts that need POSIX process groups and signals, via the `libc`

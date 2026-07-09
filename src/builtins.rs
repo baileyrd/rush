@@ -24,6 +24,10 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "true" | ":" => Some(0),
         "false" => Some(1),
         "exit" => exit(argv), // diverges on success
+        "alias" => Some(alias_cmd(argv)),
+        "unalias" => Some(unalias_cmd(argv)),
+        "set" => Some(set_cmd(argv)),
+        "trap" => Some(trap_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -32,7 +36,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 /// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
-    ":", "false", "exit",
+    ":", "false", "exit", "alias", "unalias", "set", "trap",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -269,7 +273,87 @@ fn exit(argv: &[String]) -> Option<i32> {
         .get(1)
         .and_then(|s| s.parse::<i32>().ok())
         .unwrap_or(0);
-    std::process::exit(code);
+    crate::trap::exit_shell(code);
+}
+
+/// `alias` (list all) / `alias NAME` (show one) / `alias NAME=value` (define).
+fn alias_cmd(argv: &[String]) -> i32 {
+    if argv.len() == 1 {
+        for (name, value) in crate::alias::all() {
+            println!("alias {name}='{value}'");
+        }
+        return 0;
+    }
+    let mut status = 0;
+    for arg in &argv[1..] {
+        match arg.split_once('=') {
+            Some((name, value)) => crate::alias::set(name, value),
+            None => match crate::alias::get(arg) {
+                Some(value) => println!("alias {arg}='{value}'"),
+                None => {
+                    eprintln!("alias: {arg}: not found");
+                    status = 1;
+                }
+            },
+        }
+    }
+    status
+}
+
+/// `unalias NAME...` / `unalias -a` (remove all).
+fn unalias_cmd(argv: &[String]) -> i32 {
+    if argv.get(1).map(String::as_str) == Some("-a") {
+        crate::alias::unset_all();
+        return 0;
+    }
+    let mut status = 0;
+    for name in &argv[1..] {
+        if !crate::alias::unset(name) {
+            eprintln!("unalias: {name}: not found");
+            status = 1;
+        }
+    }
+    status
+}
+
+/// `set -e` / `set +e` — errexit: a failing command exits the shell (see
+/// `exec::exec_list_impl`). Other flags aren't implemented yet; naming one is
+/// an error rather than a silently-ignored no-op.
+fn set_cmd(argv: &[String]) -> i32 {
+    let mut status = 0;
+    for arg in &argv[1..] {
+        match arg.as_str() {
+            "-e" => crate::vars::set_errexit(true),
+            "+e" => crate::vars::set_errexit(false),
+            other => {
+                eprintln!("set: {other}: not supported");
+                status = 1;
+            }
+        }
+    }
+    status
+}
+
+/// `trap` (list) / `trap 'command' NAME...` (register) / `trap - NAME...`
+/// (reset to default). Only `EXIT` and `INT` are ever fired (see `trap.rs`).
+fn trap_cmd(argv: &[String]) -> i32 {
+    if argv.len() == 1 {
+        for (name, command) in crate::trap::all() {
+            println!("trap -- '{command}' {name}");
+        }
+        return 0;
+    }
+    let command = &argv[1];
+    if command == "-" {
+        for name in &argv[2..] {
+            crate::trap::unset(name);
+        }
+        return 0;
+    }
+    for name in &argv[2..] {
+        crate::trap::set(name, command);
+    }
+    0
 }
 
 #[cfg(test)]

@@ -221,6 +221,11 @@ pub fn reap_background() {
 
 // ---- builtins: jobs / fg / bg ------------------------------------------------
 
+/// Names dispatched by `builtin`, for `builtins::is_builtin`.
+pub(crate) fn is_builtin(name: &str) -> bool {
+    matches!(name, "jobs" | "fg" | "bg" | "kill")
+}
+
 /// Dispatch the job-control builtins. Returns `Some(code)` if handled.
 pub fn builtin(argv: &[String]) -> Option<i32> {
     match argv.first().map(String::as_str)? {

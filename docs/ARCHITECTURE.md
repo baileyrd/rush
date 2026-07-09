@@ -255,9 +255,21 @@ Sequences a `CommandList` and turns each pipeline into running processes:
 - `capture_list` runs every job in the foreground with a plain spawn-and-wait
   and concatenates stdout — the engine behind `$(...)` (the `&` marker is
   ignored inside a substitution).
-- **Single-command fast path:** if a pipeline is one command, try
-  `builtins::try_run` first so `cd`/`exit`/`jobs` affect the shell process
-  (skipped when capturing, so substitutions see external commands).
+- **Single-command fast path:** if a pipeline is one command naming a builtin
+  (`builtins::is_builtin`), it runs via `run_builtin_foreground` so `cd`/
+  `exit`/`jobs` affect the shell process (skipped when capturing, so
+  substitutions see external commands). Builtins write via `println!`/
+  `eprintln!` straight to the process's real stdio, so a redirect on one
+  (`echo hi > f`) can't be handed to a child the way `build_stage` hands
+  redirects to an external command's `Command`; instead, on Unix,
+  `redirect_builtin_stdio` temporarily `dup2`s the shell's own fd 0/1/2 to
+  match, running the builtin, then restores the originals (`StdioGuard`'s
+  `Drop`, so a redirect that fails partway through still restores whatever it
+  already touched). Off Unix, a builtin's redirects are silently ignored — no
+  raw `dup2` equivalent in play (see the Windows note above). This only
+  covers a builtin as the *sole* command of a pipeline — one in the middle of
+  a multi-stage pipe (`echo hi | cd`) is still the pre-existing punt: rush
+  tries to exec it as an external program and fails.
 - `build_stage` constructs one stage's `std::process::Command` and stdio. It
   resolves fd 0/1/2 to `Sink`s (inherit / pipe / file), applying redirects in
   source order — so `> f 2>&1` sends both to `f` (the dup `try_clone`s the file

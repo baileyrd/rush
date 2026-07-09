@@ -308,13 +308,13 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     }
 
     if pipeline.commands.len() == 1 {
-        let argv = &pipeline.commands[0].argv;
+        let cmd = &pipeline.commands[0];
         // A defined function shadows external commands (but not builtins).
-        if argv.first().is_some_and(|name| crate::func::exists(name)) {
-            return call_function(argv);
+        if cmd.argv.first().is_some_and(|name| crate::func::exists(name)) {
+            return call_function(&cmd.argv);
         }
-        if let Some(code) = builtins::try_run(argv) {
-            return Ok(code);
+        if cmd.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
+            return run_builtin_foreground(cmd);
         }
     }
 
@@ -325,6 +325,113 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
     #[cfg(not(unix))]
     {
         run(&pipeline, false).map(|(status, _)| status)
+    }
+}
+
+/// Run a builtin as the shell's sole foreground command, honoring any
+/// redirects attached to it (`echo hi > f`, `pwd 2>e`, `cd < f`, …). Builtins
+/// write via `println!`/`eprintln!` straight to the process's real stdio, so
+/// unlike an external command (whose redirects `build_stage` wires into a
+/// *child's* fds) a builtin's redirects have to be applied to the shell's own
+/// fds — temporarily, for the duration of the call.
+fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
+    #[cfg(unix)]
+    {
+        let _guard = redirect_builtin_stdio(&cmd.redirects)?;
+        Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
+    }
+    #[cfg(not(unix))]
+    {
+        // No raw `dup2` equivalent in play here, so a builtin's redirects are
+        // silently ignored on this platform (see docs/ARCHITECTURE.md).
+        Ok(builtins::try_run(&cmd.argv).unwrap_or(1))
+    }
+}
+
+/// Temporarily redirect the shell's own fd 0/1/2 to match `redirects`,
+/// restoring the originals when the returned guard drops. Unix only: needs a
+/// real `dup`/`dup2` to save and restore descriptors that outlive this call.
+#[cfg(unix)]
+fn redirect_builtin_stdio(redirects: &[Redirect]) -> Result<StdioGuard, String> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut guard = StdioGuard { saved: Vec::new() };
+
+    // Same fd-0/2/else-is-stdout approximation `build_stage` uses.
+    let target_fd = |fd: u32| -> i32 {
+        match fd {
+            0 => 0,
+            2 => 2,
+            _ => 1,
+        }
+    };
+    let redirect_to = |guard: &mut StdioGuard, target: i32, source: &File| -> Result<(), String> {
+        if !guard.saved.iter().any(|(fd, _)| *fd == target) {
+            let saved = unsafe { libc::dup(target) };
+            if saved == -1 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            guard.saved.push((target, saved));
+        }
+        if unsafe { libc::dup2(source.as_raw_fd(), target) } == -1 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    };
+
+    for r in redirects {
+        match r {
+            Redirect::File { fd, file, mode } => {
+                let f = match mode {
+                    RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                    RedirMode::Write | RedirMode::Append => open_write(file, *mode == RedirMode::Append)?,
+                };
+                redirect_to(&mut guard, target_fd(*fd), &f)?;
+            }
+            Redirect::Both { file, append } => {
+                let f = open_write(file, *append)?;
+                redirect_to(&mut guard, 1, &f)?;
+                redirect_to(&mut guard, 2, &f)?;
+            }
+            Redirect::Dup { fd, target } => {
+                // `target` is already live on fd 0/1/2 (possibly redirected by
+                // an earlier entry in this same list) — dup straight from it.
+                let dst = target_fd(*fd);
+                let src = target_fd(*target);
+                if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
+                    let saved = unsafe { libc::dup(dst) };
+                    if saved == -1 {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
+                    guard.saved.push((dst, saved));
+                }
+                if unsafe { libc::dup2(src, dst) } == -1 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+        }
+    }
+
+    Ok(guard)
+}
+
+/// Restores the shell's original fd 0/1/2 (saved by `redirect_builtin_stdio`)
+/// when dropped — including on an early return via `?`, so a redirect that
+/// fails partway through never leaves the shell talking to the wrong fd.
+#[cfg(unix)]
+struct StdioGuard {
+    saved: Vec<(i32, i32)>,
+}
+
+#[cfg(unix)]
+impl Drop for StdioGuard {
+    fn drop(&mut self) {
+        for (fd, saved) in self.saved.drain(..) {
+            unsafe {
+                libc::dup2(saved, fd);
+                libc::close(saved);
+            }
+        }
     }
 }
 

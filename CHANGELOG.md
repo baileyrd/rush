@@ -89,3 +89,14 @@ git history for the commit-by-commit narrative.
   inside `(…)` are genuinely isolated and can't leak back to the parent shell.
   The old snapshot/restore approximation remains as the non-Unix fallback
   (still can't contain an `exit`).
+
+### Builtin redirects (found during the G10 review)
+- Redirects on a builtin (`echo hi > f`, `pwd 2>e`, `cd < f`, …) used to be
+  silently ignored — builtins write via `println!`/`eprintln!` straight to
+  the process's real stdio, bypassing the shell's fd resolution entirely.
+  Fixed on Unix: the shell's own fd 0/1/2 are temporarily `dup2`'d to match
+  before running the builtin, then restored (even if a redirect fails partway
+  through). Off Unix, this remains a known limitation (no raw `dup2`
+  equivalent). Only covers a builtin as the sole command of a pipeline; one in
+  the middle of a multi-stage pipe (`echo hi | cd`) is unaffected — still the
+  pre-existing punt (rush tries to exec it as an external program).

@@ -17,6 +17,7 @@
 //! spawn-and-wait on other platforms.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::process::CommandExt;
@@ -53,6 +54,13 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
+    // Every pid this shell has itself reaped via `waitpid`, with its exit
+    // code — so `wait` (C13) can still report a background job's status
+    // even after something else (background polling, an earlier `wait`)
+    // already reaped it; entries are never removed, matching bash's own
+    // "waiting twice on the same pid still works" behavior (verified
+    // against it directly).
+    static REAPED: RefCell<HashMap<pid_t, i32>> = RefCell::new(HashMap::new());
 }
 
 /// The job-control signals the shell ignores and children reset to default.
@@ -256,7 +264,15 @@ pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
     let (pgid, pids) = spawn_pipeline(pipeline)?;
     let cmd = crate::exec::pipeline_text(pipeline);
     let id = add_job(pgid, &pids, &cmd, JobState::Running);
-    println!("[{id}] {pgid}");
+    // `$!` is the *last* stage's own pid (verified against real bash
+    // directly), not the pgid — for a single-command background job
+    // they're the same pid anyway, since the leader is that one process.
+    crate::vars::set_last_bg_pid(*pids.last().expect("pipeline has at least one stage"));
+    // Only announced interactively — a non-interactive script (`bash -c`,
+    // a file) prints nothing here, matching real bash.
+    if job_control_enabled() {
+        println!("[{id}] {pgid}");
+    }
     Ok(())
 }
 
@@ -313,7 +329,7 @@ pub fn reap_background() {
 // ---- builtins: jobs / fg / bg ------------------------------------------------
 
 /// Names dispatched by `builtin`, for `builtins::is_builtin`/`all_names`.
-pub(crate) const NAMES: &[&str] = &["jobs", "fg", "bg", "kill"];
+pub(crate) const NAMES: &[&str] = &["jobs", "fg", "bg", "kill", "wait"];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
     NAMES.contains(&name)
@@ -326,8 +342,89 @@ pub fn builtin(argv: &[String]) -> Option<i32> {
         "fg" => Some(fg_cmd(argv)),
         "bg" => Some(bg_cmd(argv)),
         "kill" => Some(kill_cmd(argv)),
+        "wait" => Some(wait_cmd(argv)),
         _ => None,
     }
+}
+
+/// `wait [pid|%job ...]` — block until the given background jobs/pids (or,
+/// with none given, every one this shell knows about) finish. With no
+/// operands this always succeeds (status 0, POSIX's rule); with one or
+/// more, blocks on each in turn and reports the *last* one's own exit
+/// status. A pid/job already reaped — by an earlier `wait`, by `fg`, or by
+/// the interactive prompt's own background polling — still reports its
+/// remembered status (`REAPED`) rather than erroring.
+fn wait_cmd(argv: &[String]) -> i32 {
+    if argv.len() == 1 {
+        wait_all();
+        return 0;
+    }
+    let mut status = 0;
+    for target in &argv[1..] {
+        status = wait_one(target);
+    }
+    status
+}
+
+/// Block until every job this shell currently knows isn't finished has
+/// finished, silently (unlike `fg`, `wait` never takes the terminal or
+/// prints a completion notice — that's the interactive prompt's own job).
+fn wait_all() {
+    loop {
+        let pgid =
+            STATE.with(|s| s.borrow().jobs.iter().find(|j| j.state != JobState::Done).map(|j| j.pgid));
+        let Some(pgid) = pgid else { break };
+        wait_job_pgid(pgid);
+    }
+}
+
+/// Block until every pid in process group `pgid` has exited, recording each
+/// one's exit code and updating the job table as it goes — like
+/// `wait_pgid`, but doesn't stop early on a stop signal (`wait` isn't
+/// interactive job control) and returns nothing (callers look the exit
+/// code up from `REAPED` afterward, since the *pid* being waited on may
+/// differ from the pgid, e.g. `wait` on a specific pid within a piped job).
+fn wait_job_pgid(pgid: pid_t) {
+    loop {
+        let mut status: c_int = 0;
+        let wpid = unsafe { libc::waitpid(-pgid, &mut status, 0) };
+        if wpid <= 0 {
+            break; // ECHILD: nothing left in this group to reap
+        }
+        update_by_pid(wpid, status);
+    }
+}
+
+/// Wait for one `wait` operand — a `%job` spec or a bare pid — returning
+/// its exit status (or a `wait`-specific error status if it names nothing
+/// real).
+fn wait_one(target: &str) -> i32 {
+    if let Some(spec) = target.strip_prefix('%') {
+        let Some(pgid) = spec.parse::<usize>().ok().and_then(job_pgid) else {
+            eprintln!("wait: {target}: no such job");
+            return 127;
+        };
+        let last_pid =
+            STATE.with(|s| s.borrow().jobs.iter().find(|j| j.pgid == pgid).and_then(|j| j.pids.last().copied()));
+        wait_job_pgid(pgid);
+        return last_pid.and_then(|p| REAPED.with(|r| r.borrow().get(&p).copied())).unwrap_or(0);
+    }
+
+    let Ok(pid) = target.parse::<pid_t>() else {
+        eprintln!("wait: `{target}': not a pid or valid job spec");
+        return 1;
+    };
+    if let Some(code) = REAPED.with(|r| r.borrow().get(&pid).copied()) {
+        return code;
+    }
+    let mut status: c_int = 0;
+    let wpid = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if wpid <= 0 {
+        eprintln!("wait: pid {pid} is not a child of this shell");
+        return 127;
+    }
+    update_by_pid(wpid, status);
+    exit_code(status)
 }
 
 /// `kill [-SIG] %job|pid …` — signal a job (by `%n`) or process. The default
@@ -514,6 +611,9 @@ fn update_by_pid(wpid: pid_t, status: c_int) {
         } else {
             // Exited or signaled.
             job.live = job.live.saturating_sub(1);
+            REAPED.with(|r| {
+                r.borrow_mut().insert(wpid, exit_code(status));
+            });
             if job.live == 0 {
                 job.state = JobState::Done;
             }

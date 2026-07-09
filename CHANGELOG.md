@@ -385,3 +385,31 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   documented narrowing, since rush functions store a parsed `CommandList`,
   not original source text. All other cases verified against real bash
   directly.
+
+### `wait` builtin, and `$!` (C13)
+- `wait [pid|%job ...]` (`job::wait_cmd`/`wait_all`/`wait_job_pgid`/
+  `wait_one`): with no operands, blocks until every job this shell knows
+  isn't finished has finished (always succeeding, POSIX's rule); with one
+  or more `pid`/`%job` operands, blocks on each in turn and reports the
+  *last* one's own exit status. A pid/job already reaped — by an earlier
+  `wait`, by `fg`, or by the interactive prompt's own background polling —
+  still reports its remembered status rather than erroring, via a new
+  `REAPED: HashMap<pid_t, i32>` that `update_by_pid` populates whenever a
+  tracked pid actually exits (a real bash quirk verified directly: waiting
+  twice on the same pid still works).
+- Landing this exposed that `$!` (the most recently backgrounded job's pid)
+  was entirely unimplemented — a real prerequisite, since `p=$!; wait $p`
+  is the standard way to capture a specific background job to wait on
+  later. Added (`vars::last_bg_pid`/`set_last_bg_pid`, wired into
+  `job::run_background` and `expand.rs`'s `$`-scanner): `$!` is the *last*
+  stage's own pid (not the pgid) for a piped background job, matching bash
+  exactly; unset until something's been backgrounded.
+- Also fixed along the way: `run_background`'s `[id] pgid` announcement
+  used to print unconditionally, but real bash only shows it interactively
+  — a non-interactive script now prints nothing there either, gated on the
+  same `job_control_enabled` flag that already tracked exactly this
+  distinction.
+- Found but out of scope here, and not specific to `$!`: backslash-escaping
+  a `$` inside double quotes (`"\$?"`, `"\$FOO"`) doesn't produce a literal
+  `$` the way POSIX requires — the backslash is dropped and the parameter
+  still expands. Tracked separately as C35 in `docs/CAPABILITY_GAPS.md`.

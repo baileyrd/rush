@@ -472,6 +472,14 @@ fn expand_dollars(text: &str) -> Result<String, String> {
                 chars.next();
                 out.push_str(&crate::vars::last_status().to_string());
             }
+            // `$!` — the most recently backgrounded job's pid; empty if
+            // nothing has been backgrounded yet.
+            Some('!') => {
+                chars.next();
+                if let Some(pid) = crate::vars::last_bg_pid() {
+                    out.push_str(&pid.to_string());
+                }
+            }
             // `$#` — number of positional parameters.
             Some('#') => {
                 chars.next();

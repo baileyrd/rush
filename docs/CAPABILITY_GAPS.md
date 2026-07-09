@@ -19,9 +19,10 @@ the cross-shell context that shows why they matter, not newly discovered.
 **Bottom line:** rush's actual scope today is closest to **dash** — a solid,
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top. Tier I (correctness/POSIX-risk) is now fully closed; the remaining
-gap is Tier II's missing standard builtins — `read` above all, since nothing
-else in that tier blocks as much everyday scripting on its own.
+on top. Tier I's original 6 items are done; a 7th (C35, a real quoting bug)
+turned up while closing out Tier II, which is now more than half done —
+`local`, `getopts`, `command`/`type`/`hash`, and `wait` (with its own
+prerequisite, `$!`) all landed alongside `read`/`printf`/`shift`.
 
 ---
 
@@ -38,7 +39,7 @@ applicable to that shell's own model.
 | `#`/`##`/`%`/`%%` param. expansion | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `read` / `printf` / `shift` / `getopts` | ✅† | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | `local` function-scoped vars | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `wait` / `disown` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `wait` / `disown` | 🟡‡ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -55,12 +56,15 @@ among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 `shift`/`getopts` are full.
 
+‡ `wait` (`pid`/`%job`, or none) is done, along with its `$!` prerequisite;
+`disown` remains missing.
+
 ---
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11 (6 done)
+- **Tier I — correctness/POSIX risk:** 7 (6 done)
+- **Tier II — missing standard builtins:** 11 (7 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -161,6 +165,17 @@ binds tighter than `-o` (`1 = 2 -o 1 = 1 -a 1 = 2` groups as `(1 = 2) -o ((1
 trailing `-a`/`-o` chain (verified against real bash directly). All prior
 single-expression forms (`-z`, `a = b`, `! EXPR`, a lone string) are
 unaffected.
+
+### C35 — Backslash-escaped `$` inside double quotes isn't literal (tracked)
+POSIX-mandated; present in dash/bash/ksh/zsh: inside `"..."`, `\$` shall
+produce a literal `$` (suppressing expansion of whatever follows), same as
+`\"`/`\\` are already handled. Rush currently drops the backslash but still
+expands the parameter anyway — `echo "\$?"` prints the exit status instead
+of the literal text `$?`, and `echo "\$FOO"` prints `$FOO`'s *value*
+instead of the literal text `$FOO`. Silent wrongness, not an error, so it
+fits this tier; found while verifying C13's `$!` against real bash (not
+specific to `$!` — reproduces for `$?`, a plain `$FOO`, everything).
+**Effort: S.**
 
 ---
 
@@ -306,11 +321,39 @@ nothing to actually hash): `-r` and a bare call are accepted no-ops,
 `hash name` at least reports via exit status whether it currently
 resolves. All verified against real bash directly.
 
-### C13 — `wait [pid|%job]`
+### C13 — `wait [pid|%job]` ✅ done
 A surprising gap given how much job-control machinery already exists (`&`,
 `fg`, `bg`, `jobs`, `kill`) — `job.rs` already tracks pids/pgids, so this
 mostly needs to expose `waitpid` on a selected job. `cmd & ; wait` is the
 entire point of backgrounding something you need later. **Effort: S.**
+
+Implemented (`job::wait_cmd`/`wait_all`/`wait_job_pgid`/`wait_one`): with no
+operands, blocks until every job this shell knows isn't finished has
+finished (always succeeding, POSIX's rule); with one or more `pid`/`%job`
+operands, blocks on each in turn and reports the *last* one's own exit
+status. A pid/job already reaped — by an earlier `wait`, by `fg`, or by the
+interactive prompt's own background polling — still reports its remembered
+status rather than erroring, via a new `REAPED: HashMap<pid_t, i32>` that
+`update_by_pid` populates whenever a tracked pid actually exits (verified
+against a real bash quirk: waiting twice on the same pid still works).
+
+Landing this exposed `$!` (the most recently backgrounded job's pid) was
+entirely unimplemented — a real prerequisite, since `p=$!; wait $p` is the
+standard way to capture a specific background job to wait on later. Added
+(`vars::last_bg_pid`/`set_last_bg_pid`, wired into `job::run_background`
+and `expand.rs`'s `$`-scanner): `$!` is the *last* stage's own pid (not the
+pgid) for a piped background job, matching bash exactly; unset until
+something's been backgrounded. Also fixed along the way: `run_background`'s
+`[id] pgid` announcement was printed unconditionally, but real bash (and
+rush's own `job_control_enabled` flag, already meant to track exactly this)
+only shows it interactively — a non-interactive script now prints nothing
+there either, matching bash.
+
+Found but **out of scope** here: backslash-escaping a `$` inside double
+quotes (`"\$?"`, `"\$FOO"`) doesn't produce a literal `$` in rush the way
+POSIX requires — the backslash is dropped and the parameter still expands.
+Pre-existing, general (not specific to `$!`), and unrelated to job control;
+worth its own future item.
 
 ### C14 — `source` / `.`
 Rush already has the machinery — it sources `~/.rushrc` internally via its

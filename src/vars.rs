@@ -38,7 +38,18 @@ thread_local! {
     // The exit status of the most recent command substitution performed
     // while expanding a command's words, if any (see `reset_last_subst_status`).
     static LAST_SUBST_STATUS: RefCell<Option<i32>> = const { RefCell::new(None) };
+    // One frame per active function call, pushed/popped by
+    // `push_local_frame`/`pop_local_frame`. Each frame lists the names
+    // `local` has shadowed *in that call*, alongside what they were
+    // beforehand (`None` meaning "didn't exist") — see `declare_local`.
+    static LOCAL_STACK: RefCell<Vec<LocalFrame>> = const { RefCell::new(Vec::new()) };
 }
+
+/// A prior value (`value`, `exported`) to restore when a `local`-shadowed
+/// name's function call returns, or `None` if the name didn't exist before.
+type PriorValue = Option<(String, bool)>;
+/// One function call's set of `local`-shadowed names, in declaration order.
+type LocalFrame = Vec<(String, PriorValue)>;
 
 pub fn set_errexit(on: bool) {
     ERREXIT.with(|e| *e.borrow_mut() = on);
@@ -186,6 +197,69 @@ pub fn export(name: &str) {
     });
 }
 
+/// Push a fresh, empty local-variable frame — called when entering a
+/// function call (`exec::call_function`).
+pub fn push_local_frame() {
+    LOCAL_STACK.with(|s| s.borrow_mut().push(Vec::new()));
+}
+
+/// Pop the current function call's local-variable frame, restoring each name
+/// `local` shadowed in it to whatever it was beforehand — or removing it, if
+/// it didn't exist before the call. Nesting falls out naturally: an inner
+/// call's frame captures whatever the *enclosing* call's own locals had
+/// already shadowed things to, so popping the inner frame restores the
+/// outer call's local value, not the top-level one (verified against real
+/// bash directly).
+pub fn pop_local_frame() {
+    let Some(frame) = LOCAL_STACK.with(|s| s.borrow_mut().pop()) else {
+        return;
+    };
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        for (name, prior) in frame {
+            match prior {
+                Some((value, exported)) => {
+                    m.insert(name, Var { value, exported });
+                }
+                None => {
+                    m.remove(&name);
+                }
+            }
+        }
+    });
+}
+
+/// `local [name[=value]]...`: shadow `name` with a fresh binding for the
+/// current function call, restored automatically (see `pop_local_frame`)
+/// when it returns. `value: None` (a bare `local name`) leaves `name`
+/// genuinely unset within the function, matching bash — not merely set to
+/// `""` (`${name-default}` inside the function sees it as unset). Returns
+/// `false` if there's no active function call to declare into (the `local`
+/// builtin reports that as a usage error); a name already made local earlier
+/// in *this same* call keeps its originally-captured prior value, so a
+/// second `local x` in one call still restores to the pre-call value, not
+/// the first `local`'s.
+pub fn declare_local(name: &str, value: Option<&str>) -> bool {
+    let declared = LOCAL_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let Some(frame) = stack.last_mut() else {
+            return false;
+        };
+        if !frame.iter().any(|(n, _)| n == name) {
+            let prior = VARS.with(|v| v.borrow().get(name).map(|x| (x.value.clone(), x.exported)));
+            frame.push((name.to_string(), prior));
+        }
+        true
+    });
+    if declared {
+        match value {
+            Some(v) => set(name, v),
+            None => unset(name),
+        }
+    }
+    declared
+}
+
 /// A snapshot of all variables, for isolating a subshell on platforms without
 /// `fork` (see `exec::run_compound`'s `Compound::Subshell` arm) — Unix forks a
 /// real child instead, so these are unused there.
@@ -264,5 +338,67 @@ mod tests {
         assert!(!shift(1)); // now empty: even 1 is too many
 
         set_args("prog".to_string(), Vec::new());
+    }
+
+    #[test]
+    fn local_outside_a_function_is_rejected() {
+        assert!(!declare_local("RUSH_LOCAL_TOP", Some("1")));
+        // Rejected: must not fall through to setting it as a plain global.
+        assert_eq!(get("RUSH_LOCAL_TOP"), None);
+    }
+
+    #[test]
+    fn local_shadows_and_restores_on_frame_pop() {
+        set("RUSH_LOCAL_X", "outer");
+
+        push_local_frame();
+        assert!(declare_local("RUSH_LOCAL_X", Some("inner")));
+        assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("inner"));
+
+        // A bare `local name` (no `=value`) leaves it genuinely unset, not
+        // merely set to `""`.
+        assert!(declare_local("RUSH_LOCAL_Y", None));
+        assert_eq!(get("RUSH_LOCAL_Y"), None);
+
+        // A second `local` for the same name in the *same* frame doesn't
+        // re-capture — it must still restore to the pre-frame value.
+        assert!(declare_local("RUSH_LOCAL_X", Some("inner2")));
+        assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("inner2"));
+
+        pop_local_frame();
+        assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("outer"));
+
+        unset("RUSH_LOCAL_X");
+    }
+
+    #[test]
+    fn nested_frames_restore_to_the_enclosing_frames_own_value() {
+        set("RUSH_LOCAL_N", "top");
+
+        push_local_frame();
+        declare_local("RUSH_LOCAL_N", Some("outer_call"));
+
+        push_local_frame();
+        declare_local("RUSH_LOCAL_N", Some("inner_call"));
+        assert_eq!(get("RUSH_LOCAL_N").as_deref(), Some("inner_call"));
+        pop_local_frame();
+
+        // Popping the inner call's frame restores the *outer* call's own
+        // local value, not the top-level one — matches real bash.
+        assert_eq!(get("RUSH_LOCAL_N").as_deref(), Some("outer_call"));
+        pop_local_frame();
+        assert_eq!(get("RUSH_LOCAL_N").as_deref(), Some("top"));
+
+        unset("RUSH_LOCAL_N");
+    }
+
+    #[test]
+    fn local_of_a_name_that_never_existed_is_removed_on_pop() {
+        unset("RUSH_LOCAL_NEW");
+        push_local_frame();
+        declare_local("RUSH_LOCAL_NEW", Some("value"));
+        assert_eq!(get("RUSH_LOCAL_NEW").as_deref(), Some("value"));
+        pop_local_frame();
+        assert_eq!(get("RUSH_LOCAL_NEW"), None);
     }
 }

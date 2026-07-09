@@ -37,7 +37,7 @@ applicable to that shell's own model.
 | Real pipes / job control / forked subshells | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `#`/`##`/`%`/`%%` param. expansion | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `read` / `printf` / `shift` / `getopts` | 🟡† | ✅ | ✅ | ✅ | ✅ | 🟡 |
-| `local` function-scoped vars | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `local` function-scoped vars | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `wait` / `disown` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -59,7 +59,7 @@ and `shift` are done; `getopts` remains missing.
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11 (3 done)
+- **Tier II — missing standard builtins:** 11 (4 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -243,12 +243,24 @@ verified directly: that's the everyday way an argument-parsing loop notices
 it's out of arguments, so bash doesn't warn about it the way it does for a
 genuinely malformed count.
 
-### C10 — `local` (function-scoped variables)
+### C10 — `local` (function-scoped variables) ✅ done
 Near-universal extension (dash, bash, ksh, zsh); fish scopes by default.
 Right now every rush function shares the caller's entire variable
 namespace — a function's own `i=0` silently clobbers the caller's `i`.
 Functions already work; using them safely for anything nontrivial doesn't.
 **Effort: M.**
+
+Implemented (`vars::push_local_frame`/`pop_local_frame`/`declare_local`,
+`builtins::local_cmd`): each function call gets a stack frame recording,
+for every name `local` shadows *in that call*, whatever the name was before
+(or its absence) — restored automatically when the call returns
+(`exec::call_function`), so nesting falls out for free: an inner call's own
+`local x` shadows further and restores to the *enclosing* call's local
+value on return, not the top-level one (verified against real bash
+directly). A bare `local x` (no `=value`) leaves `x` genuinely unset within
+the function — `${x-default}` inside it sees it as unset, not merely set to
+`""` — matching bash exactly. `local` outside any function call is a usage
+error and does not fall through to setting a plain global variable.
 
 ### C11 — `getopts`
 The portable way to parse `-a`, `-b value`, combined short flags. Without

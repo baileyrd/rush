@@ -327,6 +327,47 @@ fn command_type_and_hash_builtins() {
     assert_eq!(rush("hash rush_nonexistent_cmd_xyz; echo $?").0, "1\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn wait_builtin_and_last_bg_pid() {
+    // `$!` is unset until something's been backgrounded.
+    assert_eq!(rush("x=\"[$!]\"; echo \"$x\"").0, "[]\n");
+
+    // `wait $pid` reports that specific background job's own exit status.
+    assert_eq!(rush("(exit 5) & p=$!; wait $p; echo \"status=$?\"").0, "status=5\n");
+
+    // `wait %job` reports the job's (last-stage's) exit status.
+    assert_eq!(rush("{ sleep 0.1; exit 7; } & wait %1; echo \"status=$?\"").0, "status=7\n");
+
+    // Multiple operands: waits on each in turn, reporting the *last* one's
+    // status.
+    assert_eq!(
+        rush("(exit 3) & p1=$!; (exit 9) & p2=$!; wait $p1 $p2; echo \"status=$?\"").0,
+        "status=9\n"
+    );
+
+    // `wait` with no operands always succeeds, even with nothing backgrounded.
+    assert_eq!(rush("wait; echo \"status=$?\"").0, "status=0\n");
+    assert_eq!(
+        rush("sleep 0.1 & sleep 0.05 & wait; echo \"status=$?\"").0,
+        "status=0\n"
+    );
+
+    // Waiting on the *same* already-reaped pid a second time still reports
+    // its remembered status, matching a real bash quirk verified directly.
+    assert_eq!(
+        rush("(exit 2) & p=$!; wait $p; wait $p; echo \"status=$?\"").0,
+        "status=2\n"
+    );
+
+    // Error cases: an unknown pid/job, and a malformed operand.
+    let (out, status) = rush("wait 99999; echo \"status=$?\"");
+    assert_eq!(out, "status=127\n");
+    assert_eq!(status, 0); // the script's own last command (echo) still succeeds
+    assert_eq!(rush("wait %5; echo \"status=$?\"").0, "status=127\n");
+    assert_eq!(rush("wait abc; echo \"status=$?\"").0, "status=1\n");
+}
+
 #[test]
 fn getopts_builtin() {
     // Combined short flags (`-abc` = `-a -b -c`): `$OPTIND` stays put while

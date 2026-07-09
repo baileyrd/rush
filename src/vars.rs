@@ -47,6 +47,9 @@ thread_local! {
     // `(optind, char_pos)`. Not a shell-visible variable (bash doesn't
     // expose one either); see `getopts_char_pos`.
     static GETOPTS_POS: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
+    // `$!`: the most recently backgrounded job's own last-stage pid (see
+    // `set_last_bg_pid`).
+    static LAST_BG_PID: RefCell<Option<i32>> = const { RefCell::new(None) };
 }
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
@@ -175,6 +178,17 @@ pub fn last_status() -> i32 {
 
 pub fn set_last_status(code: i32) {
     LAST_STATUS.with(|s| *s.borrow_mut() = code);
+}
+
+/// `$!` — the most recently backgrounded job's own last-stage pid, or
+/// unset if nothing has been backgrounded yet this session.
+pub fn last_bg_pid() -> Option<i32> {
+    LAST_BG_PID.with(|p| *p.borrow())
+}
+
+/// Record `$!` when a job is backgrounded (`job::run_background`).
+pub fn set_last_bg_pid(pid: i32) {
+    LAST_BG_PID.with(|p| *p.borrow_mut() = Some(pid));
 }
 
 /// Look up a shell variable's value (not the environment — see `expand`).

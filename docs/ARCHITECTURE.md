@@ -230,12 +230,21 @@ Lowers a `RawPipeline` into an `exec::Pipeline` of concrete strings:
   trimmed.
 - **Arithmetic:** `$((expr))` is evaluated by `arith::eval` and inlined as its
   integer result (`$(` vs `$((` is decided by a second peek).
-- **Word-splitting:** whitespace inside an *unquoted* expansion splits the word
-  into fields (`x="a b"; echo $x` → two args). A `Splitter` assembles the word's
+- **Word-splitting:** `$IFS` inside an *unquoted* expansion splits the word into
+  fields (`x="a b"; echo $x` → two args). A `Splitter` assembles the word's
   parts into fields: quoted/literal text is added unsplit, unquoted-expansion
-  text splits on whitespace runs. Because the lexer already split on literal
-  whitespace, any whitespace left in an unquoted part must have come from an
-  expansion — so this needs no IFS bookkeeping.
+  text splits on `$IFS` characters (`Ifs`, computed once per word). Unset IFS
+  defaults to space/tab/newline (and since the lexer already split on literal
+  whitespace, any whitespace left in an unquoted part in that default case
+  must have come from an expansion); an explicit empty `IFS=` disables
+  splitting entirely. A custom IFS value's space/tab/newline characters
+  collapse like the default (no empty fields from a run); every other
+  character is a "non-whitespace" delimiter where each occurrence opens a
+  field on its own, even empty (`IFS=,` on `a,,b` is three fields) — except a
+  single trailing one at the very end of the text, which produces no trailing
+  empty field (matching bash's own asymmetry there). `$*`/`${*}` join
+  positional parameters with `$IFS`'s first character instead of a hardcoded
+  space; `$@` is unaffected.
 - **Globbing:** each field carries a glob *pattern* alongside its plain text,
   escaping metacharacters from quoted/literal parts so only unquoted `*?[` stay
   active. A field that matches files (via `glob::glob`) is replaced by the

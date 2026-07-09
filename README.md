@@ -44,7 +44,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring; a compound (`if`/`while`/`(...)`/…) can be one stage among several on Unix (forks) |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `getopts`, `command`, `type`, `hash`, `.`/`source` (+ `jobs`/`fg`/`bg`/`kill`/`wait` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait` on Unix) |
 | Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
 | `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions |
 | `trap` | ✅ | `EXIT` (every exit path) and `INT` (Ctrl-C at an idle prompt) |
@@ -108,7 +108,7 @@ commands only and `&` is rejected.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture, data-flow
   diagrams, module reference, and roadmap.
 - **[docs/CAPABILITY_GAPS.md](docs/CAPABILITY_GAPS.md)** — capability
-  assessment against dash/bash/ksh93/zsh/fish: 36 ranked gaps, by consequence.
+  assessment against dash/bash/ksh93/zsh/fish: 37 ranked gaps, by consequence.
 - **[CHANGELOG.md](CHANGELOG.md)** — what's been built, by area.
 
 ## Project Layout

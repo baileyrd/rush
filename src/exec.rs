@@ -387,6 +387,22 @@ fn resolve_source_path(name: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&path).map(|dir| dir.join(name)).find(|c| c.is_file())
 }
 
+/// `eval arg...` — join `args` with a single space, parse the result, and run
+/// it in the *current* shell, exactly as if it had been typed inline (no
+/// scope of any kind: unlike `source_file`, there's no filename/PATH search,
+/// no positional-parameter swap, and a `return`/`break`/`continue` inside is
+/// *not* consumed — it propagates straight to the enclosing function/loop,
+/// verified directly against real bash). Empty input (no args, or all-empty
+/// args) is a no-op that succeeds.
+pub fn eval_cmd(args: &[String]) -> Result<i32, String> {
+    let src = args.join(" ");
+    if src.trim().is_empty() {
+        return Ok(0);
+    }
+    let list = crate::parser::parse(&src).map_err(|e| e.to_string())?;
+    exec_list(&list)
+}
+
 /// After running a loop body, consume one level of any pending `break`/
 /// `continue`. Returns `true` if this loop should stop iterating.
 fn loop_step() -> Result<bool, String> {

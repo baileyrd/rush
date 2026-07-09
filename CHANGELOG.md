@@ -439,3 +439,21 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   expansion. The same root-cause bug still affects `command -v`/`type`/
   `hash` (C12, already shipped) — tracked separately as C36 in
   `docs/CAPABILITY_GAPS.md`.
+
+### `eval` builtin (C15)
+- `exec::eval_cmd`/`builtins::eval_cmd`: joins its arguments with a single
+  space, parses the result, and runs it in the *current* shell — unlike
+  `source` (C14), `eval` establishes no scope at all. No filename/PATH
+  search, no positional-parameter swap, and — verified directly against
+  real bash — a `return`/`break`/`continue` inside the evaluated text is
+  *not* consumed; it propagates straight to whichever function/loop
+  actually encloses the `eval` call, exactly as if the text had been typed
+  inline.
+- No arguments (or all-empty ones) is a no-op that succeeds; a parse error
+  fails with status 2, matching rush's own existing convention for a
+  top-level syntax error.
+- Found but out of scope here, and not specific to `eval`: running any
+  unknown command name anywhere in a rush script — not just inside `eval`
+  — prints a raw OS spawn error and aborts the *entire script*, instead of
+  reporting exit status 127 and continuing like every other POSIX shell.
+  Tracked separately as C37 in `docs/CAPABILITY_GAPS.md`.

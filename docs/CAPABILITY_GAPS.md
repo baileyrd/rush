@@ -19,18 +19,19 @@ the cross-shell context that shows why they matter, not newly discovered.
 **Bottom line:** rush's actual scope today is closest to **dash** — a solid,
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top. Tier I's original 6 items are done; a 7th (C35, a real quoting bug)
-turned up while closing out Tier II, which is now more than two-thirds
-done — `local`, `getopts`, `command`/`type`/`hash`, `wait` (with its own
-prerequisite, `$!`), and `source`/`.` all landed alongside
-`read`/`printf`/`shift`. A follow-on (C36, a PATH-visibility bug in
-`command`/`type`/`hash`) turned up while closing out `source`.
+on top. Tier I's original 6 items are done; two more (C35, a real quoting
+bug, and C37, an unknown-command-aborts-the-script bug) turned up while
+closing out Tier II, which is now three-quarters done — `local`, `getopts`,
+`command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
+`source`/`.`, and `eval` all landed alongside `read`/`printf`/`shift`. A
+follow-on (C36, a PATH-visibility bug in `command`/`type`/`hash`) turned up
+while closing out `source`; C37 turned up while closing out `eval`.
 
 ---
 
 ## Comparison matrix
 
-A cross-section, not the full 36 below — enough to place rush relative to a
+A cross-section, not the full 37 below — enough to place rush relative to a
 strict POSIX shell (dash), the bash family, and the interactive-first shells
 (zsh, fish). ✅ full · 🟡 partial/simplified · ❌ not implemented · — not
 applicable to that shell's own model.
@@ -43,6 +44,7 @@ applicable to that shell's own model.
 | `local` function-scoped vars | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `wait` / `disown` | 🟡‡ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `source` / `.` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `eval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -66,8 +68,8 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 7 (6 done)
-- **Tier II — missing standard builtins:** 12 (8 done)
+- **Tier I — correctness/POSIX risk:** 8 (6 done)
+- **Tier II — missing standard builtins:** 12 (9 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -179,6 +181,21 @@ instead of the literal text `$FOO`. Silent wrongness, not an error, so it
 fits this tier; found while verifying C13's `$!` against real bash (not
 specific to `$!` — reproduces for `$?`, a plain `$FOO`, everything).
 **Effort: S.**
+
+### C37 — An unknown command name aborts the whole script instead of failing with status 127 (tracked)
+POSIX-mandated in every comparison shell here: running a command that
+doesn't resolve — a typo, something not on `$PATH` — prints an error to
+stderr (bash: `command not found`) and continues the script with `$?` set
+to 127. Rush instead prints the raw OS spawn error (`No such file or
+directory (os error 2)`) and **aborts the entire script right there** — an
+`echo` placed right after the bad command never even runs. Found while
+diffing `eval "nonexistent_cmd"` against bash (C15), but reproduces for any
+top-level mistyped command — not specific to `eval` at all, and arguably
+the highest-impact item in this tier, since it fires on the single most
+common shell-scripting mistake there is. **Effort: S** — `build_stage`'s
+spawn-failure path (`exec.rs`) needs to turn a not-found spawn error into
+an ordinary exit-127 result instead of the `Result::Err` it propagates
+today, matching how every other non-zero exit status is already handled.
 
 ---
 
@@ -403,11 +420,30 @@ any script that extends `PATH` before checking a command's availability.
 std::env::var("PATH").ok())`), applied at each of the two remaining call
 sites.
 
-### C15 — `eval`
+### C15 — `eval` ✅ done
 Needed for constructing and running commands dynamically. Rush's
 command-substitution path already re-parses and re-runs strings internally
-— `eval` would reuse that exact mechanism, exposed as a builtin.
-**Effort: S.**
+— `eval` reuses that exact mechanism, exposed as a builtin.
+
+Added `exec::eval_cmd`/`builtins::eval_cmd`: joins its arguments with a
+single space, parses the result, and runs it in the *current* shell —
+unlike `source` (C14), `eval` establishes no scope of any kind. There's no
+filename/PATH search and no positional-parameter swap, and — verified
+directly against real bash — a `return`/`break`/`continue` inside the
+evaluated text is *not* consumed; it propagates straight to whatever
+function/loop is actually enclosing the `eval` call, exactly as if the text
+had been typed inline. No arguments (or all-empty ones) is a no-op that
+succeeds; a parse error fails with status 2, matching rush's own existing
+convention for a top-level syntax error.
+
+Found but **out of scope** here, and not specific to `eval`: running any
+unknown command name anywhere in a rush script — not just inside `eval` —
+prints a raw OS error and *aborts the entire script* instead of reporting
+exit status 127 and continuing, the way every POSIX shell does. Discovered
+while diffing `eval "nonexistent_cmd"` against bash, but reproduces with a
+plain top-level typo too. Tracked separately as C37 — likely higher-impact
+than most of this tier, since it affects *any* mistyped command, not one
+particular feature.
 
 ### C16 — `exec`
 Two standard idioms currently impossible in rush: `exec cmd` (process

@@ -75,42 +75,113 @@ pub fn expand_pattern(word: &Word) -> Result<String, String> {
             WordPart::Literal(s) => escape_meta_into(&mut pattern, s),
             WordPart::Quoted(s) => escape_meta_into(&mut pattern, &expand_dollars(s)?),
             WordPart::Unquoted(s) => pattern.push_str(&expand_dollars(s)?),
+            // `ArrayLiteral` only ever appears right after an `Unquoted`
+            // part shaped like `NAME=`/`NAME+=` (see `WordPart`'s own doc
+            // comment), which `assignment_split` always intercepts before
+            // a word reaches here — unreachable in practice.
+            WordPart::ArrayLiteral(_) => {
+                return Err("array literal isn't valid as a case pattern".into());
+            }
         }
     }
     Ok(pattern)
 }
 
 fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
+    use crate::vars::{AssignOp, AssignValue};
+
     // Leading `NAME=value` words are assignments; they stop at the first word
     // that isn't one (the program name).
     let mut assignments = Vec::new();
     let mut idx = 0;
     while idx < rc.argv.len() {
         match assignment_split(&rc.argv[idx]) {
-            Some((name, value_word)) => {
-                assignments.push((name, expand_word(&value_word)?));
+            Some((name, RawAssign::Whole(append, raw_value))) => {
+                let value = match raw_value {
+                    RawAssignValue::Scalar(word) => AssignValue::Scalar(expand_word(&word)?),
+                    // Each element word can itself expand to several fields
+                    // (a glob, or an unquoted `$(...)`/`$var` splitting on
+                    // `$IFS`) — same rule as ordinary argv words.
+                    RawAssignValue::Array(elements) => {
+                        let mut values = Vec::new();
+                        for el in &elements {
+                            values.extend(expand_argv_word(el)?);
+                        }
+                        AssignValue::Array(values)
+                    }
+                };
+                assignments.push((name, if append { AssignOp::Append(value) } else { AssignOp::Set(value) }));
+                idx += 1;
+            }
+            Some((name, RawAssign::Index(subscript, append, value_word))) => {
+                // An index that can't be resolved (a parse error, or the
+                // documented negative-subscript gap — see `eval_subscript`)
+                // drops the assignment entirely rather than guessing.
+                if let Some(index) = eval_subscript(&subscript)? {
+                    let value = expand_word(&value_word)?;
+                    let op = if append { AssignOp::AppendIndex(index, value) } else { AssignOp::SetIndex(index, value) };
+                    assignments.push((name, op));
+                }
                 idx += 1;
             }
             None => break,
         }
     }
 
-    let mut argv = Vec::new();
-    for word in &rc.argv[idx..] {
-        argv.extend(expand_argv_word(word)?);
-    }
+    // `local` is the one command whose own arguments can carry an array
+    // literal (`local arr=(a b c)`) — a plain `Vec<String>` argv can't
+    // represent that, so its declarations are parsed here (reusing
+    // `assignment_split`, same as a leading prefix) into `local_decls`
+    // instead of going through the ordinary `expand_argv_word` path below.
+    let first_word = idx < rc.argv.len() && expand_argv_word(&rc.argv[idx])?.first().map(String::as_str) == Some("local");
+    let (argv, local_decls) = if first_word {
+        let mut decls = Vec::new();
+        for word in &rc.argv[idx + 1..] {
+            match assignment_split(word) {
+                Some((name, RawAssign::Whole(append, raw_value))) => {
+                    let value = match raw_value {
+                        RawAssignValue::Scalar(w) => AssignValue::Scalar(expand_word(&w)?),
+                        RawAssignValue::Array(elements) => {
+                            let mut values = Vec::new();
+                            for el in &elements {
+                                values.extend(expand_argv_word(el)?);
+                            }
+                            AssignValue::Array(values)
+                        }
+                    };
+                    decls.push((name, Some(if append { AssignOp::Append(value) } else { AssignOp::Set(value) })));
+                }
+                // `local arr[i]=x` (indexing a not-yet-local array in the
+                // same breath) isn't supported — falls through to being
+                // treated as a bare name, an accepted, documented gap.
+                Some((_, RawAssign::Index(..))) | None => {
+                    for name in expand_argv_word(word)? {
+                        decls.push((name, None));
+                    }
+                }
+            }
+        }
+        (vec!["local".to_string()], decls)
+    } else {
+        let mut argv = Vec::new();
+        for word in &rc.argv[idx..] {
+            argv.extend(expand_argv_word(word)?);
+        }
 
-    // A single, non-recursive alias substitution: `ll -a` with `alias
-    // ll='ls -l'` becomes `ls -l -a`. The expanded words aren't re-checked
-    // against the alias table, so `alias ls='ls --color=auto'` can't loop.
-    if let Some(value) = argv.first().and_then(|first| crate::alias::get(first)) {
-        let mut expanded: Vec<String> = value.split_whitespace().map(String::from).collect();
-        expanded.extend(argv.into_iter().skip(1));
-        argv = expanded;
-    }
+        // A single, non-recursive alias substitution: `ll -a` with `alias
+        // ll='ls -l'` becomes `ls -l -a`. The expanded words aren't
+        // re-checked against the alias table, so `alias ls='ls
+        // --color=auto'` can't loop.
+        if let Some(value) = argv.first().and_then(|first| crate::alias::get(first)) {
+            let mut expanded: Vec<String> = value.split_whitespace().map(String::from).collect();
+            expanded.extend(argv.into_iter().skip(1));
+            argv = expanded;
+        }
+        (argv, Vec::new())
+    };
 
     let (redirects, heredoc) = expand_redirects(&rc.redirects)?;
-    Ok(Command { argv, redirects, assignments, heredoc })
+    Ok(Command { argv, redirects, assignments, heredoc, local_decls })
 }
 
 /// Expand a raw redirect list into concrete `Redirect`s plus an optional
@@ -143,26 +214,80 @@ pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Op
     Ok((redirects, heredoc))
 }
 
-/// If `word` has the form `NAME=...` with `NAME` a valid identifier whose `=`
-/// comes from unquoted text, split it into the name and a `Word` for the value
-/// (the rest of the first part plus any following parts). Otherwise `None`.
-fn assignment_split(word: &Word) -> Option<(String, Word)> {
+/// A parsed (not yet expanded) assignment value: the ordinary scalar case —
+/// a `Word` reassembled from whatever followed `=`/`+=` — or, for an
+/// array-literal assignment (`arr=(a b c)`), the element list straight from
+/// the lexer's `WordPart::ArrayLiteral`.
+enum RawAssignValue {
+    Scalar(Word),
+    Array(Vec<Word>),
+}
+
+/// The two assignment shapes `assignment_split` recognizes: the whole name
+/// (`NAME=`/`NAME+=`, value may be scalar or an array literal) or one
+/// specific element (`NAME[subscript]=`/`NAME[subscript]+=` — a single
+/// index only, never an array literal on the right: `arr[i]=(...)` isn't
+/// meaningful and bash doesn't support it either).
+enum RawAssign {
+    Whole(bool, RawAssignValue),
+    Index(String, bool, Word),
+}
+
+/// If `word` has the form `NAME=...`/`NAME+=...` (or `NAME[subscript]=...`/
+/// `NAME[subscript]+=...`) with `NAME` a valid identifier whose `=`/`+=`
+/// comes from unquoted text, split it into the name and the rest — see
+/// [`RawAssign`]. Otherwise `None`.
+fn assignment_split(word: &Word) -> Option<(String, RawAssign)> {
     let WordPart::Unquoted(text) = word.first()? else {
         return None;
     };
-    let eq = text.find('=')?;
-    let name = &text[..eq];
 
-    let mut chars = name.chars();
-    let valid = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
-        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
-    if !valid {
+    // `NAME[subscript]=value` / `NAME[subscript]+=value` — checked first,
+    // since a bracketed name never matches the plain-name path below at all
+    // (`[`/`]` aren't name characters).
+    if let Some(bracket) = text.find('[') {
+        let name = &text[..bracket];
+        if is_valid_name(name)
+            && let Some(close) = text[bracket..].find(']').map(|i| i + bracket)
+        {
+            let subscript = text[bracket + 1..close].to_string();
+            let after_bracket = &text[close + 1..];
+            let (append, after_op) = if let Some(rest) = after_bracket.strip_prefix("+=") {
+                (true, rest)
+            } else if let Some(rest) = after_bracket.strip_prefix('=') {
+                (false, rest)
+            } else {
+                return None;
+            };
+            let mut value: Word = vec![WordPart::Unquoted(after_op.to_string())];
+            value.extend(word[1..].iter().cloned());
+            return Some((name.to_string(), RawAssign::Index(subscript, append, value)));
+        }
+    }
+
+    let eq = text.find('=')?;
+    let (name, append) = match text[..eq].strip_suffix('+') {
+        Some(name) => (name, true),
+        None => (&text[..eq], false),
+    };
+
+    if !is_valid_name(name) {
         return None;
     }
 
-    let mut value: Word = vec![WordPart::Unquoted(text[eq + 1..].to_string())];
+    // `NAME=(...)`/`NAME+=(...)`: nothing else on the first part, and the
+    // whole rest of the word is exactly one `ArrayLiteral` (how the lexer
+    // always shapes it — see `WordPart::ArrayLiteral`'s own doc comment).
+    let after_eq = &text[eq + 1..];
+    if after_eq.is_empty()
+        && let [WordPart::ArrayLiteral(elements)] = &word[1..]
+    {
+        return Some((name.to_string(), RawAssign::Whole(append, RawAssignValue::Array(elements.clone()))));
+    }
+
+    let mut value: Word = vec![WordPart::Unquoted(after_eq.to_string())];
     value.extend(word[1..].iter().cloned());
-    Some((name.to_string(), value))
+    Some((name.to_string(), RawAssign::Whole(append, RawAssignValue::Scalar(value))))
 }
 
 /// Expand a word destined for `argv`, possibly into several arguments.
@@ -184,6 +309,15 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
         if s == "$@" {
             return Ok(crate::vars::args());
         }
+        // Likewise `"${arr[@]}"`: one argument per array element, spaces and
+        // all — the array analogue of `"$@"`, verified directly against
+        // real bash. `"${arr[*]}"` is *not* the same case: it's always one
+        // joined string regardless of quoting, which the ordinary
+        // `Quoted` handling below (unsplit, but still one field) already
+        // produces correctly via `expand_braced`'s own `[*]` handling.
+        if let Some(name) = parse_whole_array_at(s) {
+            return Ok(crate::vars::array_values(name));
+        }
     }
 
     let ifs = Ifs::current();
@@ -196,6 +330,11 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
             WordPart::Unquoted(s) => {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
                 sp.add_split(&expand_dollars(&text)?, &ifs);
+            }
+            // See `WordPart::ArrayLiteral`'s own doc comment: `assignment_split`
+            // always intercepts a word shaped like this before it reaches here.
+            WordPart::ArrayLiteral(_) => {
+                return Err("array literal isn't valid outside an assignment".into());
             }
         }
     }
@@ -420,9 +559,24 @@ fn expand_word(word: &Word) -> Result<String, String> {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
                 out.push_str(&expand_dollars(&text)?);
             }
+            // See `WordPart::ArrayLiteral`'s own doc comment: `assignment_split`
+            // always intercepts a word shaped like this before it reaches here.
+            WordPart::ArrayLiteral(_) => {
+                return Err("array literal isn't valid outside an assignment".into());
+            }
         }
     }
     Ok(out)
+}
+
+/// If `s` is *exactly* `${NAME[@]}` (no surrounding text — same "whole word,
+/// not embedded" restriction real bash's own `"$@"` special case has, and
+/// that this codebase already applies to it above), return `NAME`. Used to
+/// recognize `"${arr[@]}"` as the array analogue of `"$@"`: one field per
+/// element, not the single joined string every other quoted expansion
+/// produces.
+fn parse_whole_array_at(s: &str) -> Option<&str> {
+    s.strip_prefix("${")?.strip_suffix("[@]}").filter(|name| is_valid_name(name))
 }
 
 /// `~` or `~/...` at the start of a string becomes `$HOME`. `~user` is not
@@ -654,13 +808,90 @@ fn is_valid_name(s: &str) -> bool {
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// An array subscript, as parsed out of a trailing `[...]` by
+/// `parse_subscript` — `@`/`*` (the whole array, differing only in how
+/// multiple elements join when quoted/unquoted — see `expand_argv_word`'s
+/// own `"${arr[@]}"` special case) or a single index, still as raw
+/// unevaluated source text (see `eval_subscript`).
+enum Subscript<'a> {
+    At,
+    Star,
+    Index(&'a str),
+}
+
+/// Split `inner` into a valid name and a trailing `[...]` subscript, if it's
+/// shaped that way (`arr[0]`, `arr[@]`, `arr[*]`, `arr[i+1]`) — `None` for
+/// anything else (a plain `name`, or `name` followed by an operator like
+/// `#`/`:-` instead of `[`), so the caller falls through to the existing
+/// non-array handling.
+fn parse_subscript(inner: &str) -> Option<(&str, Subscript<'_>)> {
+    let name_end = inner.find(|c: char| !(c == '_' || c.is_ascii_alphanumeric())).unwrap_or(inner.len());
+    let name = &inner[..name_end];
+    if !is_valid_name(name) {
+        return None;
+    }
+    let inside = inner[name_end..].strip_prefix('[')?.strip_suffix(']')?;
+    Some((
+        name,
+        match inside {
+            "@" => Subscript::At,
+            "*" => Subscript::Star,
+            expr => Subscript::Index(expr),
+        },
+    ))
+}
+
+/// Evaluate a subscript's raw text as an arithmetic expression — same
+/// two-step pipeline `$((...))` itself already uses (`expand_dollars` first,
+/// so a `$`-prefixed reference like `${arr[$i]}` resolves; `arith::eval`
+/// then also resolves a *bare* name directly, so `${arr[i+1]}` needs no `$`
+/// either, both verified directly against real bash). `None` for a
+/// negative result, since negative ("from the end") indices are a
+/// documented, out-of-scope gap here (unlike positive out-of-range, which
+/// is `None` too but for the ordinary, POSIX-unremarkable reason: nothing's
+/// there).
+fn eval_subscript(expr: &str) -> Result<Option<usize>, String> {
+    let expr = expand_dollars(expr)?;
+    Ok(usize::try_from(crate::arith::eval(&expr)?).ok())
+}
+
+/// `unset 'arr[i]'`: split `text` into a name and its resolved index, if
+/// it's shaped like a single-element subscript (`arr[i]`, not `arr[@]`/
+/// `arr[*]`) — the subscript is evaluated the same way a read (`${arr[i]}`)
+/// is, including resolving a `$`-reference itself (verified directly
+/// against real bash: `unset 'arr[$i]'` resolves `$i` even though the
+/// single quotes mean the shell itself never touched it — `unset`'s own
+/// subscript is evaluated independently of ordinary shell quoting/expansion).
+pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<(String, usize)>, String> {
+    match parse_subscript(text) {
+        Some((name, Subscript::Index(expr))) => Ok(eval_subscript(expr)?.map(|i| (name.to_string(), i))),
+        _ => Ok(None),
+    }
+}
+
 /// Expand the inside of a `${...}`: a plain name, `${#name}` (length), one of
 /// the pattern-removal operators `#` `##` `%` `%%`, or one of the
 /// default/alternate operators `:-` `-` `:=` `=` `:+` `+` `:?` `?`. With a
 /// colon the test is "unset *or* empty"; without, just "unset". (Unlike the
 /// default/alternate family, `#`/`##`/`%`/`%%` have no colon form — bash
-/// doesn't define one either.)
+/// doesn't define one either.) Also handles indexed-array forms: `${arr[N]}`,
+/// `${arr[@]}`/`${arr[*]}`, `${#arr[@]}`/`${#arr[N]}`, `${!arr[@]}` — but
+/// *not* a subscript combined with pattern-removal or a default/alternate
+/// operator (`${arr[0]#pat}`, `${arr[@]:-x}`), a documented, accepted scope
+/// limit (bash supports these; this codebase doesn't yet).
 fn expand_braced(inner: &str) -> Result<String, String> {
+    // `${!arr[@]}` / `${!arr[*]}` — the array's own set indices, not the
+    // values (skips gaps in a sparse array entirely, same as `${arr[@]}`).
+    if let Some(rest) = inner.strip_prefix('!')
+        && let Some((name, sub)) = parse_subscript(rest)
+    {
+        let indices: Vec<String> = crate::vars::array_indices(name).iter().map(usize::to_string).collect();
+        return Ok(match sub {
+            Subscript::Star => indices.join(&Ifs::current().star_sep),
+            _ => indices.join(" "),
+        });
+    }
+
     // Special parameters: `${#}`, `${@}`/`${*}`, and numeric `${10}`.
     match inner {
         "#" => return Ok(crate::vars::arg_count().to_string()),
@@ -673,11 +904,35 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         _ => {}
     }
 
-    if let Some(name) = inner.strip_prefix('#') {
-        if !is_valid_name(name) {
+    // `${#name}` / `${#arr[@]}` (element count) / `${#arr[N]}` (that
+    // element's own string length).
+    if let Some(name_and_sub) = inner.strip_prefix('#') {
+        if let Some((name, sub)) = parse_subscript(name_and_sub) {
+            return Ok(match sub {
+                Subscript::At | Subscript::Star => crate::vars::array_len(name).to_string(),
+                Subscript::Index(expr) => match eval_subscript(expr)? {
+                    Some(i) => crate::vars::array_get(name, i).map_or(0, |v| v.chars().count()).to_string(),
+                    None => "0".to_string(),
+                },
+            });
+        }
+        if !is_valid_name(name_and_sub) {
             return Err(format!("${{{inner}}}: bad substitution"));
         }
-        return Ok(var_lookup_checked(name)?.chars().count().to_string());
+        return Ok(var_lookup_checked(name_and_sub)?.chars().count().to_string());
+    }
+
+    // `${arr[N]}` / `${arr[@]}` / `${arr[*]}` — see this function's own doc
+    // comment for why a subscript can't combine with what follows below.
+    if let Some((name, sub)) = parse_subscript(inner) {
+        return match sub {
+            Subscript::At => Ok(crate::vars::array_values(name).join(" ")),
+            Subscript::Star => Ok(crate::vars::array_values(name).join(&Ifs::current().star_sep)),
+            Subscript::Index(expr) => match eval_subscript(expr)? {
+                Some(i) => Ok(crate::vars::array_get(name, i).unwrap_or_default()),
+                None => Ok(String::new()),
+            },
+        };
     }
 
     let name_end = inner
@@ -938,13 +1193,16 @@ mod tests {
 
     #[test]
     fn assignments_split_from_argv() {
+        use crate::vars::{AssignOp, AssignValue};
+        let scalar = |v: &str| AssignOp::Set(AssignValue::Scalar(v.to_string()));
+
         let c = expand_cmd("FOO=bar");
         assert!(c.argv.is_empty());
-        assert_eq!(c.assignments, vec![("FOO".into(), "bar".into())]);
+        assert_eq!(c.assignments, vec![("FOO".to_string(), scalar("bar"))]);
 
         let c = expand_cmd("A=1 B=2 echo hi");
         assert_eq!(c.argv, vec!["echo", "hi"]);
-        assert_eq!(c.assignments, vec![("A".into(), "1".into()), ("B".into(), "2".into())]);
+        assert_eq!(c.assignments, vec![("A".to_string(), scalar("1")), ("B".to_string(), scalar("2"))]);
     }
 
     #[test]
@@ -962,9 +1220,10 @@ mod tests {
 
     #[test]
     fn assignment_value_is_expanded() {
+        use crate::vars::{AssignOp, AssignValue};
         crate::vars::set("RUSH_BASE", "/base");
         let c = expand_cmd("P=$RUSH_BASE/x");
-        assert_eq!(c.assignments, vec![("P".into(), "/base/x".into())]);
+        assert_eq!(c.assignments, vec![("P".to_string(), AssignOp::Set(AssignValue::Scalar("/base/x".to_string())))]);
     }
 
     #[test]

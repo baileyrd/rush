@@ -31,7 +31,9 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "read" => Some(read_cmd(argv)),
         "printf" => Some(printf_cmd(argv)),
         "shift" => Some(shift_cmd(argv)),
-        "local" => Some(local_cmd(argv)),
+        // `local` is dispatched earlier, straight off the expanded `Command`
+        // (`exec::dispatch_builtin`), never through here — see
+        // `local_from_decls`'s own doc comment for why.
         "getopts" => Some(getopts_cmd(argv)),
         "command" => Some(command_cmd(argv)),
         "type" => Some(type_cmd(argv)),
@@ -859,10 +861,17 @@ fn return_cmd(argv: &[String]) -> i32 {
     code
 }
 
-/// `unset NAME...` — remove shell variables.
+/// `unset NAME...` — remove shell variables (scalar or array, the whole
+/// thing) or, for `unset 'arr[i]'` specifically, just that one array
+/// element (a real gap in a sparse array, not merely emptying it — see
+/// `vars::array_unset_index`).
 fn unset(argv: &[String]) -> i32 {
     for name in &argv[1..] {
-        crate::vars::unset(name);
+        match crate::expand::parse_array_unset_index(name) {
+            Ok(Some((array, index))) => crate::vars::array_unset_index(&array, index),
+            Ok(None) => crate::vars::unset(name),
+            Err(e) => eprintln!("unset: {name}: {e}"),
+        }
     }
     0
 }
@@ -901,16 +910,30 @@ fn shift_cmd(argv: &[String]) -> i32 {
 /// bare `local name` (no `=value`) leaves `name` genuinely unset within the
 /// function, matching bash, not merely set to `""`. Only valid inside a
 /// function call.
-fn local_cmd(argv: &[String]) -> i32 {
-    if argv.len() == 1 {
+///
+/// Dispatched straight from the expanded `Command` (see `exec::
+/// dispatch_builtin`) rather than through `try_run`'s ordinary `argv:
+/// &[String]` path: `local arr=(a b c)`'s array literal can't survive being
+/// flattened into a plain string, so `expand::expand_simple` parses each
+/// declaration itself into `decls` ahead of time (see `Command::
+/// local_decls`'s own doc comment).
+pub(crate) fn local_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]) -> i32 {
+    if decls.is_empty() {
         eprintln!("local: usage: local name[=value] ...");
         return 1;
     }
     let mut status = 0;
-    for arg in &argv[1..] {
-        let declared = match arg.split_once('=') {
-            Some((name, value)) => crate::vars::declare_local(name, Some(value)),
-            None => crate::vars::declare_local(arg, None),
+    for (name, op) in decls {
+        let declared = match op {
+            Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Array(elements))) => {
+                crate::vars::declare_local_array(name, elements.clone())
+            }
+            Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Scalar(value))) => {
+                crate::vars::declare_local(name, Some(value))
+            }
+            // `+=`/indexed forms aren't meaningful for a name that isn't
+            // local yet — treated the same as a bare `local name`.
+            _ => crate::vars::declare_local(name, None),
         };
         if !declared {
             eprintln!("local: can only be used in a function");

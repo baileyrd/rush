@@ -10,11 +10,59 @@
 //! `exec::build_stage`). Non-exported variables stay private to the shell.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+/// A variable's actual payload: bash's ordinary scalar, or an indexed array
+/// (`arr=(a b c)`). `BTreeMap` rather than `Vec` because bash arrays are
+/// genuinely sparse (`arr[5]=x` on a 2-element array doesn't create indices
+/// 2–4) — iteration order matters for `${arr[@]}`/`${!arr[@]}`, and a
+/// `BTreeMap` gives that for free, keyed by the real index.
+#[derive(Clone)]
+pub enum VarValue {
+    Scalar(String),
+    Array(BTreeMap<usize, String>),
+}
 
 struct Var {
-    value: String,
+    value: VarValue,
     exported: bool,
+}
+
+/// The value side of an assignment word — scalar (`NAME=value`) or a whole
+/// array literal's already-expanded elements (`NAME=(a b c)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignValue {
+    Scalar(String),
+    Array(Vec<String>),
+}
+
+/// An assignment word's full operation, as `expand::assignment_split`
+/// distinguishes it: `=` (replace) or `+=` (append) on the whole name, or
+/// `NAME[index]=value`/`NAME[index]+=value` targeting one specific element
+/// — see `assign`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignOp {
+    Set(AssignValue),
+    Append(AssignValue),
+    SetIndex(usize, String),
+    AppendIndex(usize, String),
+}
+
+/// Apply a parsed assignment word to `name` — the single entry point
+/// `exec.rs` uses for both a bare assignment statement (`arr=(a b c)`,
+/// `arr[2]=x`) and a command's own leading `NAME=value` prefixes, via the
+/// existing per-case functions (`set`/`set_array`/`append_scalar`/
+/// `array_append`/`array_set`/`array_append_index`), each already verified
+/// directly against real bash.
+pub fn assign(name: &str, op: &AssignOp) {
+    match op {
+        AssignOp::Set(AssignValue::Scalar(s)) => set(name, s),
+        AssignOp::Set(AssignValue::Array(elements)) => set_array(name, elements.clone()),
+        AssignOp::Append(AssignValue::Scalar(s)) => append_scalar(name, s),
+        AssignOp::Append(AssignValue::Array(elements)) => array_append(name, elements.clone()),
+        AssignOp::SetIndex(index, value) => array_set(name, *index, value),
+        AssignOp::AppendIndex(index, value) => array_append_index(name, *index, value),
+    }
 }
 
 /// A pending `break`/`continue` request, carrying how many enclosing loops it
@@ -67,7 +115,7 @@ thread_local! {
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
 /// name's function call returns, or `None` if the name didn't exist before.
-type PriorValue = Option<(String, bool)>;
+type PriorValue = Option<(VarValue, bool)>;
 /// One function call's set of `local`-shadowed names, in declaration order.
 type LocalFrame = Vec<(String, PriorValue)>;
 
@@ -243,44 +291,267 @@ pub fn set_last_bg_pid(pid: i32) {
     LAST_BG_PID.with(|p| *p.borrow_mut() = Some(pid));
 }
 
-/// Look up a shell variable's value (not the environment — see `expand`).
+/// Look up a shell variable's scalar value (not the environment — see
+/// `expand`). For an array, this is element 0 (`$arr` == `${arr[0]}`,
+/// verified directly against real bash) — absent if that particular index
+/// isn't set, same as any other unset variable.
 pub fn get(name: &str) -> Option<String> {
-    VARS.with(|v| v.borrow().get(name).map(|x| x.value.clone()))
+    VARS.with(|v| {
+        v.borrow().get(name).and_then(|x| match &x.value {
+            VarValue::Scalar(s) => Some(s.clone()),
+            VarValue::Array(a) => a.get(&0).cloned(),
+        })
+    })
 }
 
-/// Remove a shell variable (`unset NAME`).
+/// Remove a shell variable (`unset NAME`) — scalar or array, the whole thing.
 pub fn unset(name: &str) {
     VARS.with(|v| {
         v.borrow_mut().remove(name);
     });
 }
 
-/// Set a variable, preserving its exported flag if it already existed.
+/// Set a variable's scalar value, preserving its exported flag if it already
+/// existed. If `name` is currently an *array*, this targets element 0 only,
+/// leaving the rest of the array untouched — matching bash exactly (`arr=x`
+/// after `arr=(a b c)` still leaves `arr[1]`/`arr[2]` alone, verified
+/// directly); a plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
     VARS.with(|v| {
         let mut m = v.borrow_mut();
-        let exported = m.get(name).is_some_and(|x| x.exported);
-        m.insert(name.to_string(), Var { value: value.to_string(), exported });
+        match m.get_mut(name) {
+            Some(var) => match &mut var.value {
+                VarValue::Array(a) => {
+                    a.insert(0, value.to_string());
+                }
+                VarValue::Scalar(s) => value.clone_into(s),
+            },
+            None => {
+                m.insert(name.to_string(), Var { value: VarValue::Scalar(value.to_string()), exported: false });
+            }
+        }
     });
 }
 
-/// Set a variable and mark it exported (`export NAME=value`).
+/// Set a variable and mark it exported (`export NAME=value`) — always a
+/// plain scalar replacement; exporting an array doesn't apply (see
+/// `exported`), so this niche interaction with a pre-existing array isn't
+/// specially handled.
 pub fn set_exported(name: &str, value: &str) {
     VARS.with(|v| {
         v.borrow_mut().insert(
             name.to_string(),
-            Var { value: value.to_string(), exported: true },
+            Var { value: VarValue::Scalar(value.to_string()), exported: true },
         );
     });
 }
 
-/// Mark an existing (or newly-created, empty) variable exported (`export NAME`).
+/// Mark an existing (or newly-created, empty scalar) variable exported
+/// (`export NAME`).
 pub fn export(name: &str) {
     VARS.with(|v| {
         v.borrow_mut()
             .entry(name.to_string())
-            .or_insert_with(|| Var { value: String::new(), exported: false })
+            .or_insert_with(|| Var { value: VarValue::Scalar(String::new()), exported: false })
             .exported = true;
+    });
+}
+
+/// Replace `name` entirely with a fresh 0-indexed array (`arr=(a b c)`),
+/// discarding whatever was there before — scalar or array — same as any
+/// other whole-variable assignment. Preserves the exported flag mechanically
+/// (arrays are never actually exported — see `exported` — but there's no
+/// reason to drop the flag if a future export-arrays feature needs it).
+pub fn set_array(name: &str, elements: Vec<String>) {
+    let array: BTreeMap<usize, String> = elements.into_iter().enumerate().collect();
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        let exported = m.get(name).is_some_and(|x| x.exported);
+        m.insert(name.to_string(), Var { value: VarValue::Array(array), exported });
+    });
+}
+
+/// `${arr[index]}` — a specific array element, or a plain scalar's own value
+/// if `index` is 0 (a never-arrayed variable behaves like a 1-element array,
+/// verified directly against real bash) and `None` for any other index.
+pub fn array_get(name: &str, index: usize) -> Option<String> {
+    VARS.with(|v| {
+        v.borrow().get(name).and_then(|x| match &x.value {
+            VarValue::Array(a) => a.get(&index).cloned(),
+            VarValue::Scalar(s) => (index == 0).then(|| s.clone()),
+        })
+    })
+}
+
+/// `${arr[@]}`/`${arr[*]}` — every element, in index order (a plain scalar
+/// is just its one value, matching `array_get`'s index-0 treatment).
+pub fn array_values(name: &str) -> Vec<String> {
+    VARS.with(|v| {
+        v.borrow()
+            .get(name)
+            .map(|x| match &x.value {
+                VarValue::Array(a) => a.values().cloned().collect(),
+                VarValue::Scalar(s) => vec![s.clone()],
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `${!arr[@]}` — the indices actually set (gaps in a sparse array are
+/// skipped entirely, not listed); `[0]` for a plain scalar.
+pub fn array_indices(name: &str) -> Vec<usize> {
+    VARS.with(|v| {
+        v.borrow()
+            .get(name)
+            .map(|x| match &x.value {
+                VarValue::Array(a) => a.keys().copied().collect(),
+                VarValue::Scalar(_) => vec![0],
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `${#arr[@]}` — the number of elements actually set, *not* one past the
+/// highest index (a sparse `arr=(a b); arr[5]=x` has 3 elements, not 6,
+/// verified directly); a plain scalar counts as 1, an unset name as 0.
+pub fn array_len(name: &str) -> usize {
+    VARS.with(|v| {
+        v.borrow()
+            .get(name)
+            .map(|x| match &x.value {
+                VarValue::Array(a) => a.len(),
+                VarValue::Scalar(_) => 1,
+            })
+            .unwrap_or(0)
+    })
+}
+
+/// `arr[index]=value` — set one element. Auto-vivifies an array out of
+/// nothing if `name` didn't exist; if `name` was a plain scalar, it's
+/// promoted to an array with the old value preserved at index 0 (unless
+/// `index` itself *is* 0, which just overwrites it) — both verified
+/// directly against real bash.
+pub fn array_set(name: &str, index: usize, value: &str) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) => match &mut var.value {
+                VarValue::Array(a) => {
+                    a.insert(index, value.to_string());
+                }
+                VarValue::Scalar(s) => {
+                    let old = std::mem::take(s);
+                    let mut a = BTreeMap::new();
+                    if index != 0 {
+                        a.insert(0, old);
+                    }
+                    a.insert(index, value.to_string());
+                    var.value = VarValue::Array(a);
+                }
+            },
+            None => {
+                let mut a = BTreeMap::new();
+                a.insert(index, value.to_string());
+                m.insert(name.to_string(), Var { value: VarValue::Array(a), exported: false });
+            }
+        }
+    });
+}
+
+/// `arr[index]+=value` — append the string to that one element (or, if
+/// nothing's there yet at `index`, this is the same as just setting it —
+/// nothing to append *to*), same auto-vivify/scalar-promotion rules as
+/// `array_set`, both verified directly against real bash.
+pub fn array_append_index(name: &str, index: usize, value: &str) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) => match &mut var.value {
+                VarValue::Array(a) => a.entry(index).or_default().push_str(value),
+                VarValue::Scalar(s) => {
+                    let old = std::mem::take(s);
+                    let mut a = BTreeMap::new();
+                    if index == 0 {
+                        a.insert(0, old + value);
+                    } else {
+                        a.insert(0, old);
+                        a.insert(index, value.to_string());
+                    }
+                    var.value = VarValue::Array(a);
+                }
+            },
+            None => {
+                let mut a = BTreeMap::new();
+                a.insert(index, value.to_string());
+                m.insert(name.to_string(), Var { value: VarValue::Array(a), exported: false });
+            }
+        }
+    });
+}
+
+/// `arr+=(elements...)` — append after the current highest index (0 if the
+/// array is empty or `name` didn't exist yet). A plain scalar is promoted
+/// to an array first, its old value kept at index 0, then the new elements
+/// appended from index 1 — matching real bash exactly (verified directly).
+pub fn array_append(name: &str, elements: Vec<String>) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) => {
+                let a = match &mut var.value {
+                    VarValue::Array(a) => a,
+                    VarValue::Scalar(s) => {
+                        let old = std::mem::take(s);
+                        let mut a = BTreeMap::new();
+                        a.insert(0, old);
+                        var.value = VarValue::Array(a);
+                        let VarValue::Array(a) = &mut var.value else { unreachable!() };
+                        a
+                    }
+                };
+                let mut next = a.keys().next_back().map_or(0, |k| k + 1);
+                for e in elements {
+                    a.insert(next, e);
+                    next += 1;
+                }
+            }
+            None => {
+                let array: BTreeMap<usize, String> = elements.into_iter().enumerate().collect();
+                m.insert(name.to_string(), Var { value: VarValue::Array(array), exported: false });
+            }
+        }
+    });
+}
+
+/// `x+=value` — append the literal string `value`: to a plain scalar's own
+/// text, or (matching real bash exactly, verified directly) to *element 0*
+/// of an existing array, leaving every other element untouched. Creates a
+/// fresh scalar if `name` didn't exist yet.
+pub fn append_scalar(name: &str, value: &str) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) => match &mut var.value {
+                VarValue::Array(a) => a.entry(0).or_default().push_str(value),
+                VarValue::Scalar(s) => s.push_str(value),
+            },
+            None => {
+                m.insert(name.to_string(), Var { value: VarValue::Scalar(value.to_string()), exported: false });
+            }
+        }
+    });
+}
+
+/// `unset 'arr[index]'` — remove just that one element, leaving a genuine
+/// gap in a sparse array (not merely emptying it) — a no-op if `name` isn't
+/// an array or that index isn't set.
+pub fn array_unset_index(name: &str, index: usize) {
+    VARS.with(|v| {
+        if let Some(var) = v.borrow_mut().get_mut(name)
+            && let VarValue::Array(a) = &mut var.value
+        {
+            a.remove(&index);
+        }
     });
 }
 
@@ -327,17 +598,7 @@ pub fn pop_local_frame() {
 /// second `local x` in one call still restores to the pre-call value, not
 /// the first `local`'s.
 pub fn declare_local(name: &str, value: Option<&str>) -> bool {
-    let declared = LOCAL_STACK.with(|s| {
-        let mut stack = s.borrow_mut();
-        let Some(frame) = stack.last_mut() else {
-            return false;
-        };
-        if !frame.iter().any(|(n, _)| n == name) {
-            let prior = VARS.with(|v| v.borrow().get(name).map(|x| (x.value.clone(), x.exported)));
-            frame.push((name.to_string(), prior));
-        }
-        true
-    });
+    let declared = capture_for_local(name);
     if declared {
         match value {
             Some(v) => set(name, v),
@@ -347,11 +608,42 @@ pub fn declare_local(name: &str, value: Option<&str>) -> bool {
     declared
 }
 
+/// As [`declare_local`], but for `local arr=(a b c)` — the array-literal
+/// form. Same shadow/restore contract, just setting a fresh array instead
+/// of a scalar.
+pub fn declare_local_array(name: &str, elements: Vec<String>) -> bool {
+    let declared = capture_for_local(name);
+    if declared {
+        set_array(name, elements);
+    }
+    declared
+}
+
+/// Shared by `declare_local`/`declare_local_array`: capture `name`'s prior
+/// value into the current function call's frame (only the *first* time
+/// this name is made local within that one call — see `declare_local`'s own
+/// doc comment for why a second `local` in the same call must not
+/// re-capture), reporting whether there's an active frame to declare into
+/// at all.
+fn capture_for_local(name: &str) -> bool {
+    LOCAL_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let Some(frame) = stack.last_mut() else {
+            return false;
+        };
+        if !frame.iter().any(|(n, _)| n == name) {
+            let prior = VARS.with(|v| v.borrow().get(name).map(|x| (x.value.clone(), x.exported)));
+            frame.push((name.to_string(), prior));
+        }
+        true
+    })
+}
+
 /// A snapshot of all variables, for isolating a subshell on platforms without
 /// `fork` (see `exec::run_compound`'s `Compound::Subshell` arm) — Unix forks a
 /// real child instead, so these are unused there.
 #[cfg(not(unix))]
-pub type Snapshot = Vec<(String, String, bool)>;
+pub type Snapshot = Vec<(String, VarValue, bool)>;
 
 #[cfg(not(unix))]
 pub fn snapshot() -> Snapshot {
@@ -374,13 +666,19 @@ pub fn restore(snap: Snapshot) {
     });
 }
 
-/// Every exported variable as `(name, value)`, for seeding child environments.
+/// Every exported *scalar* variable as `(name, value)`, for seeding child
+/// environments — arrays are never exported (there's no portable env-var
+/// representation for one), so an exported array-valued name is silently
+/// skipped here rather than passed through in some serialized form.
 pub fn exported() -> Vec<(String, String)> {
     VARS.with(|v| {
         v.borrow()
             .iter()
             .filter(|(_, x)| x.exported)
-            .map(|(k, x)| (k.clone(), x.value.clone()))
+            .filter_map(|(k, x)| match &x.value {
+                VarValue::Scalar(s) => Some((k.clone(), s.clone())),
+                VarValue::Array(_) => None,
+            })
             .collect()
     })
 }
@@ -487,5 +785,90 @@ mod tests {
         assert_eq!(get("RUSH_LOCAL_NEW").as_deref(), Some("value"));
         pop_local_frame();
         assert_eq!(get("RUSH_LOCAL_NEW"), None);
+    }
+
+    #[test]
+    fn array_basic_set_get_and_whole_array_reads() {
+        unset("RUSH_ARR");
+        set_array("RUSH_ARR", vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(array_get("RUSH_ARR", 0).as_deref(), Some("a"));
+        assert_eq!(array_get("RUSH_ARR", 2).as_deref(), Some("c"));
+        assert_eq!(array_get("RUSH_ARR", 10), None); // out of range: absent, not an error
+        assert_eq!(get("RUSH_ARR").as_deref(), Some("a")); // $arr == ${arr[0]}
+        assert_eq!(array_values("RUSH_ARR"), vec!["a", "b", "c"]);
+        assert_eq!(array_indices("RUSH_ARR"), vec![0, 1, 2]);
+        assert_eq!(array_len("RUSH_ARR"), 3);
+        unset("RUSH_ARR");
+    }
+
+    #[test]
+    fn array_is_sparse_not_padded() {
+        unset("RUSH_SPARSE");
+        set_array("RUSH_SPARSE", vec!["a".into(), "b".into()]);
+        array_set("RUSH_SPARSE", 5, "x");
+        // Count is the number of *set* indices (3), not one past the
+        // highest (6) — and `${arr[@]}`/`${!arr[@]}` skip the gap entirely.
+        assert_eq!(array_len("RUSH_SPARSE"), 3);
+        assert_eq!(array_values("RUSH_SPARSE"), vec!["a", "b", "x"]);
+        assert_eq!(array_indices("RUSH_SPARSE"), vec![0, 1, 5]);
+
+        array_unset_index("RUSH_SPARSE", 1);
+        assert_eq!(array_indices("RUSH_SPARSE"), vec![0, 5]);
+        assert_eq!(array_len("RUSH_SPARSE"), 2);
+        unset("RUSH_SPARSE");
+    }
+
+    #[test]
+    fn array_set_auto_vivifies_and_promotes_a_scalar() {
+        unset("RUSH_PROMOTE");
+        array_set("RUSH_PROMOTE", 2, "x"); // never existed: auto-vivifies
+        assert_eq!(array_values("RUSH_PROMOTE"), vec!["x"]);
+        assert_eq!(array_indices("RUSH_PROMOTE"), vec![2]);
+
+        unset("RUSH_PROMOTE");
+        set("RUSH_PROMOTE", "5");
+        array_set("RUSH_PROMOTE", 3, "hi"); // scalar promoted, old value kept at [0]
+        assert_eq!(array_get("RUSH_PROMOTE", 0).as_deref(), Some("5"));
+        assert_eq!(array_get("RUSH_PROMOTE", 3).as_deref(), Some("hi"));
+        unset("RUSH_PROMOTE");
+    }
+
+    #[test]
+    fn plain_scalar_assignment_targets_element_0_of_an_existing_array() {
+        unset("RUSH_ARR2");
+        set_array("RUSH_ARR2", vec!["a".into(), "b".into(), "c".into()]);
+        set("RUSH_ARR2", "x"); // arr=x, not arr=(x) — only index 0 changes
+        assert_eq!(array_values("RUSH_ARR2"), vec!["x", "b", "c"]);
+        unset("RUSH_ARR2");
+    }
+
+    #[test]
+    fn array_append_and_scalar_append_quirk() {
+        unset("RUSH_APP");
+        set_array("RUSH_APP", vec!["a".into(), "b".into(), "c".into()]);
+        array_append("RUSH_APP", vec!["d".into(), "e".into()]);
+        assert_eq!(array_values("RUSH_APP"), vec!["a", "b", "c", "d", "e"]);
+
+        // `arr+=x` (no parens) appends the *string* to element 0, not a new
+        // element — a real bash quirk, verified directly.
+        unset("RUSH_APP");
+        set_array("RUSH_APP", vec!["a".into(), "b".into(), "c".into()]);
+        append_scalar("RUSH_APP", "x");
+        assert_eq!(array_values("RUSH_APP"), vec!["ax", "b", "c"]);
+        unset("RUSH_APP");
+    }
+
+    #[test]
+    fn local_array_shadows_and_restores_on_frame_pop() {
+        unset("RUSH_LOCAL_ARR");
+        set_array("RUSH_LOCAL_ARR", vec!["outer".into()]);
+
+        push_local_frame();
+        assert!(declare_local_array("RUSH_LOCAL_ARR", vec!["inner1".into(), "inner2".into()]));
+        assert_eq!(array_values("RUSH_LOCAL_ARR"), vec!["inner1", "inner2"]);
+        pop_local_frame();
+
+        assert_eq!(array_values("RUSH_LOCAL_ARR"), vec!["outer"]);
+        unset("RUSH_LOCAL_ARR");
     }
 }

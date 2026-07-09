@@ -607,6 +607,11 @@ mod tests {
         word.iter()
             .map(|p| match p {
                 WordPart::Literal(s) | WordPart::Unquoted(s) | WordPart::Quoted(s) => s.as_str(),
+                // No existing parser-level test exercises an array literal
+                // through this raw-text helper; see `WordPart`'s own doc
+                // comment for why none of the *runtime* code needs to
+                // either (`expand::assignment_split` always intercepts one).
+                WordPart::ArrayLiteral(_) => "",
             })
             .collect()
     }

@@ -33,7 +33,11 @@ now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
 and `-x` (C20, xtrace) alongside them. `TERM`/`HUP` traps (C21) now fire
 too — including interrupting a blocking wait immediately, the headline
 case for a container's graceful-shutdown pattern — closing Tier III out
-completely.
+completely. Tier IV (bash/ksh/zsh language parity, the least POSIX-y and
+largest tier) is now underway: indexed arrays (C22) — `arr=(a b c)`,
+`${arr[N]}`/`${arr[@]}`/`${arr[*]}`, sparse arrays, `arr[i]=`/`arr[i]+=`,
+`unset 'arr[i]'`, `local arr=(...)` — are done, the first real dent in
+what's otherwise still a dash-shaped core.
 
 ---
 
@@ -56,7 +60,8 @@ applicable to that shell's own model.
 | `exec` (process replacement) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `umask` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` / `-x` | ✅§ | 🟡 | ✅ | ✅ | ✅ | — |
-| Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Indexed arrays | ✅¶ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Associative arrays (`declare -A`) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
@@ -83,6 +88,13 @@ blocking wait immediately, not just once the foreground job finishes on
 its own; `ERR`/`DEBUG` (bash/ksh/zsh extensions, not POSIX) remain
 unimplemented.
 
+¶ Literal assignment, all read forms (`${arr[N]}`/`${arr[@]}`/`${arr[*]}`/
+`${#arr[@]}`/`${!arr[@]}`), sparse arrays, `arr[i]=`/`arr[i]+=`, `unset`
+(whole array or one index), and `local arr=(...)` are all done. Not
+supported: negative indices, `${arr[@]:offset:length}` slicing, a
+subscript combined with pattern-removal/default operators, `declare -a`/
+`declare -p` (no `declare` builtin exists at all).
+
 ---
 
 ## Summary counts
@@ -90,7 +102,7 @@ unimplemented.
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 4 (4 done — complete)
-- **Tier IV — bash/ksh/zsh language parity:** 10
+- **Tier IV — bash/ksh/zsh language parity:** 10 (1 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -656,11 +668,85 @@ Out of scope for this item, matching its stated boundary: `ERR`/`DEBUG`
 Not POSIX-mandated, but rush's own README calls it "bash-compatible" —
 these are the extensions real bash scripts lean on most.
 
-### C22 — Indexed arrays: `arr=(a b c)`, `${arr[@]}`, `${#arr[@]}`
+### C22 — Indexed arrays: `arr=(a b c)`, `${arr[@]}`, `${#arr[@]}` ✅ done
 Present in bash/ksh93/zsh (not POSIX sh/dash — bash-family parity, not
-POSIX parity). Heavily used in modern bash scripts; currently fails outright
-rather than degrading gracefully. Touches the lexer, parser, expander, and
-`vars`' storage model. **Effort: L.**
+POSIX parity). Heavily used in modern bash scripts; previously failed
+outright rather than degrading gracefully. Touched the lexer, parser,
+expander, and `vars`' storage model, exactly as scoped.
+
+**Storage** (`vars.rs`): a variable's payload is now `enum VarValue {
+Scalar(String), Array(BTreeMap<usize, String>) }` (`BTreeMap` for real
+sparse-array semantics — `arr[5]=x` on a 2-element array doesn't create
+indices 2–4 — with free sorted iteration for `${arr[@]}`/`${!arr[@]}`).
+Every existing scalar function (`get`/`set`/`unset`/`export`/`exported`/
+the `local`-frame shadow-restore mechanism) now branches on this, alongside
+new array-specific ones (`set_array`, `array_get`/`array_set`/
+`array_append`/`array_append_index`, `array_values`/`array_indices`/
+`array_len`, `array_unset_index`, `declare_local_array`) and a shared
+`assign(name, &AssignOp)` entry point covering all four assignment shapes
+(scalar/array × set/append) plus the two indexed ones (`arr[i]=`/
+`arr[i]+=`).
+
+**Lexer** (`lexer.rs`): a new `WordPart::ArrayLiteral(Vec<Word>)` — `(` and
+`)` are already lexer-level tokens (used for subshells/case groups), so
+`arr=(a b c)` needed a lexer-level heuristic (`looks_like_array_assign_prefix`)
+recognizing a word ending in `=`/`+=` with no space before the `(`, at
+which point the whole parenthesized list — spanning newlines, each element
+its own `Word` so quoting/expansion inside one still works — is consumed
+as a single `WordPart` rather than breaking the word at the paren. Every
+existing exhaustive `WordPart` match got a defensive arm: `ArrayLiteral`
+only ever appears as the part right after an `Unquoted` part ending in
+`=`/`+=`, always intercepted by `expand::assignment_split` before reaching
+anywhere else — genuinely unreachable outside it.
+
+**Expansion** (`expand.rs`): `assignment_split` now recognizes three shapes
+— `NAME=(...)`/`NAME+=(...)` (whole-array literal/append, elements
+individually glob/command-substitution-expanded, matching bash exactly,
+verified directly), plain `NAME=value`/`NAME+=value` (unchanged), and the
+new `NAME[subscript]=value`/`NAME[subscript]+=value` (one element, the
+subscript evaluated as arithmetic — same two-step pipeline `$((...))`
+itself uses, so both a bare `${arr[i+1]}` and a `$`-prefixed
+`${arr[$i]}`/`arr[$i]=x` resolve). `expand_braced` gained subscript
+support for reads: `${arr[N]}`, `${arr[@]}`/`${arr[*]}` (the `@`/`*`
+join-vs-preserve distinction mirrors `$@`/`$*`'s own, including a new
+`"${arr[@]}"`-is-like-`"$@"` special case in `expand_argv_word` so quoted
+whole-array expansion preserves each element as its own field), `${#arr[@]}`
+(count)/`${#arr[N]}` (that element's length), and `${!arr[@]}` (the
+indices actually present — skips gaps). `arr=x` on an *existing* array
+targets element 0 only, leaving the rest alone — matching bash exactly,
+verified directly (this lives in the ordinary `set()`, so it's not
+array-literal-specific: any scalar-shaped assignment to an already-array
+name behaves this way).
+
+**`local`** (`builtins.rs`/`exec.rs`): `local arr=(a b c)` needed special
+handling — `local`'s own arguments are ordinary argv words, but a plain
+`Vec<String>` argv can't carry an array literal at all. `expand_simple` now
+recognizes the command word "local" and parses its declarations itself
+(reusing `assignment_split`) into a new `Command::local_decls` field,
+funneled to a new `builtins::local_from_decls` dispatched directly from
+`exec::dispatch_builtin` rather than through the ordinary string-argv
+builtin path — scalar `local name`/`local name=value` behavior is
+unchanged.
+
+Explicitly out of scope, each a documented, accepted gap: negative indices
+(`${arr[-1]}`, a bash 4.3+ feature); `${arr[@]:offset:length}` slicing; a
+subscript combined with pattern-removal or a default/alternate operator
+(`${arr[0]#pat}`, `${arr[@]:-x}`); `declare -a`/`declare -p` (rush has no
+`declare` builtin at all); `local arr[i]=x` (indexing a not-yet-local array
+in the same breath — falls back to a bare `local name`); exporting an
+array to a spawned child's environment (no portable representation);
+arithmetic side effects inside a subscript (`arr[i=1]=x`). Every one of
+these was verified directly against real bash to confirm the *behavior*
+being skipped, not just assumed from documentation.
+
+Every case in this item — literal assignment, all three read forms,
+sparse arrays, element/whole-array set and append, `unset` (whole array
+and single index, including `unset 'arr[$i]'`'s own independent subscript
+evaluation), scalar↔array promotion, and `local` — was verified directly
+against real bash, including exact edge cases (a distinct exit code per
+array position, multi-line literals, glob/command-substitution expansion
+inside a literal) chosen specifically to disambiguate from a plausible-but-
+wrong implementation.
 
 ### C23 — Associative arrays: `declare -A`
 Present in bash 4+/ksh93/zsh. Common in modern tooling/config-processing

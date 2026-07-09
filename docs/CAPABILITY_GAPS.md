@@ -36,7 +36,7 @@ applicable to that shell's own model.
 |---|---|---|---|---|---|---|
 | Real pipes / job control / forked subshells | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `#`/`##`/`%`/`%%` param. expansion | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| `read` / `printf` / `shift` / `getopts` | 🟡† | ✅ | ✅ | ✅ | ✅ | 🟡 |
+| `read` / `printf` / `shift` / `getopts` | ✅† | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | `local` function-scoped vars | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `wait` / `disown` | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
@@ -51,15 +51,16 @@ applicable to that shell's own model.
 \* Done for the interactive/script job-control path; a compound as one stage
 among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 
-† `read` (with `-r` and `$IFS` splitting), `printf` (sans `%e`/`%f`/`%g`),
-and `shift` are done; `getopts` remains missing.
+† All four are done, with narrower caveats: `read` (with `-r` and `$IFS`
+splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
+`shift`/`getopts` are full.
 
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 6 (6 done — complete)
-- **Tier II — missing standard builtins:** 11 (4 done)
+- **Tier II — missing standard builtins:** 11 (5 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -262,9 +263,24 @@ the function — `${x-default}` inside it sees it as unset, not merely set to
 `""` — matching bash exactly. `local` outside any function call is a usage
 error and does not fall through to setting a plain global variable.
 
-### C11 — `getopts`
+### C11 — `getopts` ✅ done
 The portable way to parse `-a`, `-b value`, combined short flags. Without
 it every rush script hand-rolls option parsing from scratch. **Effort: M.**
+
+Implemented (`builtins::getopts_cmd`): `-a`, `-b value` (from the rest of
+the same word or the next one), and combined short flags (`-ab` = `-a
+-b`) — `$OPTIND` (1-based index of the next word) stays put while still
+inside a combined-flag word, advancing only once it's exhausted (an
+internal `(optind, char_pos)` cursor tracks the within-word position,
+mirroring bash's own private state — not a shell-visible variable). A
+leading `:` in `optstring` enables silent mode (`name` set to `?`/`:` with
+`$OPTARG` the offending character, no diagnostic) instead of the default
+(a diagnostic, `name` set to `?`, `$OPTARG` unset). `$OPTIND`/`$OPTARG` are
+ordinary shell variables; resetting `OPTIND=1` starts a fresh pass. A lone
+`--` or the first non-option word ends option processing without being
+consumed. All verified against real bash directly, including the full
+`while getopts ...; do case $opt in ...; esac; done; shift $((OPTIND-1))`
+idiom this and `shift` (C9) together unlock.
 
 ### C12 — `command` / `type` / `hash`
 `command -v foo` is the standard portable existence check used constantly

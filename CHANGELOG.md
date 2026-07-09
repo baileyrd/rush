@@ -343,3 +343,20 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   sees it as unset, not merely set to `""` — matching bash exactly. `local`
   outside any function call is a usage error and doesn't fall through to
   setting a plain global variable.
+
+### `getopts` builtin (C11)
+- `getopts optstring name [arg...]` (`builtins::getopts_cmd`) — the
+  portable way to parse `-a`, `-b value`, and combined short flags (`-ab`
+  means `-a -b`). `$OPTIND` (1-based index of the next word) stays put
+  while still inside a combined-flag word, advancing only once it's
+  exhausted — tracked via an internal `(optind, char_pos)` cursor
+  (`vars::getopts_char_pos`/`set_getopts_char_pos`), mirroring bash's own
+  private state rather than exposing an extra variable. A leading `:` in
+  `optstring` enables silent mode (`name` set to `?`/`:` with `$OPTARG` the
+  offending character, no diagnostic) instead of the default (a diagnostic,
+  `name` set to `?`, `$OPTARG` unset). `$OPTIND`/`$OPTARG` are ordinary
+  shell variables — resetting `OPTIND=1` starts a fresh pass. A lone `--`
+  or the first non-option word ends option processing without being
+  consumed. This and `shift` (C9) together unlock the standard `while
+  getopts ...; do case $opt in ...; esac; done; shift $((OPTIND-1))`
+  argument-parsing idiom, verified end-to-end against real bash.

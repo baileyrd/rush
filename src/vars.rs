@@ -43,6 +43,10 @@ thread_local! {
     // `local` has shadowed *in that call*, alongside what they were
     // beforehand (`None` meaning "didn't exist") — see `declare_local`.
     static LOCAL_STACK: RefCell<Vec<LocalFrame>> = const { RefCell::new(Vec::new()) };
+    // `getopts`'s internal progress within the *current* `$OPTIND` word —
+    // `(optind, char_pos)`. Not a shell-visible variable (bash doesn't
+    // expose one either); see `getopts_char_pos`.
+    static GETOPTS_POS: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
 }
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
@@ -119,6 +123,23 @@ pub fn shift(n: usize) -> bool {
         a.drain(0..n);
         true
     })
+}
+
+/// `getopts`'s cached within-word progress for the given `$OPTIND` value:
+/// `0` if `optind` doesn't match what's cached — a fresh word, or the
+/// script just reset `$OPTIND` itself — else the character index to resume
+/// at (a prior call already consumed an earlier combined short flag in the
+/// same word, e.g. `-ab`'s `a`).
+pub fn getopts_char_pos(optind: usize) -> usize {
+    GETOPTS_POS.with(|p| {
+        let p = p.borrow();
+        if p.0 == optind { p.1 } else { 0 }
+    })
+}
+
+/// Record `getopts`'s within-word progress for its next call.
+pub fn set_getopts_char_pos(optind: usize, char_pos: usize) {
+    GETOPTS_POS.with(|p| *p.borrow_mut() = (optind, char_pos));
 }
 
 /// Record a pending loop-control request (from the `break`/`continue` builtins).

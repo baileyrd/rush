@@ -212,3 +212,18 @@ git history for the commit-by-commit narrative.
   zero times. Distinct from an *explicit* `in` with no words (`for x in; do
   ...`), which is still a real empty list — the parser records whether `in`
   was present at all (`Compound::For`'s new `has_in` field).
+
+### Compound command as one stage of a real pipeline (C3)
+- `(cmd) | grep x`, `if ...; fi | wc -l`, a compound in the middle of a
+  3-stage pipeline — all now work, for the interactive/script job-control
+  path (`job::spawn_pipeline`, Unix only). `Pipeline.commands` is now
+  `Vec<Stage>` (`Stage::Simple` or `Stage::Compound`) instead of
+  `Vec<Command>`; a compound stage forks (`spawn_compound_stage`), wiring
+  stdin/stdout via `dup2` from real fds (`File`, not `Stdio` — a forked
+  child needs something introspectable to `dup2` from) and joining the
+  pipeline's process group like any exec'd stage. Forked-subshell isolation
+  (G10) verified to still hold even when the subshell is a pipeline stage,
+  not just the whole pipeline.
+- Not extended to the capture path (`$(...)`): a compound as one stage among
+  several *inside* a substitution, or on non-Unix (no `fork` there at all),
+  still errors clearly — a narrower, separate remaining limitation.

@@ -41,7 +41,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Prompt customization | ✅ | `PS1` (var or env), with `\w`/`\W`/`\u`/`\h`/`\$`/`\?`/`\n`/`\\`; falls back to `cwd $ ` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
-| Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring |
+| Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring; a compound (`if`/`while`/`(...)`/…) can be one stage among several on Unix (forks) |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap` (+ `jobs`/`fg`/`bg`/`kill` on Unix) |

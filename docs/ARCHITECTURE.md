@@ -332,8 +332,11 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   `run_compound` there, so everything the child writes — in-process
   (builtins) or via a further spawn that inherits its stdout — ends up
   captured. Only a pipeline that *is* a single compound is handled this way;
-  one as one stage among several in a larger pipeline remains the documented,
-  separate limitation.
+  one as one stage among several in a larger pipeline *inside a
+  substitution* still errors here (`run` — see below — rejects a
+  `Stage::Compound` explicitly) — this narrower case remains a documented
+  limitation, distinct from the general case, which `job::spawn_pipeline`
+  now handles (C3; see the `job.rs` section below).
 - **Single-command fast path:** if a pipeline is one command naming a builtin
   (`builtins::is_builtin`), it runs via `run_builtin_foreground` so `cd`/
   `exit`/`jobs` affect the shell process (skipped when capturing, so
@@ -383,9 +386,15 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   it can leak back, because it happens in a separate process. Off Unix (no
   `fork`), it falls back to `vars::snapshot`/`restore` plus saving/restoring
   the cwd, which can't contain an `exit`. A compound as *one stage among
-  several* in a multi-command pipeline (e.g. `(cmd) | grep x`) is still
-  rejected by `expand::expand` — only a pipeline that is a single compound is
-  supported today; forking a compound mid-pipeline is a follow-up.
+  several* in a multi-command pipeline (e.g. `(cmd) | grep x`) now works too
+  (C3), for the interactive/script job-control path — `expand::expand` no
+  longer rejects it (a `Pipeline` is `Vec<Stage>`, `Stage::Simple` or
+  `Stage::Compound`, carried through unexpanded); see `job.rs`'s
+  `spawn_compound_stage` below for how it's actually run. The narrower case
+  of a compound as one stage *inside a `$(...)` substitution*, or on
+  non-Unix (no `fork` there at all), still errors clearly (`run`, in this
+  same file, rejects a `Stage::Compound` explicitly rather than mishandling
+  it).
 - **`break`/`continue`/`return`:** those builtins set a thread-local request in
   `vars`; `exec_list`/`run_andor` stop early when `flow_pending()` is true. Each
   loop's `loop_step` consumes one `break`/`continue` level (so `break 2` escapes
@@ -455,7 +464,20 @@ crate, following the classic glibc job-control structure:
   its own process group, and grabs the terminal.
 - `spawn_pipeline` launches every stage into one new process group; each child
   resets those signals to default and `setpgid`s before `exec` (via
-  `CommandExt::pre_exec`), so Ctrl-C/Ctrl-Z reach the job, not the shell.
+  `CommandExt::pre_exec`), so Ctrl-C/Ctrl-Z reach the job, not the shell. A
+  `Stage::Compound` stage (C3) instead goes through `spawn_compound_stage`,
+  which forks directly (no `exec`, since it's running `run_compound` in
+  Rust, not a separate program) — the same `setpgid`/signal-reset happens
+  by hand in the child rather than via `pre_exec`, and stdin/stdout are
+  wired with a real `dup2` from `File`s, not `Stdio`: a forked child needs
+  something introspectable (`.as_raw_fd()`) to `dup2` from, and `Stdio` is
+  built only for handing to a `Command`, not reading back out of. This is
+  why the inter-stage connector in this function is `Option<File>`, not
+  `Option<Stdio>` — a `Simple` stage converts it with `Stdio::from(file)`
+  right where it's fed into `build_stage`; a `ChildStdout` gets rewrapped as
+  a `File` via `IntoRawFd`/`FromRawFd` so both stage kinds share the same
+  connector type uniformly, regardless of which kind is on either side of a
+  junction.
 - `run_foreground` hands the job the terminal (`tcsetpgrp`), waits with
   `WUNTRACED` (so a Ctrl-Z stop is detected and recorded), then reclaims the
   terminal. `run_background` records the job and prints `[id] pgid`.

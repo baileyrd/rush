@@ -44,9 +44,18 @@ pub enum Redirect {
 
 pub use crate::parser::RedirMode;
 
+/// One stage of a pipeline: an external/builtin command, or a compound
+/// (`if`/`while`/`(...)`/…). A compound stage only runs by forking (Unix
+/// only, in `job::spawn_pipeline`) — it never goes through `build_stage`.
+#[derive(Debug, Clone)]
+pub enum Stage {
+    Simple(Command),
+    Compound(Box<Compound>),
+}
+
 #[derive(Debug, Clone)]
 pub struct Pipeline {
-    pub commands: Vec<Command>,
+    pub commands: Vec<Stage>,
 }
 
 /// Run a whole command line, returning the exit status of the last foreground
@@ -140,7 +149,7 @@ fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
     run_foreground(raw)
 }
 
-fn run_compound(compound: &Compound) -> Result<i32, String> {
+pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
     match compound {
         Compound::If { branches, else_body } => {
             for (cond, body) in branches {
@@ -315,14 +324,17 @@ fn should_run(connector: Connector, prev_status: i32) -> bool {
 /// A single command that is only `NAME=value` assignments (no program word):
 /// `FOO=bar`. These set shell variables rather than spawning anything.
 fn assignment_only(pipeline: &Pipeline) -> bool {
-    pipeline.commands.len() == 1
-        && pipeline.commands[0].argv.is_empty()
-        && !pipeline.commands[0].assignments.is_empty()
+    matches!(
+        pipeline.commands.as_slice(),
+        [Stage::Simple(cmd)] if cmd.argv.is_empty() && !cmd.assignments.is_empty()
+    )
 }
 
 fn apply_assignments(pipeline: &Pipeline) {
-    for (name, value) in &pipeline.commands[0].assignments {
-        crate::vars::set(name, value);
+    if let [Stage::Simple(cmd)] = pipeline.commands.as_slice() {
+        for (name, value) in &cmd.assignments {
+            crate::vars::set(name, value);
+        }
     }
 }
 
@@ -339,8 +351,10 @@ fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
         return Ok(crate::vars::take_last_subst_status().unwrap_or(0));
     }
 
-    if pipeline.commands.len() == 1 {
-        let cmd = &pipeline.commands[0];
+    // The sole-compound case (`run_pipeline_node`) is intercepted before this
+    // function is ever called, so a single-stage pipeline reaching here is
+    // always `Stage::Simple`.
+    if let [Stage::Simple(cmd)] = pipeline.commands.as_slice() {
         // A defined function shadows external commands (but not builtins).
         if cmd.argv.first().is_some_and(|name| crate::func::exists(name)) {
             return call_function(&cmd.argv);
@@ -600,7 +614,23 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
     let mut prev_stdout: Option<Stdio> = None;
     let mut captured = String::new();
 
-    for (i, cmd) in pipeline.commands.iter().enumerate() {
+    for (i, stage) in pipeline.commands.iter().enumerate() {
+        let cmd = match stage {
+            Stage::Simple(cmd) => cmd,
+            // Unix's job-control runner (`job::spawn_pipeline`) can fork a
+            // compound stage; this plain runner (capture, and the foreground
+            // runner off Unix) can't — no `fork` available off Unix, and
+            // capturing a compound that's one stage among several remains a
+            // narrower, separate limitation from the sole-compound case
+            // `capture_compound` already handles.
+            Stage::Compound(_) => {
+                return Err(
+                    "a compound command as one stage of a multi-command pipeline isn't \
+                     supported here (capturing output, or this platform's foreground runner)"
+                        .into(),
+                );
+            }
+        };
         let is_last = i == n - 1;
         let (mut command, real_pipe_read) = build_stage(cmd, prev_stdout.take(), is_last, capture)?;
 
@@ -789,7 +819,7 @@ fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> 
 /// across two descriptors (`stdout` and `stderr`) before spawn — something
 /// `Stdio::piped()` can't do, since it only exposes the pipe to `std` internals.
 #[cfg(unix)]
-fn make_pipe() -> Result<(File, File), String> {
+pub(crate) fn make_pipe() -> Result<(File, File), String> {
     use std::os::unix::io::FromRawFd;
 
     let mut fds = [0i32; 2];
@@ -827,13 +857,26 @@ pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
 }
 
 /// A human-readable rendering of a pipeline, for the `jobs` listing. Only the
-/// Unix job runner uses it.
+/// Unix job runner uses it. A compound stage isn't reconstructed back to
+/// source text (its body is a full `CommandList`) — just labeled by kind.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
     pipeline
         .commands
         .iter()
-        .map(|c| c.argv.join(" "))
+        .map(|stage| match stage {
+            Stage::Simple(cmd) => cmd.argv.join(" "),
+            Stage::Compound(compound) => match compound.as_ref() {
+                Compound::If { .. } => "if ...".to_string(),
+                Compound::Loop { until: false, .. } => "while ...".to_string(),
+                Compound::Loop { until: true, .. } => "until ...".to_string(),
+                Compound::For { .. } => "for ...".to_string(),
+                Compound::Case { .. } => "case ...".to_string(),
+                Compound::Group(_) => "{ ... }".to_string(),
+                Compound::Subshell(_) => "( ... )".to_string(),
+                Compound::FuncDef { name, .. } => format!("{name}() {{ ... }}"),
+            },
+        })
         .collect::<Vec<_>>()
         .join(" | ")
 }

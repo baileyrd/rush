@@ -17,12 +17,15 @@
 //! spawn-and-wait on other platforms.
 
 use std::cell::RefCell;
+use std::fs::File;
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 use libc::{c_int, pid_t};
 
-use crate::exec::Pipeline;
+use crate::exec::{Pipeline, Stage};
+use crate::parser::Compound;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum JobState {
@@ -88,56 +91,133 @@ pub fn init() {
 
 /// Spawn every stage of a pipeline into a single new process group, returning
 /// `(pgid, pids)`. Children reset signal dispositions and join the group before
-/// `exec`; the parent also calls `setpgid` to avoid racing terminal hand-off.
+/// running; the parent also calls `setpgid` to avoid racing terminal hand-off.
+///
+/// The inter-stage connector is a real fd (`File`), not `Stdio`: a compound
+/// stage (`if`/`while`/`(...)`/…) runs by forking rather than `exec`ing, and
+/// a forked child needs an introspectable fd to `dup2` from, which `Stdio`
+/// doesn't expose (it's built for handing to a `Command`, not reading back
+/// out of). A `Simple` stage converts it to `Stdio` at the point it's fed
+/// into `build_stage`.
 fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
     let n = pipeline.commands.len();
     let mut pids = Vec::with_capacity(n);
     let mut pgid: pid_t = 0;
-    let mut prev_stdout: Option<Stdio> = None;
+    let mut prev_stdin: Option<File> = None;
 
-    for (i, cmd) in pipeline.commands.iter().enumerate() {
+    for (i, stage) in pipeline.commands.iter().enumerate() {
         let is_last = i == n - 1;
-        let (mut command, real_pipe_read) =
-            crate::exec::build_stage(cmd, prev_stdout.take(), is_last, false)?;
-
-        // `0` for the leader means "new group whose id is my pid".
+        // `0` for the leader means "new group whose id is my pid" — computed
+        // from `pgid`'s value *before* this iteration's update below, same as
+        // the original single-branch version of this loop.
         let target_pgid = pgid;
-        unsafe {
-            command.pre_exec(move || {
-                libc::setpgid(0, target_pgid);
-                for &sig in &JOB_SIGNALS {
-                    libc::signal(sig, libc::SIG_DFL);
-                }
-                libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-                Ok(())
-            });
-        }
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
-        crate::exec::feed_heredoc(&mut child, cmd);
-        let pid = child.id() as pid_t;
+        let pid = match stage {
+            Stage::Simple(cmd) => {
+                let (mut command, real_pipe_read) = crate::exec::build_stage(
+                    cmd,
+                    prev_stdin.take().map(Stdio::from),
+                    is_last,
+                    false,
+                )?;
+
+                unsafe {
+                    command.pre_exec(move || {
+                        libc::setpgid(0, target_pgid);
+                        for &sig in &JOB_SIGNALS {
+                            libc::signal(sig, libc::SIG_DFL);
+                        }
+                        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+                        Ok(())
+                    });
+                }
+
+                let mut child = command
+                    .spawn()
+                    .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
+                crate::exec::feed_heredoc(&mut child, cmd);
+                let pid = child.id() as pid_t;
+
+                prev_stdin = if let Some(read) = real_pipe_read {
+                    // `2>&1` forced a real pipe (see `build_stage`): its read
+                    // end feeds the next stage's stdin.
+                    Some(read)
+                } else if !is_last {
+                    // SAFETY: `ChildStdout` uniquely owns this fd; taking it
+                    // and rewrapping as a `File` only changes the type doing
+                    // the owning, not the fd itself.
+                    child.stdout.take().map(|s| unsafe { File::from_raw_fd(s.into_raw_fd()) })
+                } else {
+                    None
+                };
+                // We reap via `waitpid`, so let the std handle drop (its
+                // Drop neither waits nor kills on Unix).
+                pid
+            }
+            Stage::Compound(compound) => {
+                let (pid, next_stdin) =
+                    spawn_compound_stage(compound, prev_stdin.take(), is_last, target_pgid)?;
+                prev_stdin = next_stdin;
+                pid
+            }
+        };
+
         if i == 0 {
             pgid = pid;
         }
         unsafe {
             libc::setpgid(pid, pgid);
         }
-
-        if let Some(read) = real_pipe_read {
-            // `2>&1` forced a real pipe (see `build_stage`): its read end
-            // feeds the next stage's stdin.
-            prev_stdout = Some(Stdio::from(read));
-        } else if !is_last {
-            prev_stdout = child.stdout.take().map(Stdio::from);
-        }
         pids.push(pid);
-        // We reap via `waitpid`, so let the std handle drop (its Drop neither
-        // waits nor kills on Unix).
     }
 
     Ok((pgid, pids))
+}
+
+/// Fork a compound command (`if`/`while`/`(...)`/…) as one stage of a real
+/// pipeline. The child gets the same process-group and signal treatment as
+/// an exec'd stage, so it behaves consistently under Ctrl-C/Ctrl-Z; its
+/// stdin/stdout are wired via `dup2` from `stdin_src`/a freshly-made pipe.
+/// Returns `(pid, next_stdin)`: the child's pid, and — if `!is_last` — the
+/// read end of a pipe the next stage should use as its own stdin.
+fn spawn_compound_stage(
+    compound: &Compound,
+    stdin_src: Option<File>,
+    is_last: bool,
+    target_pgid: pid_t,
+) -> Result<(pid_t, Option<File>), String> {
+    let next_pipe = if is_last { None } else { Some(crate::exec::make_pipe()?) };
+
+    match unsafe { libc::fork() } {
+        -1 => Err(std::io::Error::last_os_error().to_string()),
+        0 => {
+            unsafe {
+                libc::setpgid(0, target_pgid);
+                for &sig in &JOB_SIGNALS {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
+                libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+            }
+            if let Some(stdin) = &stdin_src {
+                unsafe {
+                    libc::dup2(stdin.as_raw_fd(), 0);
+                }
+            }
+            if let Some((_, write)) = &next_pipe {
+                unsafe {
+                    libc::dup2(write.as_raw_fd(), 1);
+                }
+            }
+            drop(stdin_src);
+            drop(next_pipe);
+            let status = crate::exec::run_compound(compound).unwrap_or(1);
+            crate::trap::exit_shell(status);
+        }
+        pid => {
+            let next_stdin = next_pipe.map(|(read, _)| read);
+            Ok((pid, next_stdin))
+        }
+    }
 }
 
 /// Run a pipeline in the foreground, returning its exit status. If it stops
@@ -501,13 +581,13 @@ mod tests {
     use super::*;
     use crate::exec::Command;
 
-    fn cmd(argv: &[&str]) -> Command {
-        Command {
+    fn cmd(argv: &[&str]) -> Stage {
+        Stage::Simple(Command {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             redirects: vec![],
             assignments: vec![],
             heredoc: None,
-        }
+        })
     }
 
     // None of these call `init()` with a real tty (there isn't one under

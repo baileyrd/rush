@@ -131,3 +131,29 @@ fn command_substitution_of_a_compound_composes_with_nesting() {
         "outer:inner\n"
     );
 }
+
+#[test]
+fn assignment_takes_the_status_of_its_own_command_substitution() {
+    // POSIX: a variable-assignment-only command's exit status is that of the
+    // last command substitution performed while expanding it, not always 0.
+    assert_eq!(rush("x=$(false); echo $?").0, "1\n");
+    assert_eq!(rush("x=$(true); echo $?").0, "0\n");
+    // No substitution at all: still resets to 0, not a stale prior status.
+    assert_eq!(rush("false; x=5; echo $?").0, "0\n");
+    // Reading $? directly (no substitution) isn't itself corrupted by the
+    // mechanism that detects "did a substitution just run".
+    assert_eq!(rush("false; x=$?; echo $x:$?").0, "1:0\n");
+    // Several assignments on one line: the *last* substitution counts.
+    assert_eq!(rush("a=$(true) b=$(false); echo $?").0, "1\n");
+    // An assignment *prefixed onto a real command* is unaffected: the
+    // command's own status counts, not the substitution's.
+    assert_eq!(rush("FOO=$(false) true; echo $?").0, "0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_substitution_status_reflects_its_own_last_command() {
+    // The outer substitution's exit status is that of its own last command
+    // ("echo inner"), not the inner assignment's ("y=$(false)").
+    assert_eq!(rush("x=$(y=$(false); echo inner); echo $x:$?").0, "inner:0\n");
+}

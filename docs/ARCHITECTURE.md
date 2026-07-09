@@ -292,6 +292,23 @@ processes. `snapshot`/`restore` (`#[cfg(not(unix))]`) back the non-Unix
 subshell approximation — see `exec.rs`'s `Compound::Subshell` notes below; a
 real fork needs neither.
 
+A separate, one-shot marker — `reset_last_subst_status`/
+`set_last_subst_status`/`take_last_subst_status` — gives a
+variable-assignment-only command (`x=$(false)`) POSIX's exit-status rule:
+its status is that of the last command substitution performed while
+expanding it, not always `0`. `run_foreground`/`capture_pipeline` reset the
+marker right before calling `expand::expand`, and `capture_list` (the engine
+behind every `$(...)`) sets it — to whatever its own last job's status was —
+right after finishing; the assignment-only branch then takes (consumes) it,
+falling back to `0` if no substitution ran. This is *not* the same
+thread-local as `$?` itself: reusing `$?`'s own slot as a sentinel here would
+corrupt a direct `x=$?` read (no substitution at all) happening in the same
+expansion. Because the reset/consume pair brackets exactly one `expand()`
+call, nested substitutions (`x=$(y=$(false); echo inner)`) resolve correctly
+without a stack: by the time an outer level consumes the marker, only the
+inner level closest to it — which already consumed and moved past its own —
+could have last written it.
+
 ### `exec.rs` — runtime
 Sequences a `CommandList` and turns each pipeline into running processes:
 - `run_list` runs each job in turn. A foreground job runs its `&&`/`||` chain
@@ -385,15 +402,12 @@ not for replaying whole-script semantics) and rejects any compound command
 outright, and a builtin's redirects are wired up via a process-wide `dup2`
 around the call (`run_builtin_foreground`) that races across `cargo test`'s
 concurrently-running threads since fd 0/1/2 aren't per-thread. A genuinely
-separate process per test sidesteps all of that. (Two things this surfaced —
-`capture_list`'s `$?` gap and its blanket rejection of compound commands,
-even a lone one — are now fixed; see `capture_pipeline`/`capture_compound`
-above. One further, deeper nuance surfaced while verifying those fixes and
-remains open: the exit status of a command substitution isn't propagated to
-an *assignment's own* exit status — `x=$(false); echo $?` still prints `0`,
-not `1` as POSIX/bash expect, since the assignment-only path in both
-`run_foreground` and `capture_pipeline` hardcodes `Ok(0)` regardless of what
-happened during expansion.)
+separate process per test sidesteps all of that. (Three things this
+surfaced — `capture_list`'s `$?` gap, its blanket rejection of compound
+commands even a lone one, and a command substitution's status not
+propagating to an assignment's own status — are all now fixed; see
+`capture_pipeline`/`capture_compound` above and `vars`'s
+`reset_last_subst_status`/`take_last_subst_status` below.)
 
 ### `job.rs` — Unix job control *(compiled only on Unix)*
 

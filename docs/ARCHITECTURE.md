@@ -125,6 +125,19 @@ read-eval-print loop and all I/O concerns:
   and continues; **Ctrl-D** (`Eof`) on an empty line breaks the loop.
 - Delegates parsing and execution, printing any error as `rush: …` to stderr
   without exiting.
+- Wires `completion::RushHelper` into the `Editor` via `set_helper`, so Tab
+  completion (see `completion.rs` below) is live for the whole session.
+
+### `completion.rs` — tab completion
+Implements rustyline's `Completer` (plus no-op `Hinter`/`Highlighter`/
+`Validator` — required by the `Helper` bundle trait but not needed here).
+`in_command_position` is a rough, not lexer-accurate check: everything since
+the last separator (`|`, `;`, `&`, `(`, newline), trimmed of leading
+whitespace, contains no whitespace of its own. In command position, completes
+against `builtins::all_names()` (builtins plus, on Unix, `job`'s
+`jobs`/`fg`/`bg`/`kill`) and every executable found scanning `$PATH` fresh on
+each call — no caching, since PATH rarely has enough entries for a linear scan
+to matter. Everywhere else, delegates to rustyline's own `FilenameCompleter`.
 
 ### `lexer.rs` — tokenizer
 A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat

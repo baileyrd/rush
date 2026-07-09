@@ -221,9 +221,11 @@ pub fn reap_background() {
 
 // ---- builtins: jobs / fg / bg ------------------------------------------------
 
-/// Names dispatched by `builtin`, for `builtins::is_builtin`.
+/// Names dispatched by `builtin`, for `builtins::is_builtin`/`all_names`.
+pub(crate) const NAMES: &[&str] = &["jobs", "fg", "bg", "kill"];
+
 pub(crate) fn is_builtin(name: &str) -> bool {
-    matches!(name, "jobs" | "fg" | "bg" | "kill")
+    NAMES.contains(&name)
 }
 
 /// Dispatch the job-control builtins. Returns `Some(code)` if handled.

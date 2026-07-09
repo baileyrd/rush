@@ -28,26 +28,25 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
     }
 }
 
+/// Names `try_run` dispatches directly (excludes the platform-specific ones
+/// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
+pub const NAMES: &[&str] = &[
+    "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
+    ":", "false", "exit",
+];
+
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
 /// redirects for a builtin *before* running it, without a speculative,
 /// side-effect-free call to `try_run` itself.
 pub fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "cd" | "pwd"
-            | "echo"
-            | "export"
-            | "unset"
-            | "test"
-            | "["
-            | "break"
-            | "continue"
-            | "return"
-            | "true"
-            | ":"
-            | "false"
-            | "exit"
-    ) || other_is_builtin(name)
+    NAMES.contains(&name) || other_is_builtin(name)
+}
+
+/// Every builtin name, for tab completion in command position.
+pub fn all_names() -> Vec<&'static str> {
+    let mut names = NAMES.to_vec();
+    names.extend_from_slice(other_names());
+    names
 }
 
 #[cfg(unix)]
@@ -58,6 +57,16 @@ fn other_is_builtin(name: &str) -> bool {
 #[cfg(not(unix))]
 fn other_is_builtin(_name: &str) -> bool {
     false
+}
+
+#[cfg(unix)]
+fn other_names() -> &'static [&'static str] {
+    crate::job::NAMES
+}
+
+#[cfg(not(unix))]
+fn other_names() -> &'static [&'static str] {
+    &[]
 }
 
 /// `echo [-n] [args...]` — join args with spaces; `-n` suppresses the newline.

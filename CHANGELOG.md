@@ -100,3 +100,9 @@ git history for the commit-by-commit narrative.
   equivalent). Only covers a builtin as the sole command of a pipeline; one in
   the middle of a multi-stage pipe (`echo hi | cd`) is unaffected — still the
   pre-existing punt (rush tries to exec it as an external program).
+
+### Tab completion (G5)
+- A custom rustyline `Helper` (`completion.rs`) replaces `DefaultEditor`. In
+  command position (a rough, not lexer-accurate check — see the module doc),
+  Tab completes builtin names and executables found scanning `$PATH`;
+  elsewhere it defers to rustyline's own `FilenameCompleter` for files.

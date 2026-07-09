@@ -11,6 +11,7 @@
 
 mod arith;
 mod builtins;
+mod completion;
 mod exec;
 mod expand;
 mod func;
@@ -24,7 +25,8 @@ mod vars;
 use std::path::PathBuf;
 
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::history::DefaultHistory;
+use rustyline::Editor;
 
 fn history_path() -> Option<PathBuf> {
     let mut p = PathBuf::from(std::env::var_os("HOME")?);
@@ -83,7 +85,8 @@ fn run_source(src: &str) -> i32 {
 }
 
 fn interactive() -> rustyline::Result<()> {
-    let mut rl = DefaultEditor::new()?;
+    let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::new()?;
+    rl.set_helper(Some(completion::RushHelper::new()));
     let hist = history_path();
     if let Some(ref h) = hist {
         let _ = rl.load_history(h);

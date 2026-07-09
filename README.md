@@ -35,6 +35,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Feature | Status | Notes |
 |---|---|---|
 | REPL with line editing | ✅ | via [`rustyline`](https://crates.io/crates/rustyline) |
+| Tab completion | ✅ | builtins and `$PATH` executables in command position; files elsewhere |
 | Persistent history | ✅ | stored in `~/.rush_history` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
@@ -108,6 +109,7 @@ commands only and `&` is rejected.
 ```
 src/
   main.rs       entry point: argv dispatch (script / -c / REPL), read→parse→run loop
+  completion.rs tab completion: builtins/$PATH in command position, files elsewhere
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
   parser.rs     recursive-descent grammar → CommandList (pipelines, &&/||/;, if/while/for/case/functions)
   expand.rs     expansion: $VAR, ${…}, ~, $(...), $((...)), word-split, globs → concrete Pipeline

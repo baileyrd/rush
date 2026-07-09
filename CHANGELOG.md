@@ -153,10 +153,26 @@ git history for the commit-by-commit narrative.
   module: `run_foreground`'s exit-status reporting (single command,
   multi-stage pipeline, signal death), and the job-table bookkeeping
   (`update_by_pid`/`notify_and_prune`) that backs `jobs`/`fg`/`bg`.
-- Two narrower gaps `capture_list` surfaced along the way, not fixed here:
-  it doesn't track `$?` across jobs within a substitution, and it rejects
-  *any* compound command, even a lone one (not just one mid-pipeline, which
-  was already documented).
+- Two narrower gaps `capture_list` surfaced along the way — it didn't track
+  `$?` across jobs within a substitution, and it rejected *any* compound
+  command, even a lone one — are now fixed; see below.
+
+### `capture_list` fixes: `$?` tracking and capturing a compound (follow-up to G9)
+- `$(false; echo $?)` now correctly sees `1` from *within* the substitution:
+  `capture_pipeline` updates `$?` after every pipeline, mirroring
+  `run_andor`. A plain assignment with no substitution (`x=5`) still resets
+  `$?` to `0` rather than leaking a stale value from before it.
+- `$(if ...)` / `$(while ...)` / `$( (...) )` — capturing a *sole* compound
+  command — now works. It never went through `build_stage`/`Stdio` (only the
+  multi-stage-pipeline case was documented as unsupported; a lone compound
+  was silently rejected too, via the same hard error). Fixed by forking
+  (Unix only) and redirecting the child's fd 1 to a pipe before running
+  `run_compound` there, so everything the child writes — in-process
+  (builtins) or via a further spawn that inherits its stdout — is captured.
+- Surfaced, not fixed: the exit status of a command substitution isn't
+  propagated to an *assignment's own* status — `x=$(false); echo $?` still
+  prints `0`. The assignment-only path in `run_foreground`/`capture_pipeline`
+  hardcodes `Ok(0)` regardless of what happened during expansion.
 
 ### Windows/MSYS2 build strategy (G11)
 - Validated, not just documented: cross-compiled rush for

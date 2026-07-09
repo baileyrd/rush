@@ -490,15 +490,87 @@ fn capture_andor(list: &AndOrList, out: &mut String) -> Result<i32, String> {
     Ok(status)
 }
 
+/// Updates `$?` after every pipeline (like `run_andor` does for the main
+/// runtime), so e.g. `$(false; echo $?)` sees the right value *within* the
+/// substitution — this was missing before, leaving `$?` at whatever it was
+/// from outside the substitution instead of tracking its own jobs.
 fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> {
+    if let [RawCommand::Compound(compound)] = raw.commands.as_slice() {
+        let (status, captured) = capture_compound(compound)?;
+        out.push_str(&captured);
+        crate::vars::set_last_status(status);
+        return Ok(status);
+    }
+
     let pipeline = crate::expand::expand(raw)?;
     if assignment_only(&pipeline) {
         apply_assignments(&pipeline);
+        crate::vars::set_last_status(0);
         return Ok(0);
     }
     let (status, captured) = run(&pipeline, true)?;
     out.push_str(&captured);
+    crate::vars::set_last_status(status);
     Ok(status)
+}
+
+/// Capture a sole compound command's (`if`/`while`/`(...)`/…) output and exit
+/// status — e.g. `$(if true; then echo yes; fi)`. A compound never goes
+/// through `build_stage`/`Stdio`; it runs in-process via `run_compound`,
+/// recursing into ordinary builtins/external spawns as it goes. To capture
+/// *all* of that (including builtins, which write straight to the process's
+/// real stdout), fork (Unix only, mirroring `run_subshell_forked`) and
+/// redirect the *child's* fd 1 to a pipe we own before running the compound
+/// there — everything the child writes, in-process or via a further spawn
+/// that inherits its stdout, ends up in that pipe. This only handles a
+/// pipeline that *is* a single compound; one as one stage among several in a
+/// larger pipeline remains the documented, separate limitation.
+#[cfg(unix)]
+fn capture_compound(compound: &Compound) -> Result<(i32, String), String> {
+    use std::os::unix::io::AsRawFd;
+
+    let (read, write) = make_pipe()?;
+    match unsafe { libc::fork() } {
+        -1 => Err(std::io::Error::last_os_error().to_string()),
+        0 => {
+            // Child: point fd 1 at the pipe's write end; neither original fd
+            // is needed once that's done.
+            unsafe {
+                libc::dup2(write.as_raw_fd(), 1);
+            }
+            drop(write);
+            drop(read);
+            let status = run_compound(compound).unwrap_or(1);
+            crate::trap::exit_shell(status);
+        }
+        pid => {
+            // Parent: only reads. Drop our copy of the write end *before*
+            // reading, or read_to_string blocks forever waiting for an EOF
+            // that can't come while a write end is still open here too (the
+            // same deadlock `build_stage`'s doc comment warns about).
+            drop(write);
+            let mut captured = String::new();
+            let mut read = read;
+            read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+            loop {
+                let mut status: libc::c_int = 0;
+                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1 {
+                    return Ok((crate::job::exit_code(status), captured));
+                }
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+        }
+    }
+}
+
+/// No `fork` on this platform (see docs/ARCHITECTURE.md's Windows note) — a
+/// compound can't be captured, same as it already couldn't be part of a
+/// pipeline here.
+#[cfg(not(unix))]
+fn capture_compound(_compound: &Compound) -> Result<(i32, String), String> {
+    Err("compound commands cannot be captured on this platform".into())
 }
 
 /// Plain spawn-and-wait runner: used for capture, and as the foreground runner

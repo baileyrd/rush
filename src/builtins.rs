@@ -39,6 +39,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "." | "source" => Some(source_cmd(argv)),
         "eval" => Some(eval_cmd(argv)),
         "exec" => Some(crate::exec::exec_cmd(argv)),
+        "umask" => Some(umask_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -48,7 +49,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source", "eval", "exec",
+    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1219,6 +1220,71 @@ fn source_cmd(argv: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `umask [-S] [mode]` — with no `mode`, report the process's current file
+/// creation mask (plain octal, or `u=rwx,g=rx,o=rx`-style with `-S`); with
+/// one, set it. A real `libc::umask()` call (Unix only), so it actually
+/// affects every file/directory this process (or anything it execs/spawns)
+/// creates from here on — not just a shell-internal display value.
+#[cfg(unix)]
+fn umask_cmd(argv: &[String]) -> i32 {
+    let symbolic = argv.get(1).map(String::as_str) == Some("-S");
+    let rest = &argv[if symbolic { 2 } else { 1 }..];
+
+    let Some(mode_str) = rest.first() else {
+        // `umask()` only ever *sets* the mask, returning the previous value
+        // — so reading it without changing it means setting it right back.
+        let current = unsafe {
+            let m = libc::umask(0);
+            libc::umask(m);
+            m
+        };
+        if symbolic {
+            println!("{}", symbolic_umask(current));
+        } else {
+            println!("{current:04o}");
+        }
+        return 0;
+    };
+
+    match u32::from_str_radix(mode_str, 8) {
+        Ok(mode) if mode <= 0o777 => {
+            unsafe {
+                libc::umask(mode as libc::mode_t);
+            }
+            0
+        }
+        _ => {
+            eprintln!("{}: {mode_str}: octal number out of range", argv[0]);
+            1
+        }
+    }
+}
+
+#[cfg(unix)]
+fn symbolic_umask(mask: libc::mode_t) -> String {
+    let class = |shift: u32| -> String {
+        let bits = (mask >> shift) & 0o7;
+        let mut s = String::new();
+        if bits & 0o4 == 0 {
+            s.push('r');
+        }
+        if bits & 0o2 == 0 {
+            s.push('w');
+        }
+        if bits & 0o1 == 0 {
+            s.push('x');
+        }
+        s
+    };
+    format!("u={},g={},o={}", class(6), class(3), class(0))
+}
+
+#[cfg(not(unix))]
+fn umask_cmd(argv: &[String]) -> i32 {
+    eprintln!("{}: not supported on this platform", argv[0]);
+    1
 }
 
 /// `eval arg...` — see `exec::eval_cmd` for the full semantics: the args are

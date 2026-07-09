@@ -482,3 +482,16 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   actually opening fd 3. Pre-existing across the whole shell — `exec` is
   just the first place it blocks a headline idiom rather than being an
   edge case. Tracked separately as C38 in `docs/CAPABILITY_GAPS.md`.
+
+### `umask` builtin (C17)
+- `builtins::umask_cmd` (Unix only): a real `libc::umask()` call, so it
+  actually changes the permissions every subsequent file/directory this
+  process (or anything it execs/spawns) creates, not just a shell-internal
+  display value.
+- No argument reports the current mask — plain 4-digit octal (`0022`), or
+  `u=rwx,g=rx,o=rx`-style with `-S` — both verified directly against real
+  bash. Reading it without changing it means setting it right back, since
+  `umask()` itself only ever *sets*, returning the previous value.
+- One argument sets it from an octal string; an out-of-range or malformed
+  mode fails with status 1 without touching the mask. Symbolic *setting*
+  (`umask u=rwx,g=rx,o=`) isn't supported, only octal.

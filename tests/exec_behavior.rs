@@ -446,6 +446,31 @@ fn exec_builtin() {
     let _ = std::fs::remove_file(&in_path);
 }
 
+#[cfg(unix)]
+#[test]
+fn umask_builtin() {
+    // No args reports the current mask; `-S` reports it symbolically.
+    assert_eq!(rush("umask 022; umask").0, "0022\n");
+    assert_eq!(rush("umask 027; umask -S").0, "u=rwx,g=rx,o=\n");
+    assert_eq!(rush("umask 0; umask").0, "0000\n");
+
+    // A real `libc::umask()` call: it actually changes the permissions a
+    // spawned child creates a file with, not just a shell-internal value.
+    let path = std::env::temp_dir().join(format!("rush_umask_test_{}.txt", std::process::id()));
+    let file = path.to_str().unwrap();
+    let _ = std::fs::remove_file(&path);
+    rush(&format!("umask 077; touch {file}"));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "got mode {mode:o}");
+    let _ = std::fs::remove_file(&path);
+
+    // Errors: an out-of-range or malformed mode fails with status 1,
+    // without touching the mask.
+    assert_eq!(rush("umask 999; echo status:$?").0, "status:1\n");
+    assert_eq!(rush("umask abc; echo status:$?").0, "status:1\n");
+}
+
 #[test]
 fn source_and_dot_builtin() {
     let path = std::env::temp_dir().join(format!("rush_source_lib_{}.sh", std::process::id()));

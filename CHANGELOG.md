@@ -457,3 +457,28 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   — prints a raw OS spawn error and aborts the *entire script*, instead of
   reporting exit status 127 and continuing like every other POSIX shell.
   Tracked separately as C37 in `docs/CAPABILITY_GAPS.md`.
+
+### `exec` builtin (C16)
+- `exec::exec_cmd` (Unix only), registered as a normal builtin so its
+  redirects flow through the existing `run_builtin_foreground`/
+  `redirect_stdio` machinery unchanged.
+- With a command (`exec cmd args...`): replaces the current process image
+  via `execvp` (`CommandExt::exec`) — no fork, so on success this never
+  returns. Inherits whatever fds 0/1/2 the caller's own redirects already
+  left them as, plus the shell's exported environment, exactly like a
+  normal spawned child. On failure (command not found) — verified directly
+  against real bash — a non-interactive shell exits immediately with
+  status 127 (the *whole script* stops there), while an interactive one
+  just reports 127 and keeps running, redirects restored as normal.
+- With no command (bare `exec`, or `exec` followed only by redirects, e.g.
+  `exec > file`): a no-op that always succeeds, except the redirects are
+  made *permanent* — a new `StdioGuard::disarm` closes the saved originals
+  instead of restoring them on drop, the one case where a builtin's
+  redirects are meant to outlive the call.
+- Found but out of scope here, and not specific to `exec`: rush's redirect
+  machinery (`redirect_stdio` *and* `build_stage` — builtins and real
+  spawned children alike) only ever wires up fd 0/1/2; any other target
+  `fd` (`cmd 3>file`, `exec 3>file`) silently collapses to fd 1 instead of
+  actually opening fd 3. Pre-existing across the whole shell — `exec` is
+  just the first place it blocks a headline idiom rather than being an
+  edge case. Tracked separately as C38 in `docs/CAPABILITY_GAPS.md`.

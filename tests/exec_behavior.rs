@@ -404,6 +404,48 @@ fn eval_builtin() {
     assert_eq!(status, 0); // the script's own last command (echo) still succeeds
 }
 
+#[cfg(unix)]
+#[test]
+fn exec_builtin() {
+    // With a command: replaces the process image outright — the captured
+    // stdout/exit status are the executed command's own.
+    assert_eq!(rush("exec echo hello world"), ("hello world\n".to_string(), 0));
+
+    // Command not found: a non-interactive shell (which `rush -c` is)
+    // exits immediately with status 127 — the rest of the script (an
+    // `echo` right after) never runs at all.
+    assert_eq!(
+        rush("echo before; exec rush_nonexistent_cmd_xyz; echo after"),
+        ("before\n".to_string(), 127)
+    );
+
+    // With no command: a no-op that always succeeds.
+    assert_eq!(rush("exec; echo status:$?").0, "status:0\n");
+
+    // With no command but a redirect: the redirect is made *permanent*
+    // (unlike every other builtin's, which are scoped to just that one
+    // call) — everything printed for the rest of the script goes to the
+    // file instead of rush's own stdout.
+    let path = std::env::temp_dir().join(format!("rush_exec_redirect_{}.txt", std::process::id()));
+    let file = path.to_str().unwrap();
+    let (out, status) = rush(&format!("exec > {file}; echo redirected; echo more"));
+    assert_eq!(out, "");
+    assert_eq!(status, 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "redirected\nmore\n");
+    let _ = std::fs::remove_file(&path);
+
+    // Same for redirecting the shell's own stdin: a `read` right after
+    // picks up the file's contents instead of rush's real stdin.
+    let in_path = std::env::temp_dir().join(format!("rush_exec_stdin_{}.txt", std::process::id()));
+    let in_file = in_path.to_str().unwrap();
+    std::fs::write(&in_path, "hi\n").unwrap();
+    assert_eq!(
+        rush(&format!("exec 0<{in_file}; read line; echo got:$line")).0,
+        "got:hi\n"
+    );
+    let _ = std::fs::remove_file(&in_path);
+}
+
 #[test]
 fn source_and_dot_builtin() {
     let path = std::env::temp_dir().join(format!("rush_source_lib_{}.sh", std::process::id()));

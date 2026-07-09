@@ -19,19 +19,20 @@ the cross-shell context that shows why they matter, not newly discovered.
 **Bottom line:** rush's actual scope today is closest to **dash** — a solid,
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top. Tier I's original 6 items are done; two more (C35, a real quoting
-bug, and C37, an unknown-command-aborts-the-script bug) turned up while
-closing out Tier II, which is now three-quarters done — `local`, `getopts`,
-`command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
-`source`/`.`, and `eval` all landed alongside `read`/`printf`/`shift`. A
-follow-on (C36, a PATH-visibility bug in `command`/`type`/`hash`) turned up
-while closing out `source`; C37 turned up while closing out `eval`.
+on top. Tier I's original 6 items are done; three more (C35, a real
+quoting bug; C37, an unknown-command-aborts-the-script bug; C38, redirects
+to fd 3+ silently landing on fd 1) turned up while closing out Tier II,
+which is now five-sixths done — `local`, `getopts`, `command`/`type`/
+`hash`, `wait` (with its own prerequisite, `$!`), `source`/`.`, `eval`, and
+`exec` all landed alongside `read`/`printf`/`shift`. C36 (a PATH-visibility
+bug in `command`/`type`/`hash`) turned up while closing out `source`; C37
+while closing out `eval`; C38 while closing out `exec`.
 
 ---
 
 ## Comparison matrix
 
-A cross-section, not the full 37 below — enough to place rush relative to a
+A cross-section, not the full 38 below — enough to place rush relative to a
 strict POSIX shell (dash), the bash family, and the interactive-first shells
 (zsh, fish). ✅ full · 🟡 partial/simplified · ❌ not implemented · — not
 applicable to that shell's own model.
@@ -45,6 +46,7 @@ applicable to that shell's own model.
 | `wait` / `disown` | 🟡‡ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `source` / `.` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `eval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `exec` (process replacement) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -68,8 +70,8 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 8 (6 done)
-- **Tier II — missing standard builtins:** 12 (9 done)
+- **Tier I — correctness/POSIX risk:** 9 (6 done)
+- **Tier II — missing standard builtins:** 12 (10 done)
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
@@ -196,6 +198,21 @@ common shell-scripting mistake there is. **Effort: S** — `build_stage`'s
 spawn-failure path (`exec.rs`) needs to turn a not-found spawn error into
 an ordinary exit-127 result instead of the `Result::Err` it propagates
 today, matching how every other non-zero exit status is already handled.
+
+### C38 — Redirects to any fd other than 0/1/2 silently collapse to fd 1 (tracked)
+POSIX-mandated: `cmd 3>file`, `cmd 4<&5`, `exec 3>file` (holding a
+descriptor open for later) are all ordinary, if less common, shell idioms.
+Rush's whole redirect machinery — both `redirect_stdio` (builtins) and
+`build_stage` (real spawned children) — collapses any `fd` that isn't
+literally `0` or `2` into fd **1** (`target_fd`'s `_ => 1` arm), so `cmd
+3>file` today silently redirects the command's *stdout*, not a real fd 3.
+Silent wrongness, not an error. Found while implementing `exec` (C16),
+which is the first place this blocks a headline idiom (`exec 3>file`)
+rather than being an edge case, but it's general — reproduces for any
+command, builtin or external. **Effort: M** — needs real per-fd tracking
+(open the target, `dup2` onto the actual requested fd) in both code paths,
+plus, for `exec`'s permanent form specifically, a way to keep an arbitrary
+fd open across the rest of the script rather than just 0/1/2.
 
 ---
 
@@ -445,10 +462,40 @@ plain top-level typo too. Tracked separately as C37 — likely higher-impact
 than most of this tier, since it affects *any* mistyped command, not one
 particular feature.
 
-### C16 — `exec`
+### C16 — `exec` ✅ done
 Two standard idioms currently impossible in rush: `exec cmd` (process
 replacement — common in container entrypoints) and `exec 3>file` (holding a
-descriptor open for the rest of the script). **Effort: M.**
+descriptor open for the rest of the script).
+
+Added `exec::exec_cmd` (Unix only, registered as a normal builtin so its
+redirects flow through the existing `run_builtin_foreground`/
+`redirect_stdio` machinery unchanged):
+- **With a command** (`exec cmd args...`): replaces the current process
+  image via `execvp` (`std::os::unix::process::CommandExt::exec`) — no
+  fork, so on success this never returns; it inherits whatever fds 0/1/2
+  the caller's own redirects already left them as, plus the shell's
+  exported environment, exactly like a normal spawned child. On failure
+  (command not found) — verified directly against real bash — a
+  non-interactive shell exits immediately with status 127 (the *whole
+  script* stops right there, not just this command), while an interactive
+  one just reports 127 and keeps running with its redirects restored as
+  normal.
+- **With no command** (bare `exec`, or `exec` followed only by redirects,
+  e.g. `exec > file`, `exec 0<file`): a no-op that always succeeds, except
+  the redirects that `run_builtin_foreground` already applied are made
+  *permanent* — a new `StdioGuard::disarm` closes the saved originals
+  instead of restoring them on drop, the one case where a builtin's
+  redirects are meant to outlive the call.
+
+Found but **out of scope** here, and not specific to `exec`: rush's
+redirect machinery (`redirect_stdio` *and* `build_stage`, i.e. builtins and
+real spawned children alike) only ever wires up fd 0/1/2 — any other
+target `fd` (`cmd 3>file`, `exec 3>file`) silently collapses to fd 1
+(`target_fd`'s `_ => 1` arm) instead of actually opening fd 3. Pre-existing
+across the whole shell, not introduced by `exec` — just the first item
+where it blocks a headline idiom (`exec 3>file` holding an arbitrary
+descriptor open) rather than being an edge case. Tracked separately as C38.
+**Effort: M.**
 
 ### C17 — `umask`
 Needed by any script that creates files or directories with specific

@@ -28,6 +28,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "unalias" => Some(unalias_cmd(argv)),
         "set" => Some(set_cmd(argv)),
         "trap" => Some(trap_cmd(argv)),
+        "read" => Some(read_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -36,7 +37,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 /// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
-    ":", "false", "exit", "alias", "unalias", "set", "trap",
+    ":", "false", "exit", "alias", "unalias", "set", "trap", "read",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -166,10 +167,250 @@ fn export(argv: &[String]) -> i32 {
     0
 }
 
+/// `read [-r] [name...]` — read one line from stdin, splitting it into
+/// fields on `$IFS` and assigning them to the named variables (`REPLY` if
+/// none given); a name past the last field gets the empty string, and the
+/// *last* name absorbs any extra fields verbatim (original separators
+/// intact), not re-split. `-r` disables backslash processing (no line
+/// continuation, no escaping a separator). Reads directly off fd 0 one byte
+/// at a time — this builtin's own redirects (or a whole compound's, via
+/// `exec::redirect_stdio`) already point fd 0 wherever it needs to be by the
+/// time this runs, and a byte-at-a-time read never over-consumes past the
+/// newline, so a loop of `read` calls sharing that same fd (`while read
+/// line; do …; done < file`) picks up exactly where the last call left off.
+///
+/// Exit status: 0 if a newline-terminated line was read, 1 on EOF — even if
+/// a trailing, unterminated partial line was read first (its content is
+/// still assigned, matching real bash).
+fn read_cmd(argv: &[String]) -> i32 {
+    let mut raw = false;
+    let mut idx = 1;
+    while idx < argv.len() {
+        match argv[idx].as_str() {
+            "-r" => {
+                raw = true;
+                idx += 1;
+            }
+            "--" => {
+                idx += 1;
+                break;
+            }
+            s if s.starts_with('-') && s.len() > 1 => {
+                eprintln!("read: {s}: invalid option");
+                return 2;
+            }
+            _ => break,
+        }
+    }
+
+    let mut names: Vec<&str> = argv[idx..].iter().map(String::as_str).collect();
+    if names.is_empty() {
+        names.push("REPLY");
+    }
+
+    let (line, protected, hit_eof) = read_logical_line(raw);
+    let fields = split_read_fields(&line, &protected);
+    assign_read_fields(&names, &line, &fields);
+    if hit_eof { 1 } else { 0 }
+}
+
+/// Read one logical line from stdin, byte at a time (see `read_cmd`'s doc for
+/// why). In raw mode, a physical newline always ends the line. Otherwise,
+/// backslash processing runs *during* the read: `\<newline>` is a line
+/// continuation (both bytes dropped, reading carries on into the next
+/// physical line with no field boundary inserted at the join); `\<char>`
+/// drops the backslash and keeps `<char>` marked "protected" in the returned
+/// mask, so field-splitting never treats it as a separator even if it's an
+/// `$IFS` character. A lone trailing backslash right at EOF is just dropped.
+///
+/// Returns `(line, protected, hit_eof)`: `hit_eof` is true iff the line
+/// ended by exhausting stdin rather than a real newline.
+fn read_logical_line(raw: bool) -> (Vec<u8>, Vec<bool>, bool) {
+    use std::io::Read;
+
+    let mut stdin = std::io::stdin();
+    let mut line = Vec::new();
+    let mut protected = Vec::new();
+    let mut byte = [0u8; 1];
+
+    loop {
+        match stdin.read(&mut byte) {
+            Ok(0) => return (line, protected, true),
+            Err(_) => return (line, protected, true),
+            Ok(_) => {}
+        }
+        let b = byte[0];
+        if b == b'\n' {
+            return (line, protected, false);
+        }
+        if !raw && b == b'\\' {
+            match stdin.read(&mut byte) {
+                Ok(0) | Err(_) => return (line, protected, true),
+                Ok(_) => {
+                    let next = byte[0];
+                    if next != b'\n' {
+                        line.push(next);
+                        protected.push(true);
+                    }
+                    // else: line continuation — both bytes dropped, keep reading.
+                }
+            }
+        } else {
+            line.push(b);
+            protected.push(false);
+        }
+    }
+}
+
+/// One field's byte range within the line read by `read_cmd`.
+struct ReadField {
+    start: usize,
+    end: usize,
+}
+
+/// `$IFS`'s whitespace/non-whitespace split, as bytes — the same
+/// classification `expand.rs`'s `Ifs` uses for word-splitting (see there for
+/// the full rationale), just not sharing code since `read`'s "last name
+/// absorbs the raw remainder" behavior needs field *positions* into the
+/// original bytes, which word-splitting's model has no reason to track.
+struct ReadIfs {
+    whitespace: Vec<u8>,
+    other: Vec<u8>,
+    disabled: bool,
+}
+
+impl ReadIfs {
+    fn current() -> Self {
+        match crate::vars::get("IFS").or_else(|| std::env::var("IFS").ok()) {
+            None => ReadIfs {
+                whitespace: vec![b' ', b'\t', b'\n'],
+                other: Vec::new(),
+                disabled: false,
+            },
+            Some(s) if s.is_empty() => {
+                ReadIfs { whitespace: Vec::new(), other: Vec::new(), disabled: true }
+            }
+            Some(s) => {
+                let mut whitespace = Vec::new();
+                let mut other = Vec::new();
+                for &b in s.as_bytes() {
+                    let bucket = if matches!(b, b' ' | b'\t' | b'\n') { &mut whitespace } else { &mut other };
+                    if !bucket.contains(&b) {
+                        bucket.push(b);
+                    }
+                }
+                ReadIfs { whitespace, other, disabled: false }
+            }
+        }
+    }
+
+    fn is_whitespace(&self, b: u8) -> bool {
+        self.whitespace.contains(&b)
+    }
+
+    fn is_delim(&self, b: u8) -> bool {
+        self.whitespace.contains(&b) || self.other.contains(&b)
+    }
+}
+
+/// Split `line` into fields on `$IFS`, treating any byte marked `protected`
+/// (backslash-escaped — see `read_logical_line`) as never a delimiter. Same
+/// rules as word-splitting: whitespace runs collapse (no empty fields); each
+/// non-whitespace `$IFS` byte delimits a field on its own, even empty, except
+/// a single trailing one right at the end of the line, which — matching a
+/// real asymmetry in bash's own behavior — produces no trailing empty field.
+///
+/// The trailing-elision falls out for free from *not* eagerly reopening a
+/// field right after a hard (non-whitespace) delimiter fires: if nothing
+/// real follows before EOF, `open_start` simply stays `None` and nothing
+/// more gets pushed. If another hard delimiter follows immediately after
+/// (`,,`), *that* firing computes its own start as its own position (via
+/// `unwrap_or(k)`), correctly producing the empty field between them — so a
+/// *repeated* trailing delimiter still leaves one behind, just not the
+/// final one.
+fn split_read_fields(line: &[u8], protected: &[bool]) -> Vec<ReadField> {
+    let ifs = ReadIfs::current();
+    if ifs.disabled {
+        return if line.is_empty() { Vec::new() } else { vec![ReadField { start: 0, end: line.len() }] };
+    }
+
+    let is_delim = |i: usize| !protected[i] && ifs.is_delim(line[i]);
+    let is_ws = |i: usize| !protected[i] && ifs.is_whitespace(line[i]);
+
+    let mut fields = Vec::new();
+    let mut open_start: Option<usize> = None;
+    let n = line.len();
+    let mut i = 0;
+
+    while i < n {
+        if is_delim(i) {
+            let mut j = i;
+            let mut hard = 0usize;
+            while j < n && is_delim(j) {
+                if !is_ws(j) {
+                    hard += 1;
+                }
+                j += 1;
+            }
+            if hard > 0 {
+                let mut k = i;
+                while k < j {
+                    if !is_ws(k) {
+                        let start = open_start.take().unwrap_or(k);
+                        fields.push(ReadField { start, end: k });
+                    }
+                    k += 1;
+                }
+            } else if let Some(start) = open_start.take() {
+                // A pure-whitespace run: close whatever field was open (if
+                // any) — the next real content, if there is any, starts a
+                // fresh one.
+                fields.push(ReadField { start, end: i });
+            }
+            i = j;
+        } else {
+            if open_start.is_none() {
+                open_start = Some(i);
+            }
+            i += 1;
+        }
+    }
+
+    if let Some(start) = open_start {
+        fields.push(ReadField { start, end: n });
+    }
+
+    fields
+}
+
+/// Assign split fields to `names`: each name gets its own field in order: a
+/// name past the last field gets `""`; if there are *more* fields than
+/// names, the last name absorbs everything from its field's start to the end
+/// of the line verbatim (original separators intact), not re-split.
+fn assign_read_fields(names: &[&str], line: &[u8], fields: &[ReadField]) {
+    let n_names = names.len();
+    if fields.len() <= n_names {
+        for (i, name) in names.iter().enumerate() {
+            let value = match fields.get(i) {
+                Some(f) => String::from_utf8_lossy(&line[f.start..f.end]).into_owned(),
+                None => String::new(),
+            };
+            crate::vars::set(name, &value);
+        }
+    } else {
+        for (name, f) in names[..n_names - 1].iter().zip(fields) {
+            crate::vars::set(name, &String::from_utf8_lossy(&line[f.start..f.end]));
+        }
+        let overflow_start = fields[n_names - 1].start;
+        let value = String::from_utf8_lossy(&line[overflow_start..]).into_owned();
+        crate::vars::set(names[n_names - 1], &value);
+    }
+}
+
 /// `test EXPR` / `[ EXPR ]` — evaluate a conditional, returning 0 (true),
 /// 1 (false), or 2 (usage error). Supports the common unary file/string tests,
-/// string `=`/`!=`, integer `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`, and a leading
-/// `!`. (No `-a`/`-o`/parentheses yet.)
+/// string `=`/`!=`, integer `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`, a leading
+/// `!`, and the `-a`/`-o` logical combinators. (No parentheses yet.)
 fn test_dispatch(argv: &[String], bracket: bool) -> i32 {
     let args: &[String] = if bracket {
         if argv.last().map(String::as_str) != Some("]") {
@@ -468,5 +709,49 @@ mod tests {
         // Unary/binary operators still combine with `-a`/`-o`.
         assert_eq!(ev(&["-f", "Cargo.toml", "-a", "-d", "src"]), Ok(true));
         assert_eq!(ev(&["-f", "Cargo.toml", "-a", "-f", "no-such-file-xyz"]), Ok(false));
+    }
+
+    /// Split `line` (no backslash-escaping) on `ifs` (setting `$IFS`, or
+    /// leaving it unset for the default), returning each field's text.
+    fn split(line: &str, ifs: Option<&str>) -> Vec<String> {
+        match ifs {
+            Some(v) => crate::vars::set("IFS", v),
+            None => crate::vars::unset("IFS"),
+        }
+        let bytes = line.as_bytes();
+        let protected = vec![false; bytes.len()];
+        split_read_fields(bytes, &protected)
+            .iter()
+            .map(|f| String::from_utf8_lossy(&bytes[f.start..f.end]).into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn read_field_splitting_matches_real_bash() {
+        // Default IFS: whitespace runs collapse, no empty fields.
+        assert_eq!(split("a   b     c    d", None), vec!["a", "b", "c", "d"]);
+        assert_eq!(split("  leading", None), vec!["leading"]);
+        assert_eq!(split("trailing  ", None), vec!["trailing"]);
+        assert_eq!(split("   ", None), Vec::<String>::new());
+
+        // Custom non-whitespace IFS: each occurrence delimits its own field,
+        // even empty — `a,,b` is three fields, not two.
+        assert_eq!(split("a,,b,c", Some(",")), vec!["a", "", "b", "c"]);
+        // Leading delimiter keeps an empty field; a single *trailing* one at
+        // the very end doesn't — matching bash's own asymmetry there.
+        assert_eq!(split(",a,", Some(",")), vec!["", "a"]);
+        // A *repeated* trailing delimiter still leaves one behind (only the
+        // final one is elided).
+        assert_eq!(split("a,,b,,", Some(",")), vec!["a", "", "b", ""]);
+
+        // Mixed whitespace + non-whitespace IFS: whitespace immediately
+        // adjacent to a hard delimiter is absorbed into it, not an extra
+        // boundary of its own.
+        assert_eq!(split("a, b,, c", Some(" ,")), vec!["a", "b", "", "c"]);
+
+        // `IFS=` (explicitly empty) disables splitting entirely.
+        assert_eq!(split("a  b", Some("")), vec!["a  b"]);
+
+        crate::vars::unset("IFS");
     }
 }

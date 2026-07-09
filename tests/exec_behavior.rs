@@ -14,7 +14,8 @@
 //! `CARGO_BIN_EXE_rush` (only available to integration tests, hence `tests/`
 //! rather than inline) is for — sidesteps all of that at once.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// Runs `rush -c src`, returning `(stdout, exit status)`.
 fn rush(src: &str) -> (String, i32) {
@@ -30,6 +31,25 @@ fn rush_argv(src: &str, argv: &[&str]) -> (String, i32) {
         .args(argv)
         .output()
         .expect("spawn rush");
+    (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
+}
+
+/// Like [`rush`], but feeding `input` on stdin — for `read` tests.
+fn rush_stdin(src: &str, input: &str) -> (String, i32) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg(src)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn rush");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait rush");
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
 }
 
@@ -287,5 +307,94 @@ fn compound_command_as_one_stage_of_a_real_pipeline() {
     assert_eq!(
         rush("cd /tmp && (cd /; pwd) | cat; pwd").0,
         "/\n/tmp\n"
+    );
+}
+
+#[test]
+fn read_builtin_splits_fields_and_reports_eof() {
+    // Piped stdin, default `REPLY`.
+    assert_eq!(rush_stdin("read; echo \"got:$REPLY\"", "hi\n").0, "got:hi\n");
+
+    // Named variables, default IFS; excess input goes to the *last* name
+    // verbatim (original spacing intact), not re-split.
+    assert_eq!(rush_stdin("read x y; echo \"[$x][$y]\"", "a b c d\n").0, "[a][b c d]\n");
+    // Fewer fields than names: the rest get the empty string.
+    assert_eq!(rush_stdin("read x y z; echo \"[$x][$y][$z]\"", "a  b\n").0, "[a][b][]\n");
+
+    // Custom `$IFS`: each non-whitespace occurrence delimits its own field,
+    // even empty.
+    assert_eq!(
+        rush_stdin("IFS=,; read a b c d; echo \"[$a][$b][$c][$d]\"", "a,b,,c\n").0,
+        "[a][b][][c]\n"
+    );
+
+    // Exit status: 0 for a newline-terminated line, 1 on EOF — even when a
+    // trailing unterminated line was still read and assigned.
+    assert_eq!(rush_stdin("read x; echo \"$?:[$x]\"", "hello").0, "1:[hello]\n");
+    assert_eq!(rush_stdin("read x; echo \"$?:[$x]\"", "").0, "1:[]\n");
+}
+
+#[test]
+fn read_backslash_escaping_and_raw_mode() {
+    // Default (non-`-r`): `\<newline>` continues the line (both dropped, no
+    // field boundary at the join); `\<char>` drops the backslash and keeps
+    // `<char>` from acting as a separator even if it's whitespace.
+    assert_eq!(rush_stdin("read x y; echo \"[$x][$y]\"", "a\\\nb c\n").0, "[ab][c]\n");
+    assert_eq!(rush_stdin("read x y; echo \"[$x][$y]\"", "a\\ b c\n").0, "[a b][c]\n");
+
+    // `-r` disables all of that: the backslash is just an ordinary character.
+    assert_eq!(rush_stdin("read -r x y; echo \"[$x][$y]\"", "a\\ b c\n").0, "[a\\][b c]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn while_read_loop_reads_from_a_redirected_file() {
+    // The headline C7 case: `read` inside a `while` loop whose *compound*
+    // (not per-iteration) redirect feeds it — this also exercises the fix
+    // letting a redirect trail a compound command's close at all (`done <
+    // file` used to be silently dropped: the file's contents were never
+    // wired to fd 0, so the loop read the shell's real stdin instead).
+    let path = std::env::temp_dir().join(format!("rush_read_loop_{}.txt", std::process::id()));
+    std::fs::write(&path, "a\nb\nc\n").unwrap();
+    let src = format!("while read line; do echo \"L:$line\"; done < {}", path.to_str().unwrap());
+    assert_eq!(rush(&src).0, "L:a\nL:b\nL:c\n");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn redirect_trailing_a_compound_command_is_applied() {
+    let path = std::env::temp_dir().join(format!("rush_compound_redir_{}.txt", std::process::id()));
+    std::fs::write(&path, "one\ntwo\n").unwrap();
+    let file = path.to_str().unwrap();
+
+    // A brace group's own redirect.
+    assert_eq!(rush(&format!("{{ cat; }} < {file}")).0, "one\ntwo\n");
+    // A subshell's own redirect.
+    assert_eq!(rush(&format!("(cat) < {file}")).0, "one\ntwo\n");
+    // Still applies when the compound is also a pipeline stage.
+    assert_eq!(rush(&format!("(cat) < {file} | tr a-z A-Z")).0, "ONE\nTWO\n");
+    // And when the whole compound is captured via `$(...)`.
+    assert_eq!(rush(&format!("x=$(cat < {file}); echo \"$x\"")).0, "one\ntwo\n");
+
+    // Output redirect trailing a `while` loop.
+    let out_path = std::env::temp_dir().join(format!("rush_compound_redir_out_{}.txt", std::process::id()));
+    let out_file = out_path.to_str().unwrap();
+    rush(&format!("i=0; while [ $i -lt 2 ]; do echo hi; i=$((i+1)); done > {out_file}"));
+    assert_eq!(std::fs::read_to_string(&out_path).unwrap(), "hi\nhi\n");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&out_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn heredoc_trailing_a_compound_command_feeds_it() {
+    // A here-doc attached to a compound's close, not a simple command's —
+    // e.g. `while read line; do …; done <<EOF`, a common idiom for feeding
+    // literal inline data into a read loop.
+    assert_eq!(
+        rush("while read line; do echo \"L:$line\"; done <<EOF\na\nb\nEOF").0,
+        "L:a\nL:b\n"
     );
 }

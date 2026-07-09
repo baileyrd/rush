@@ -24,8 +24,7 @@ use std::process::Stdio;
 
 use libc::{c_int, pid_t};
 
-use crate::exec::{Pipeline, Stage};
-use crate::parser::Compound;
+use crate::exec::{CompoundStage, Pipeline, Stage};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum JobState {
@@ -177,11 +176,16 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
 /// Fork a compound command (`if`/`while`/`(...)`/…) as one stage of a real
 /// pipeline. The child gets the same process-group and signal treatment as
 /// an exec'd stage, so it behaves consistently under Ctrl-C/Ctrl-Z; its
-/// stdin/stdout are wired via `dup2` from `stdin_src`/a freshly-made pipe.
+/// stdin/stdout are wired via `dup2` from `stdin_src`/a freshly-made pipe, and
+/// any redirects trailing the compound's own close (`(cmd) < file | grep x`)
+/// are applied *after* that baseline — same precedence `build_stage` uses —
+/// via the same `redirect_stdio` a lone builtin or a whole compound run
+/// in-process uses, just never restored (this child exits right after
+/// running the compound, so there's nothing to give the fds back to).
 /// Returns `(pid, next_stdin)`: the child's pid, and — if `!is_last` — the
 /// read end of a pipe the next stage should use as its own stdin.
 fn spawn_compound_stage(
-    compound: &Compound,
+    stage: &CompoundStage,
     stdin_src: Option<File>,
     is_last: bool,
     target_pgid: pid_t,
@@ -210,7 +214,14 @@ fn spawn_compound_stage(
             }
             drop(stdin_src);
             drop(next_pipe);
-            let status = crate::exec::run_compound(compound).unwrap_or(1);
+            match crate::exec::redirect_stdio(&stage.redirects, stage.heredoc.as_deref()) {
+                Ok(guard) => std::mem::forget(guard),
+                Err(e) => {
+                    eprintln!("rush: {e}");
+                    crate::trap::exit_shell(1);
+                }
+            }
+            let status = crate::exec::run_compound(&stage.compound).unwrap_or(1);
             crate::trap::exit_shell(status);
         }
         pid => {

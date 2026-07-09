@@ -263,3 +263,39 @@ git history for the commit-by-commit narrative.
 
 This closes out **Tier I** (correctness/POSIX risk) — see
 `docs/CAPABILITY_GAPS.md` — entirely: C1 through C6 are all done.
+
+### `read` builtin, and redirects trailing a compound command's close (C7)
+- `read [-r] [name...]` (`builtins.rs`) reads one logical line directly off
+  fd 0 a byte at a time (never over-consuming past the newline, so a loop of
+  calls sharing one fd — `while read line; do …; done < file` — picks up
+  exactly where the last call left off) and splits it into fields on `$IFS`,
+  using the same whitespace/non-whitespace classification and
+  trailing-delimiter asymmetry word-splitting uses (C5). A name past the
+  last field gets `""`; the *last* name absorbs any extra fields verbatim
+  (original separators intact), not re-split. Without `-r`, `\<newline>` is a
+  line continuation and `\<char>` escapes a separator; `-r` disables both.
+  Exit status is 0 for a newline-terminated line, 1 on EOF (even if a
+  trailing unterminated partial line was still read and assigned) — all
+  verified against real bash directly.
+- Landing `read` exposed a real, separate, pre-existing gap it needed to be
+  useful for its headline idiom: a redirect trailing a compound command's
+  close (`while …; done < file`, `{ …; } > log`) was silently dropped by the
+  parser — the tokens just became a stray no-op command afterward, so `done
+  < file` never wired the file to fd 0 at all (a lone `while read …` with no
+  pipe would silently read the shell's real stdin instead of the file — a
+  hang in a script, not an error). Fixed: the parser now attaches trailing
+  redirects to the compound itself (new `RawCompound`/`exec::CompoundStage`,
+  alongside a here-doc body, mirroring `Command`'s own `redirects`/`heredoc`
+  split), applied for the compound's whole duration via the same
+  `redirect_stdio` (renamed from `redirect_builtin_stdio`, since it's no
+  longer builtin-only) a lone builtin already used — including a compound as
+  one stage of a real pipeline (`job::spawn_compound_stage`) and a compound
+  captured via `$(...)` (`capture_compound`), with the same "explicit
+  redirect overrides implicit pipe/capture wiring" precedence `build_stage`
+  already uses for simple commands.
+- A here-doc trailing a compound's close (`while …; done <<EOF`) works the
+  same way, fed through a `CLOEXEC`-marked pipe (`set_cloexec`) from a
+  background thread — the fix for a real deadlock found while testing this:
+  without `CLOEXEC`, a real child spawned from the compound's body before
+  the writer thread finished would inherit its own copy of the write end via
+  fork/exec, so the reader never saw EOF.

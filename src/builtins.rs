@@ -37,6 +37,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "type" => Some(type_cmd(argv)),
         "hash" => Some(hash_cmd(argv)),
         "." | "source" => Some(source_cmd(argv)),
+        "eval" => Some(eval_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -46,7 +47,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source",
+    "getopts", "command", "type", "hash", ".", "source", "eval",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1215,6 +1216,20 @@ fn source_cmd(argv: &[String]) -> i32 {
         Err(e) => {
             eprintln!("{}: {name}: {e}", argv[0]);
             1
+        }
+    }
+}
+
+/// `eval arg...` — see `exec::eval_cmd` for the full semantics: the args are
+/// joined with a space, parsed, and run in the current shell as if typed
+/// inline (no scope at all — no filename, no positional-parameter swap, and
+/// `return`/`break`/`continue` propagate straight through, unlike `source`).
+fn eval_cmd(argv: &[String]) -> i32 {
+    match crate::exec::eval_cmd(&argv[1..]) {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!("{}: {e}", argv[0]);
+            2
         }
     }
 }

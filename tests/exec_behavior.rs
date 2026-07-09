@@ -369,6 +369,42 @@ fn wait_builtin_and_last_bg_pid() {
 }
 
 #[test]
+fn eval_builtin() {
+    // Multiple args are joined with a single space before parsing.
+    assert_eq!(rush("eval echo a echo b").0, "a echo b\n");
+
+    // Runs in the current environment: no new scope at all.
+    assert_eq!(rush("x=1; eval 'y=2; echo $x $y'; echo after:$x:$y").0, "1 2\nafter:1:2\n");
+
+    // No arguments (or all-empty ones) is a no-op that succeeds.
+    assert_eq!(rush("eval; echo status:$?").0, "status:0\n");
+
+    // Unlike `source`, `eval` establishes no boundary at all: `return`
+    // inside it unwinds the *whole enclosing function*, not just the eval.
+    assert_eq!(
+        rush("f() { eval 'return 5'; echo not_reached; }; f; echo status:$?").0,
+        "status:5\n"
+    );
+
+    // Likewise `break`/`continue` propagate straight to the enclosing loop.
+    assert_eq!(
+        rush("for i in 1 2 3; do eval 'echo hi; break'; echo not_reached; done; echo after").0,
+        "hi\nafter\n"
+    );
+
+    // A compound command works fine when parsed and run via eval.
+    assert_eq!(rush("eval 'for i in a b c; do echo $i; done'").0, "a\nb\nc\n");
+
+    // Exit status is that of the last command eval actually ran.
+    assert_eq!(rush("eval false; echo status:$?").0, "status:1\n");
+
+    // A parse error inside eval fails with status 2, without taking down
+    // the rest of the script.
+    let (_, status) = rush("eval 'if'; echo status:$?");
+    assert_eq!(status, 0); // the script's own last command (echo) still succeeds
+}
+
+#[test]
 fn source_and_dot_builtin() {
     let path = std::env::temp_dir().join(format!("rush_source_lib_{}.sh", std::process::id()));
     std::fs::write(&path, "FOO=bar\ngreet() { echo \"hi $1\"; }\n").unwrap();

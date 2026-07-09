@@ -136,3 +136,40 @@ git history for the commit-by-commit narrative.
   process under job control and never delivers `SIGINT` to the shell itself)
   are fired. Guarded against re-entrancy, so an `EXIT` trap that itself calls
   `exit` can't recurse forever.
+
+### Test coverage for `exec.rs` and `job.rs` (G9)
+- `exec.rs` — previously zero tests on the runtime core — is now covered
+  black-box in `tests/exec_behavior.rs`, against the compiled binary rather
+  than an in-crate module: pipeline wiring, redirection routing, exit-status
+  propagation and short-circuiting, compound status, and two G10 regression
+  locks (`2>&1` into a pipe, and a forked subshell's `exit` not killing the
+  outer shell). The in-process alternative (`parser::parse` +
+  `run_list`/`capture_list`) turned out to have real footguns: `capture_list`
+  never tracks `$?` across jobs and rejects any compound command outright,
+  and a builtin's redirects are wired up via a process-wide `dup2` that races
+  across `cargo test`'s concurrent threads. A real subprocess per test
+  sidesteps all of that.
+- `job.rs` — also previously zero tests — gets an in-crate `#[cfg(test)]`
+  module: `run_foreground`'s exit-status reporting (single command,
+  multi-stage pipeline, signal death), and the job-table bookkeeping
+  (`update_by_pid`/`notify_and_prune`) that backs `jobs`/`fg`/`bg`.
+- Two narrower gaps `capture_list` surfaced along the way, not fixed here:
+  it doesn't track `$?` across jobs within a substitution, and it rejects
+  *any* compound command, even a lone one (not just one mid-pipeline, which
+  was already documented).
+
+### Windows/MSYS2 build strategy (G11)
+- Validated, not just documented: cross-compiled rush for
+  `x86_64-pc-windows-gnu` with the same mingw-w64 toolchain MSYS2 packages —
+  it builds and links into a genuine `PE32+` Windows executable, and
+  `cargo tree` confirms rush's own `libc` dependency (and so `job.rs`) is
+  excluded for that target. This corrects the gap's original framing: there
+  is no "MSYS2 build with full job control" — `cfg(unix)`/`cfg(windows)`
+  are decided by the target triple, not the build environment, and no
+  Rust-supported Windows target sets `cfg(unix)`. Every Windows build is
+  foreground-only, unconditionally, by construction — see `docs/
+  ARCHITECTURE.md`'s `job.rs` section for the full writeup. Not validated:
+  actually running the cross-compiled binary (no Windows machine in this
+  environment, and a Wine install hit an unrelated package error) —
+  unnecessary for the conclusion above, since it's decided by what compiles
+  in, not by anything only observable at runtime.

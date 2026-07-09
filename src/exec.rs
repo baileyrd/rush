@@ -748,3 +748,4 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
         .collect::<Vec<_>>()
         .join(" | ")
 }
+

@@ -364,7 +364,51 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   job whose *final* status is nonzero, not bash's finer "except a command
   that isn't positionally last in an `&&`/`||` list."
 
+**Tests:** `exec.rs`'s own runtime behavior — pipeline wiring, redirection
+routing, exit-status propagation and short-circuiting, compound status,
+`2>&1`-into-a-pipe (G10 regression lock-in), forked-subshell `exit` isolation
+(G10 regression lock-in) — is covered black-box, against the compiled binary,
+in `tests/exec_behavior.rs` rather than an in-crate `#[cfg(test)]` module.
+That turned out to matter: a hand-rolled in-process helper (`parser::parse` +
+`run_list`/`capture_list`) has real footguns for this — `capture_list` never
+tracks `$?` across jobs (it's built only for concatenating `$(...)` output,
+not for replaying whole-script semantics) and rejects any compound command
+outright, and a builtin's redirects are wired up via a process-wide `dup2`
+around the call (`run_builtin_foreground`) that races across `cargo test`'s
+concurrently-running threads since fd 0/1/2 aren't per-thread. A genuinely
+separate process per test sidesteps all of that. (Two things this surfaced,
+still open: `capture_list`'s `$?` gap and its blanket rejection of compound
+commands, even a lone one — narrower than the documented "compound as one
+stage among several in a pipeline" limitation above.)
+
 ### `job.rs` — Unix job control *(compiled only on Unix)*
+
+**Windows strategy (G11):** `#[cfg(unix)]`/`#[cfg(not(unix))]` are decided by
+the Rust *target triple*, not the build/shell environment — there's no
+"building under MSYS2" distinct from "building for Windows normally." MSYS2
+just packages the same mingw-w64 GNU toolchain rustup uses for the standard
+`x86_64-pc-windows-gnu` target, which — like `x86_64-pc-windows-msvc` — has
+`cfg(windows)`, never `cfg(unix)`. Verified directly, not just reasoned:
+cross-compiling with that same mingw-w64 toolchain (`rustup target add
+x86_64-pc-windows-gnu`, `apt install mingw-w64`, `cargo build --release
+--target x86_64-pc-windows-gnu`) succeeds and produces a genuine `PE32+
+executable ... for MS Windows`; `cargo tree --target x86_64-pc-windows-gnu`
+confirms rush's own `libc` dependency (`[target.'cfg(unix)'.dependencies]` in
+`Cargo.toml`) is excluded for that target, so `job.rs` (`#[cfg(unix)] mod
+job;` in `main.rs`) never compiles in — there is no code path, on any
+Rust-supported Windows target, that can produce a job-control-capable
+Windows binary. So **the "MSYS2 = full job control" half of this gap's
+original framing doesn't hold**: every Windows build, via MSYS2 or otherwise,
+is foreground-only, unconditionally, by construction — not merely "by
+design" as a choice not yet revisited, but because `job.rs`'s POSIX
+`libc` calls (`setpgid`, `tcsetpgrp`, `WIFSTOPPED`, …) have no Windows
+equivalent wired up, and no supported target sets `cfg(unix)` on Windows to
+even reach that code. (Not validated: actually *running* the cross-compiled
+binary — this sandbox has no Windows machine, and a Wine install attempt
+failed on an unrelated package-repository error. Unnecessary for the
+job-control conclusion above, though, since that's decided statically by
+which code compiles in, not by anything only observable at runtime.)
+
 Implements the parts that need POSIX process groups and signals, via the `libc`
 crate, following the classic glibc job-control structure:
 - `init` (called once at startup, only when stdin is a tty) ignores the
@@ -380,6 +424,21 @@ crate, following the classic glibc job-control structure:
   `reap_background` sweep run before each prompt (a non-blocking `waitpid` that
   reports finished, stopped, and continued jobs). `kill [-SIG] %n|pid` signals a
   job's process group (via `killpg`) or a process.
+
+**Tests:** an in-crate `#[cfg(test)] mod tests` at the end of this file,
+constructing `exec::Pipeline`/`Command` values directly (both are plain
+public structs) rather than going through the parser — covers
+`run_foreground`'s exit-status reporting for a single command, a multi-stage
+pipeline (only the last stage's status counts), and a signal-killed child
+(the conventional `128 + signal`, via a real `SIGTERM`, not a hand-encoded
+wait status). None of these call `init()` with a real tty (there isn't one
+under `cargo test`), so `job_control_enabled()` stays false throughout —
+`give_terminal`/`reclaim_terminal` are no-ops, same as running rush
+non-interactively, which is exactly the path exercised. A fourth test drives
+the job-table bookkeeping (`update_by_pid`/`notify_and_prune`) directly
+rather than through the public `reap_background`, since *that* function does
+gate on `job_control_enabled()` (real job control needs a tty to hand the
+terminal back to) and would silently no-op here.
 
 ### `builtins.rs` — in-process commands
 `try_run` returns `Some(code)` if `argv[0]` is a builtin, else `None`:

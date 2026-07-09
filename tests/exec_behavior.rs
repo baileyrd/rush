@@ -113,6 +113,55 @@ fn errexit_matches_bashs_positionally_last_rule() {
 }
 
 #[test]
+fn nounset_rejects_unset_variable_references() {
+    // A bare reference to an unset variable is an error that aborts the
+    // rest of the script — an `echo` right after never runs.
+    let (out, status) = rush("set -u; echo before; echo $UNDEF; echo after");
+    assert_eq!(out, "before\n");
+    assert_eq!(status, 1);
+
+    // Same for `${name}`, `${#name}`, and the pattern-removal operators —
+    // all need the variable's actual value, unlike the family below.
+    assert_eq!(rush("set -u; echo ${UNDEF}; echo after").0, "");
+    assert_eq!(rush("set -u; echo ${#UNDEF}; echo after").0, "");
+    assert_eq!(rush("set -u; echo ${UNDEF#prefix}; echo after").0, "");
+    assert_eq!(rush("set -u; echo ${UNDEF%suffix}; echo after").0, "");
+
+    // A previously-set-then-unset variable is treated the same as one that
+    // was never set.
+    assert_eq!(rush("set -u; unset y; echo $y").0, "");
+
+    // The default/alternate family is exempt — they define their own
+    // unset-variable handling, verified directly against real bash.
+    assert_eq!(rush("set -u; echo ${UNDEF:-default}; echo ok").0, "default\nok\n");
+    assert_eq!(rush("set -u; echo \"${UNDEF:+alt}\"; echo ok").0, "\nok\n");
+    assert_eq!(
+        rush("set -u; echo ${UNDEF:=created}; echo $UNDEF").0,
+        "created\ncreated\n"
+    );
+
+    // `$@`/`$*`/`$#`/`$?`/`$$` are always considered set, even when the
+    // positional parameters are empty — but a numbered one ($1, ${10}) is
+    // still subject to the check when it doesn't exist.
+    assert_eq!(
+        rush("set -u; for a in \"$@\"; do echo $a; done; echo ok").0,
+        "ok\n"
+    );
+    assert_eq!(rush("set -u; echo \"$*\"; echo \"$#\"; echo ok").0, "\n0\nok\n");
+    assert_eq!(rush("set -u; echo $1; echo after").0, "");
+    assert_eq!(rush("set -u; echo ${10}; echo after").0, "");
+
+    // A set-but-empty variable is fine — the check is "unset", not "empty".
+    assert_eq!(rush("set -u; x=; echo \"[$x]\"; echo ok").0, "[]\nok\n");
+
+    // `set +u` turns it back off.
+    assert_eq!(
+        rush("set -u; x=1; echo $x; set +u; echo $UNDEF; echo ok").0,
+        "1\n\nok\n"
+    );
+}
+
+#[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used
     // to leak stderr straight to the terminal instead of routing it through

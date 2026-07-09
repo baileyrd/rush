@@ -501,7 +501,7 @@ fn expand_dollars(text: &str) -> Result<String, String> {
             Some(&c) if c.is_ascii_digit() => {
                 chars.next();
                 let n = (c as u8 - b'0') as usize;
-                out.push_str(&crate::vars::arg(n).unwrap_or_default());
+                out.push_str(&arg_checked(n)?);
             }
             Some('{') => {
                 chars.next(); // consume '{'
@@ -535,7 +535,7 @@ fn expand_dollars(text: &str) -> Result<String, String> {
                         break;
                     }
                 }
-                out.push_str(&var_lookup(&name));
+                out.push_str(&var_lookup_checked(&name)?);
             }
             // A lone `$` (or one before punctuation/digits we don't handle yet)
             // is just a literal dollar sign.
@@ -618,9 +618,31 @@ fn var_raw(name: &str) -> Option<String> {
     crate::vars::get(name).or_else(|| std::env::var(name).ok())
 }
 
-/// As [`var_raw`], but an unset variable expands to empty.
-fn var_lookup(name: &str) -> String {
-    var_raw(name).unwrap_or_default()
+/// As [`var_raw`], but honors `set -u` (nounset): an unset variable is an
+/// error instead of expanding to empty. Used at every "plain value" call
+/// site (`$name`, `${name}`, `${#name}`, the `#`/`##`/`%`/`%%` pattern-removal
+/// operators) — but *not* the `:-`/`:=`/`:+`/`:?` default/alternate family,
+/// which handle an unset variable themselves and are exempt from the check
+/// in real bash (verified directly), nor the `@`/`*`/`#` special parameters
+/// or `$0`, which are always considered set even when empty.
+fn var_lookup_checked(name: &str) -> Result<String, String> {
+    match var_raw(name) {
+        Some(v) => Ok(v),
+        None if crate::vars::nounset() => Err(format!("{name}: unbound variable")),
+        None => Ok(String::new()),
+    }
+}
+
+/// As [`crate::vars::arg`], but honors `set -u`: `$N`/`${N}` for a positional
+/// parameter beyond `$#` is an error under nounset (verified directly against
+/// real bash — unlike `$@`/`$*`, a numbered positional parameter *is* subject
+/// to the check).
+fn arg_checked(n: usize) -> Result<String, String> {
+    match crate::vars::arg(n) {
+        Some(v) => Ok(v),
+        None if crate::vars::nounset() => Err(format!("{n}: unbound variable")),
+        None => Ok(String::new()),
+    }
 }
 
 fn is_valid_name(s: &str) -> bool {
@@ -643,7 +665,7 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         "*" => return Ok(crate::vars::args().join(&Ifs::current().star_sep)),
         _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
             let n: usize = inner.parse().map_err(|_| format!("${{{inner}}}: bad substitution"))?;
-            return Ok(crate::vars::arg(n).unwrap_or_default());
+            return arg_checked(n);
         }
         _ => {}
     }
@@ -652,7 +674,7 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         if !is_valid_name(name) {
             return Err(format!("${{{inner}}}: bad substitution"));
         }
-        return Ok(var_lookup(name).chars().count().to_string());
+        return Ok(var_lookup_checked(name)?.chars().count().to_string());
     }
 
     let name_end = inner
@@ -665,26 +687,26 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         return Err(format!("${{{inner}}}: bad substitution"));
     }
     if rest.is_empty() {
-        return Ok(var_lookup(name));
+        return var_lookup_checked(name);
     }
 
     // Pattern-removal: `##`/`%%` before `#`/`%` so the doubled (greedy) form
     // isn't mistaken for the single form plus a literal leading `#`/`%`.
     if let Some(word_src) = rest.strip_prefix("##") {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_prefix_pattern(&var_lookup(name), &pattern, true));
+        return Ok(strip_prefix_pattern(&var_lookup_checked(name)?, &pattern, true));
     }
     if let Some(word_src) = rest.strip_prefix('#') {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_prefix_pattern(&var_lookup(name), &pattern, false));
+        return Ok(strip_prefix_pattern(&var_lookup_checked(name)?, &pattern, false));
     }
     if let Some(word_src) = rest.strip_prefix("%%") {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_suffix_pattern(&var_lookup(name), &pattern, true));
+        return Ok(strip_suffix_pattern(&var_lookup_checked(name)?, &pattern, true));
     }
     if let Some(word_src) = rest.strip_prefix('%') {
         let pattern = expand_dollars(word_src)?;
-        return Ok(strip_suffix_pattern(&var_lookup(name), &pattern, false));
+        return Ok(strip_suffix_pattern(&var_lookup_checked(name)?, &pattern, false));
     }
 
     let colon = rest.starts_with(':');

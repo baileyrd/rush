@@ -495,3 +495,23 @@ This closes out **Tier I** (correctness/POSIX risk) — see
 - One argument sets it from an octal string; an out-of-range or malformed
   mode fails with status 1 without touching the mask. Symbolic *setting*
   (`umask u=rwx,g=rx,o=`) isn't supported, only octal.
+
+### `set -u` (nounset) (C18)
+- `vars::set_nounset`/`nounset` (mirroring `errexit`'s own thread-local
+  flag) plus two new checked lookups in `expand.rs` — `var_lookup_checked`,
+  `arg_checked` — used everywhere a plain value is needed: `$name`/
+  `${name}`, `${#name}`, the `#`/`##`/`%`/`%%` pattern-removal operators,
+  and numbered positional parameters (`$1`, `${10}`). Referencing an unset
+  one is now an error that aborts the rest of the script, instead of
+  silently expanding to an empty string.
+- Exemptions verified directly against real bash: the `:-`/`:=`/`:+`/`:?`
+  default/alternate family defines its own unset-variable handling and
+  stays untouched; `$@`/`$*`/`$#`/`$?`/`$$` are always considered set, even
+  with zero positional parameters, while a specific numbered one is still
+  subject to the check; a set-but-empty variable is fine (the test is
+  "unset", not "empty"); `set +u` turns it back off.
+- One caveat, shared with the pre-existing `${VAR:?msg}` error rush already
+  had (not introduced by this change): bash exits a non-interactive shell
+  with status 127 for an unbound reference specifically, but rush's exits
+  with 1 like most of its other expansion errors — the script still aborts
+  right there either way, just with a different code.

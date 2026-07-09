@@ -29,6 +29,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "set" => Some(set_cmd(argv)),
         "trap" => Some(trap_cmd(argv)),
         "read" => Some(read_cmd(argv)),
+        "printf" => Some(printf_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -37,7 +38,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 /// in `other_builtin`, e.g. `job`'s `jobs`/`fg`/`bg`/`kill` on Unix).
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
-    ":", "false", "exit", "alias", "unalias", "set", "trap", "read",
+    ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -92,6 +93,298 @@ fn echo(argv: &[String]) -> i32 {
         let _ = std::io::stdout().flush();
     }
     0
+}
+
+/// `printf FORMAT [args...]` — the portable, correct way to emit formatted
+/// output (unlike `echo`, whose formatting is whatever the platform's
+/// convention happens to be). Supports `%s`/`%b` (string, `%b` also
+/// processing backslash escapes in *its* argument), `%d`/`%i`/`%o`/`%u`/`%x`/
+/// `%X` (integer, decimal/octal/unsigned/hex), `%c` (first character), `%%`,
+/// the `-`/`0`/`+`/` ` flags, and a width and/or `.precision` — no `*`
+/// (width/precision from an argument) and no floating-point conversions
+/// (`%e`/`%f`/`%g`) yet. `\n`/`\t`/`\\`/`\a`/`\b`/`\f`/`\r`/`\v`/`\NNN` (octal)
+/// escapes in the *format string* are processed once, up front.
+///
+/// If the format has more argument-consuming conversions than there are
+/// arguments, the missing ones default to `""`/`0`. If there are *more*
+/// arguments than the format consumes (and it consumes at least one), the
+/// whole format repeats against the rest, POSIX/bash style: `printf
+/// "%s-%d\n" a 1 b 2 c` is `a-1`, `b-2`, `c-0`.
+fn printf_cmd(argv: &[String]) -> i32 {
+    let Some(format) = argv.get(1) else {
+        eprintln!("printf: usage: printf format [arguments]");
+        return 2;
+    };
+    let args = &argv[2..];
+
+    let pieces = match printf::parse_format(format) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("printf: {e}");
+            return 1;
+        }
+    };
+    let consumes_args = pieces.iter().any(|p| matches!(p, printf::Piece::Conv(_)));
+
+    let mut idx = 0;
+    let mut out = String::new();
+    let mut status = 0;
+    loop {
+        let start_idx = idx;
+        for piece in &pieces {
+            match piece {
+                printf::Piece::Literal(s) => out.push_str(s),
+                printf::Piece::Conv(conv) => {
+                    let arg = args.get(idx);
+                    if arg.is_some() {
+                        idx += 1;
+                    }
+                    let (text, err) = printf::format_conv(conv, arg.map(String::as_str).unwrap_or(""));
+                    out.push_str(&text);
+                    if let Some(e) = err {
+                        eprintln!("printf: {e}");
+                        status = 1;
+                    }
+                }
+            }
+        }
+        if !consumes_args || idx >= args.len() || idx == start_idx {
+            break;
+        }
+    }
+
+    print!("{out}");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    status
+}
+
+/// `printf`'s format-string parsing and per-conversion formatting.
+mod printf {
+    #[derive(Debug)]
+    pub enum Piece {
+        Literal(String),
+        Conv(Conv),
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Conv {
+        minus: bool,
+        zero: bool,
+        plus: bool,
+        space: bool,
+        width: Option<usize>,
+        precision: Option<usize>,
+        spec: char,
+    }
+
+    /// Parse a format string into literal chunks (with `\`-escapes already
+    /// resolved) and conversion specs, ready to be replayed once per cycle
+    /// through the argument list.
+    pub fn parse_format(format: &str) -> Result<Vec<Piece>, String> {
+        let mut pieces = Vec::new();
+        let mut literal = String::new();
+        let mut chars = format.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                push_escape(&mut literal, &mut chars);
+            } else if c == '%' {
+                if chars.peek() == Some(&'%') {
+                    chars.next();
+                    literal.push('%');
+                    continue;
+                }
+                if !literal.is_empty() {
+                    pieces.push(Piece::Literal(std::mem::take(&mut literal)));
+                }
+                pieces.push(Piece::Conv(parse_conv(&mut chars)?));
+            } else {
+                literal.push(c);
+            }
+        }
+        if !literal.is_empty() {
+            pieces.push(Piece::Literal(literal));
+        }
+        Ok(pieces)
+    }
+
+    /// Resolve one backslash escape (the `\` itself already consumed) into
+    /// `out` — `\\`/`\a`/`\b`/`\f`/`\n`/`\r`/`\t`/`\v`, `\NNN` (one to three
+    /// octal digits), or an unrecognized sequence kept literally.
+    fn push_escape(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars>) {
+        match chars.peek() {
+            Some('\\') => {
+                out.push('\\');
+                chars.next();
+            }
+            Some('a') => {
+                out.push('\x07');
+                chars.next();
+            }
+            Some('b') => {
+                out.push('\x08');
+                chars.next();
+            }
+            Some('f') => {
+                out.push('\x0c');
+                chars.next();
+            }
+            Some('n') => {
+                out.push('\n');
+                chars.next();
+            }
+            Some('r') => {
+                out.push('\r');
+                chars.next();
+            }
+            Some('t') => {
+                out.push('\t');
+                chars.next();
+            }
+            Some('v') => {
+                out.push('\x0b');
+                chars.next();
+            }
+            Some('0'..='7') => {
+                let mut val: u32 = 0;
+                for _ in 0..3 {
+                    match chars.peek().and_then(|c| c.to_digit(8)) {
+                        Some(d) => {
+                            val = val * 8 + d;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                out.push((val as u8) as char);
+            }
+            _ => out.push('\\'),
+        }
+    }
+
+    /// Parse `[flags][width][.precision]spec` right after the `%` that
+    /// introduced it.
+    fn parse_conv(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<Conv, String> {
+        let mut conv = Conv::default();
+        loop {
+            match chars.peek() {
+                Some('-') => conv.minus = true,
+                Some('0') => conv.zero = true,
+                Some('+') => conv.plus = true,
+                Some(' ') => conv.space = true,
+                _ => break,
+            }
+            chars.next();
+        }
+
+        conv.width = take_digits(chars);
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            conv.precision = Some(take_digits(chars).unwrap_or(0));
+        }
+
+        conv.spec = chars.next().ok_or("missing conversion specifier")?;
+        if !"diouxXcsb".contains(conv.spec) {
+            return Err(format!("`%{}': invalid conversion specification", conv.spec));
+        }
+        Ok(conv)
+    }
+
+    fn take_digits(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<usize> {
+        let mut n = 0usize;
+        let mut any = false;
+        while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+            n = n * 10 + d as usize;
+            any = true;
+            chars.next();
+        }
+        any.then_some(n)
+    }
+
+    /// Format one conversion against its argument (`""` if none was left).
+    /// Returns the formatted text and, if the argument couldn't be parsed as
+    /// a number a numeric conversion needed, an error message (the
+    /// conversion still yields `0`/`""` rather than aborting the whole
+    /// `printf`, matching bash).
+    pub fn format_conv(conv: &Conv, raw: &str) -> (String, Option<String>) {
+        let mut error = None;
+        let mut parse_int = || match raw.trim() {
+            "" => 0i64,
+            s => s.parse().unwrap_or_else(|_| {
+                error = Some(format!("{raw}: invalid number"));
+                0
+            }),
+        };
+
+        let (body, is_numeric) = match conv.spec {
+            's' => (truncate(raw, conv.precision), false),
+            'b' => {
+                let mut expanded = String::new();
+                let mut chars = raw.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        push_escape(&mut expanded, &mut chars);
+                    } else {
+                        expanded.push(c);
+                    }
+                }
+                (truncate(&expanded, conv.precision), false)
+            }
+            'c' => (raw.chars().next().map(String::from).unwrap_or_default(), false),
+            'd' | 'i' => {
+                let n = parse_int();
+                (signed(n, conv), true)
+            }
+            'o' => (format!("{:o}", parse_int() as u64), true),
+            'u' => (format!("{}", parse_int() as u64), true),
+            'x' => (format!("{:x}", parse_int() as u64), true),
+            'X' => (format!("{:X}", parse_int() as u64), true),
+            _ => unreachable!("parse_conv only accepts known specifiers"),
+        };
+
+        (pad(body, conv, is_numeric), error)
+    }
+
+    fn truncate(s: &str, precision: Option<usize>) -> String {
+        match precision {
+            Some(p) => s.chars().take(p).collect(),
+            None => s.to_string(),
+        }
+    }
+
+    fn signed(n: i64, conv: &Conv) -> String {
+        if n < 0 {
+            n.to_string()
+        } else if conv.plus {
+            format!("+{n}")
+        } else if conv.space {
+            format!(" {n}")
+        } else {
+            n.to_string()
+        }
+    }
+
+    /// Apply `conv`'s width, left/right-aligning with spaces (`-`) or, for a
+    /// numeric conversion with no `-`, zero-padding after any sign.
+    fn pad(s: String, conv: &Conv, is_numeric: bool) -> String {
+        let width = conv.width.unwrap_or(0);
+        let len = s.chars().count();
+        if len >= width {
+            return s;
+        }
+        let fill = width - len;
+        if conv.minus {
+            s + &" ".repeat(fill)
+        } else if conv.zero && is_numeric {
+            match s.strip_prefix(['-', '+']) {
+                Some(rest) => format!("{}{}{rest}", &s[..1], "0".repeat(fill)),
+                None => "0".repeat(fill) + &s,
+            }
+        } else {
+            " ".repeat(fill) + &s
+        }
+    }
 }
 
 /// Platform-specific builtins. On Unix this is where `jobs`/`fg`/`bg` live.
@@ -753,5 +1046,84 @@ mod tests {
         assert_eq!(split("a  b", Some("")), vec!["a  b"]);
 
         crate::vars::unset("IFS");
+    }
+
+    /// Render `format` against `args` the way `printf_cmd` does, without
+    /// going through stdout — for testing the pure formatting logic
+    /// directly (`printf_cmd` itself is covered black-box, against the real
+    /// stdout, in `tests/exec_behavior.rs`).
+    fn render(format: &str, args: &[&str]) -> String {
+        let pieces = printf::parse_format(format).unwrap();
+        let consumes_args = pieces.iter().any(|p| matches!(p, printf::Piece::Conv(_)));
+        let mut idx = 0;
+        let mut out = String::new();
+        loop {
+            let start_idx = idx;
+            for piece in &pieces {
+                match piece {
+                    printf::Piece::Literal(s) => out.push_str(s),
+                    printf::Piece::Conv(conv) => {
+                        let arg = args.get(idx).copied();
+                        if arg.is_some() {
+                            idx += 1;
+                        }
+                        out.push_str(&printf::format_conv(conv, arg.unwrap_or("")).0);
+                    }
+                }
+            }
+            if !consumes_args || idx >= args.len() || idx == start_idx {
+                break;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn printf_matches_real_bash() {
+        // Format-string escapes, resolved once, up front.
+        assert_eq!(render("a\\tb\\nc\\\\d", &[]), "a\tb\nc\\d");
+
+        // Width/flags on integers.
+        assert_eq!(render("%5d|%-5d|%05d", &["3", "3", "3"]), "    3|3    |00003");
+        assert_eq!(render("%+d % d", &["5", "5"]), "+5  5");
+        assert_eq!(render("%3d", &["-5"]), " -5");
+        assert_eq!(render("%03d", &["-5"]), "-05");
+
+        // `%o`/`%x`/`%X`/`%u`, including a negative number reinterpreted as
+        // unsigned (two's complement), matching real bash.
+        assert_eq!(render("%x %o %X", &["255", "8", "255"]), "ff 10 FF");
+        assert_eq!(render("%x", &["-1"]), "ffffffffffffffff");
+
+        // `%s` precision truncates; `%c` takes just the first character.
+        assert_eq!(render("%.3s", &["hello"]), "hel");
+        assert_eq!(render("%c", &["hello"]), "h");
+
+        // `%b` processes backslash escapes in *its* argument (unlike `%s`).
+        assert_eq!(render("%b", &["a\\tb\\nc"]), "a\tb\nc");
+        assert_eq!(render("%s", &["a\\tb"]), "a\\tb");
+
+        // `%%` is a literal percent, consuming no argument.
+        assert_eq!(render("100%%", &[]), "100%");
+
+        // No argument-consuming conversion at all: extra args are ignored,
+        // format runs exactly once.
+        assert_eq!(render("no conversions here", &["a", "b", "c"]), "no conversions here");
+
+        // More arguments than the format consumes: it cycles, with the
+        // final (partial) cycle defaulting whatever's missing.
+        assert_eq!(render("%s-%d,", &["a", "1", "b", "2", "c"]), "a-1,b-2,c-0,");
+
+        // Fewer arguments than conversions need: missing ones default to
+        // `""`/`0`, not an error.
+        assert_eq!(render("[%s][%d]", &[]), "[][0]");
+    }
+
+    #[test]
+    fn printf_invalid_number_reports_error_but_still_formats() {
+        let pieces = printf::parse_format("%d").unwrap();
+        let printf::Piece::Conv(conv) = &pieces[0] else { panic!("expected a conversion") };
+        let (text, err) = printf::format_conv(conv, "abc");
+        assert_eq!(text, "0");
+        assert_eq!(err.as_deref(), Some("abc: invalid number"));
     }
 }

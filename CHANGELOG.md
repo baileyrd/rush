@@ -299,3 +299,21 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   without `CLOEXEC`, a real child spawned from the compound's body before
   the writer thread finished would inherit its own copy of the write end via
   fork/exec, so the reader never saw EOF.
+
+### `printf` builtin (C8)
+- `printf FORMAT [args...]` (`builtins.rs`'s `printf_cmd` and `printf`
+  submodule) — the portable, correct way to emit formatted output, unlike
+  `echo`, whose formatting is whatever the platform's convention happens to
+  be (rush's own `echo` has no `-e` at all). Supports `%s`/`%b` (string,
+  `%b` also processing backslash escapes in its argument),
+  `%d`/`%i`/`%o`/`%u`/`%x`/`%X` (integer, decimal/octal/unsigned/hex — a
+  negative number reinterpreted as unsigned, matching real `printf`'s two's
+  complement behavior), `%c`, `%%`, the `-`/`0`/`+`/` ` flags, and a width
+  and/or `.precision`. Format-string escapes (`\n`/`\t`/`\\`/`\a`/`\b`/`\f`/
+  `\r`/`\v`/`\NNN` octal) are resolved once, up front. If there are more
+  arguments than the format consumes, the whole format repeats against the
+  rest (`printf "%s-%d\n" a 1 b 2 c` → `a-1`, `b-2`, `c-0`), matching real
+  bash exactly; missing arguments mid-format default to `""`/`0` rather than
+  erroring. Not yet implemented: `%e`/`%f`/`%g` (floating point, lower-value
+  here since rush's arithmetic is integer-only) and `*` (width/precision
+  taken from an argument).

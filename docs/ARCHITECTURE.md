@@ -119,7 +119,12 @@ Dispatches on argv: `rush -c "cmds" [name args…]` and `rush FILE [args…]` se
 positional parameters and run a source string/file non-interactively (via
 `run_source`); with no arguments it runs the interactive REPL, which owns the
 read-eval-print loop and all I/O concerns:
-- Builds the prompt from the current working directory (`cwd $ `).
+- Builds the prompt: `$PS1` (shell variable, then environment — `$VAR`'s usual
+  precedence), with a small rush-specific escape set expanded (`\w`/`\W` cwd,
+  `\u` user, `\h` host, `\$` `#`-for-root-else-`$` — real UID via `libc`,
+  Unix only, `$` elsewhere, `\?` last exit status — not a real bash escape,
+  `\n`, `\\`; an unrecognized escape is kept literal). Falls back to the
+  original hardcoded `cwd $ ` when `PS1` isn't set.
 - Loads `~/.rush_history` at startup and saves it on exit.
 - Sources `~/.rushrc` at startup, if it exists — via the same `run_source`
   used for scripts and `-c`, so an error inside it prints to stderr but

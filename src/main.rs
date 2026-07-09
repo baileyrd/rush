@@ -40,12 +40,84 @@ fn rc_path() -> Option<PathBuf> {
     Some(p)
 }
 
+/// The interactive prompt: `$PS1` (shell variable first, then environment —
+/// same precedence as `$VAR` expansion) with its escapes expanded, or the
+/// original hardcoded default if `PS1` isn't set.
 fn prompt() -> String {
-    let cwd = std::env::current_dir()
+    match crate::vars::get("PS1").or_else(|| std::env::var("PS1").ok()) {
+        Some(ps1) => expand_ps1(&ps1),
+        None => default_prompt(),
+    }
+}
+
+fn default_prompt() -> String {
+    format!("{} $ ", cwd_string())
+}
+
+/// A small, rush-specific escape set (not the full bash set): `\w`/`\W` (cwd,
+/// cwd basename), `\u`/`\h` (user, host), `\$` (`#` for root, else `$`), `\?`
+/// (last exit status — bash has no equivalent; real PS1s get this via a
+/// command substitution instead), `\n`, `\\`. An unrecognized escape is kept
+/// literal (backslash and all) rather than silently dropped.
+fn expand_ps1(ps1: &str) -> String {
+    let mut out = String::new();
+    let mut chars = ps1.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('w') => out.push_str(&cwd_string()),
+            Some('W') => out.push_str(&cwd_basename()),
+            Some('u') => out.push_str(&username()),
+            Some('h') => out.push_str(&hostname()),
+            Some('$') => out.push(prompt_char()),
+            Some('?') => out.push_str(&crate::vars::last_status().to_string()),
+            Some('n') => out.push('\n'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn cwd_string() -> String {
+    std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "?".into());
-    format!("{cwd} $ ")
+        .unwrap_or_else(|| "?".into())
+}
+
+fn cwd_basename() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "/".into())
+}
+
+fn username() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".into())
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "host".into())
+}
+
+#[cfg(unix)]
+fn prompt_char() -> char {
+    if unsafe { libc::getuid() } == 0 { '#' } else { '$' }
+}
+
+#[cfg(not(unix))]
+fn prompt_char() -> char {
+    '$'
 }
 
 fn main() -> rustyline::Result<()> {
@@ -165,4 +237,36 @@ fn interactive() -> rustyline::Result<()> {
         let _ = rl.save_history(h);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_text_passes_through() {
+        assert_eq!(expand_ps1("plain > "), "plain > ");
+    }
+
+    #[test]
+    fn newline_and_backslash_escapes() {
+        assert_eq!(expand_ps1(r"a\nb"), "a\nb");
+        assert_eq!(expand_ps1(r"a\\b"), r"a\b");
+    }
+
+    #[test]
+    fn unknown_escape_kept_literal() {
+        assert_eq!(expand_ps1(r"\z"), r"\z");
+    }
+
+    #[test]
+    fn trailing_backslash_kept_literal() {
+        assert_eq!(expand_ps1(r"end\"), r"end\");
+    }
+
+    #[test]
+    fn exit_status_escape() {
+        vars::set_last_status(42);
+        assert_eq!(expand_ps1(r"[\?]"), "[42]");
+    }
 }

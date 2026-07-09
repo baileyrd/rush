@@ -112,3 +112,10 @@ git history for the commit-by-commit narrative.
   starts — same as a script, so a var/function/alias set there takes effect.
   A missing or unreadable file is silently fine; an error inside it prints to
   stderr but doesn't stop the shell from starting.
+
+### Prompt customization (G7)
+- `$PS1` (shell variable or environment) replaces the hardcoded prompt when
+  set, with a small escape set: `\w`/`\W` (cwd, cwd basename), `\u`/`\h` (user,
+  host), `\$` (`#` for root, else `$`), `\?` (last exit status — a
+  rush-specific extension, not a real bash escape), `\n`, `\\`. Falls back to
+  the original `cwd $ ` when unset. Settable persistently via `~/.rushrc`.

@@ -25,13 +25,16 @@ use crate::parser::{self, RawCommand, RawPipeline, RawRedirect, RawSimple};
 pub fn expand(raw: &RawPipeline) -> Result<Pipeline, String> {
     let mut commands = Vec::with_capacity(raw.commands.len());
     for rc in &raw.commands {
-        match rc {
-            RawCommand::Simple(s) => commands.push(expand_simple(s)?),
-            // Compound commands are run directly by `exec`, never lowered here.
-            RawCommand::Compound(_) => {
-                return Err("compound command cannot be part of a pipeline".into());
-            }
-        }
+        let stage = match rc {
+            RawCommand::Simple(s) => crate::exec::Stage::Simple(expand_simple(s)?),
+            // A compound stage isn't expanded here (its own body is expanded
+            // lazily, same as a sole compound) — just carried through. Only
+            // Unix's job-control runner can actually run one as one stage
+            // among several (it forks); elsewhere that's still an error, but
+            // one raised at run time, not here at expansion time.
+            RawCommand::Compound(c) => crate::exec::Stage::Compound(c.clone()),
+        };
+        commands.push(stage);
     }
     Ok(Pipeline { commands })
 }
@@ -633,7 +636,10 @@ mod tests {
     fn expand_cmd(input: &str) -> Command {
         let list = parser::parse(input).unwrap();
         let pipeline = expand(&list.jobs[0].list.first).unwrap();
-        pipeline.commands[0].clone()
+        match &pipeline.commands[0] {
+            crate::exec::Stage::Simple(cmd) => cmd.clone(),
+            crate::exec::Stage::Compound(_) => panic!("expected a simple command"),
+        }
     }
 
     // All env-mutating cases live in one test: `set_var` is process-global and

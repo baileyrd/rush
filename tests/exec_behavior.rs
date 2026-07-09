@@ -180,3 +180,36 @@ fn for_loop_without_in_clause_iterates_positional_params() {
     let (out, _) = rush_argv("for x in; do echo unreached; done; echo after", &["dummy", "a", "b"]);
     assert_eq!(out, "after\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn compound_command_as_one_stage_of_a_real_pipeline() {
+    // The headline C3 case: a subshell feeding a real external command.
+    assert_eq!(rush("(echo hello; echo world) | grep hel").0, "hello\n");
+
+    // A compound as the *first* stage.
+    assert_eq!(rush("if true; then echo yes; else echo no; fi | tr a-z A-Z").0, "YES\n");
+
+    // A compound in the *middle* of a 3-stage pipeline — receiving input from
+    // the previous stage and feeding the next.
+    assert_eq!(rush("echo hi | (cat; echo done) | tr a-z A-Z").0, "HI\nDONE\n");
+
+    // A loop feeding an external command.
+    assert_eq!(
+        rush("i=0; (while [ $i -lt 3 ]; do echo $i; i=$((i+1)); done) | wc -l").0,
+        "3\n"
+    );
+
+    // The pipeline's exit status is still the *last* stage's, same as any
+    // other pipeline.
+    let (_, status) = rush("(echo hi) | false");
+    assert_eq!(status, 1);
+
+    // Forked-subshell isolation (G10) still holds when the subshell is a
+    // pipeline stage, not just when it's the whole pipeline: `cd` inside
+    // doesn't leak out to the outer shell even though it's piped to `cat`.
+    assert_eq!(
+        rush("cd /tmp && (cd /; pwd) | cat; pwd").0,
+        "/\n/tmp\n"
+    );
+}

@@ -41,17 +41,20 @@ applicable to that shell's own model.
 | `set -e` / `-u` / `-o pipefail` | 🟡 | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Compound as one pipeline stage | 🟡 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡 | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ❌ | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
 
+\* Done for the interactive/script job-control path; a compound as one stage
+among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
+
 ---
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 6 (2 done)
+- **Tier I — correctness/POSIX risk:** 6 (3 done)
 - **Tier II — missing standard builtins:** 11
 - **Tier III — scripting-safety idioms:** 4
 - **Tier IV — bash/ksh/zsh language parity:** 10
@@ -85,12 +88,24 @@ Implemented: the parser now records whether an `in` clause was present at
 all (`Compound::For`'s `has_in`), distinct from an *explicit* `in` with zero
 words (still a real empty list). No `in` → iterate `vars::args()` (`"$@"`).
 
-### C3 — Compound command as one stage of a larger pipeline: `(cmd) | grep x` (tracked)
-Present in every comparison shell. Rush can capture a *lone* compound via
-`$(...)` and run one as an entire pipeline by itself, but a compound as one
-stage among several in a real pipe still hard-errors. Needs File-based pipe
-plumbing for a forked compound stage, not the current `Stdio`-based
-approach. **Effort: L.**
+### C3 — Compound command as one stage of a larger pipeline: `(cmd) | grep x` (tracked) ✅ done (job control path)
+Present in every comparison shell. Rush could already capture a *lone*
+compound via `$(...)` and run one as an entire pipeline by itself, but a
+compound as one stage among several in a real pipe used to hard-error.
+Needed File-based pipe plumbing for a forked compound stage, not the
+`Stdio`-based approach `build_stage` uses for external commands.
+**Effort: L.**
+
+Implemented for the interactive/script job-control path (`job::spawn_pipeline`,
+Unix only): `Pipeline.commands` is now `Vec<Stage>` (`Stage::Simple` or
+`Stage::Compound`); a compound stage forks, wiring stdin/stdout via `dup2`
+from real fds (`File`, not `Stdio` — a forked child needs something
+introspectable to `dup2` from), and joins the pipeline's process group like
+any exec'd stage. `(cmd) | grep x`, a compound as the first/middle/last
+stage, and forked-subshell isolation (G10) all verified working even when
+piped. **Not yet extended** to the capture path (`$(...)`) — a compound as
+one stage among several *inside* a substitution, or on non-Unix (no `fork`
+there at all), still errors clearly rather than silently misbehaving.
 
 ### C4 — `set -e` doesn't match bash/POSIX's exact rule (tracked)
 Correct in dash, bash, ksh, zsh: a failing command is exempt from errexit

@@ -402,13 +402,14 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   The public `run_list` clears anything that escapes every loop and function.
 - **`errexit` (`set -e`):** `exec_list` is actually `exec_list_impl(list,
   check_errexit)` — after each job, if `check_errexit && vars::errexit() &&
-  status != 0`, it calls `trap::exit_shell(status)`. `if`/`while`/`until`
+  status != 0 && last_ran`, it calls `trap::exit_shell(status)`. `if`/`while`/`until`
   conditions run through `exec_cond` (`check_errexit = false`) instead, since
   bash exempts them — a failing condition is the normal way to end a loop or
-  skip a branch, not a script error. This is a simplification of bash's own
-  errexit rule (see the doc comment on `exec_list_impl`): it fires on any
-  job whose *final* status is nonzero, not bash's finer "except a command
-  that isn't positionally last in an `&&`/`||` list."
+  skip a branch, not a script error. `last_ran` matches bash's actual errexit
+  rule (see the doc comment on `exec_list_impl`): `run_job`/`run_andor` report
+  whether the textually-last pipeline in a job's `&&`/`||` chain actually ran,
+  as opposed to being skipped by short-circuiting — `set -e; false && true`
+  survives (`false` isn't last), `set -e; true && false` exits (`false` is).
 
 **Tests:** `exec.rs`'s own runtime behavior — pipeline wiring, redirection
 routing, exit-status propagation and short-circuiting, compound status,

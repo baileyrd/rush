@@ -61,6 +61,38 @@ fn exit_status_propagation_and_short_circuit() {
 }
 
 #[test]
+fn errexit_matches_bashs_positionally_last_rule() {
+    // A failing command is exempt from `set -e` unless it's positionally
+    // last in its &&/|| list — matching real bash, not the simpler "whichever
+    // pipeline happened to run last" rule this used to use.
+    assert_eq!(rush("set -e; false && true; echo survived").0, "survived\n");
+    assert_eq!(rush("set -e; false || true; echo survived").0, "survived\n");
+    assert_eq!(
+        rush("set -e; false && true && true; echo survived").0,
+        "survived\n"
+    );
+
+    // `false` IS positionally last here, so it should still fire.
+    assert_eq!(rush("set -e; true && false; echo unreached").0, "");
+    assert_eq!(
+        rush("set -e; true && true && false; echo unreached").0,
+        ""
+    );
+    // The simple case (a single failing command) is unaffected.
+    assert_eq!(rush("set -e; false; echo unreached").0, "");
+
+    // `$?` still reflects whatever actually happened, independent of errexit.
+    assert_eq!(rush("false && true; echo status=$?").0, "status=1\n");
+
+    // if/while conditions remain exempt regardless (a separate, pre-existing
+    // exemption via exec_cond, not this fix — must not regress).
+    assert_eq!(
+        rush("set -e; if false; then echo yes; else echo no; fi; echo survived").0,
+        "no\nsurvived\n"
+    );
+}
+
+#[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used
     // to leak stderr straight to the terminal instead of routing it through

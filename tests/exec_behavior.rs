@@ -34,6 +34,16 @@ fn rush_argv(src: &str, argv: &[&str]) -> (String, i32) {
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
 }
 
+/// Like [`rush`], but returning stderr instead of stdout — for `set -x`.
+fn rush_stderr(src: &str) -> (String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg(src)
+        .output()
+        .expect("spawn rush");
+    (String::from_utf8_lossy(&output.stderr).into_owned(), output.status.code().unwrap_or(-1))
+}
+
 /// Like [`rush`], but feeding `input` on stdin — for `read` tests.
 fn rush_stdin(src: &str, input: &str) -> (String, i32) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
@@ -194,6 +204,38 @@ fn pipefail_reports_the_rightmost_nonzero_stage() {
     // An unrecognized `-o` name is an error, not a silently-ignored no-op.
     let (_, status) = rush("set -o badname");
     assert_eq!(status, 1);
+}
+
+#[test]
+fn xtrace_echoes_each_command_before_running_it() {
+    // A plain command, an assignment, and a pipeline's own stages each
+    // get their own traced line, prefixed with `$PS4` (default `+ `).
+    assert_eq!(rush_stderr("set -x; echo hi").0, "+ echo hi\n");
+    assert_eq!(rush_stderr("set -x; x=5").0, "+ x=5\n");
+    assert_eq!(rush_stderr("set -x; echo a | tr a-z A-Z").0, "+ echo a\n+ tr a-z A-Z\n");
+
+    // A word containing whitespace is re-quoted with single quotes.
+    assert_eq!(rush_stderr("set -x; echo \"a b\" c").0, "+ echo 'a b' c\n");
+
+    // A leading `NAME=value` prefix traces on its own line before the
+    // command it applies to.
+    assert_eq!(rush_stderr("set -x; FOO=bar echo hi").0, "+ FOO=bar\n+ echo hi\n");
+
+    // `$PS4` is user-customizable.
+    assert_eq!(rush_stderr("PS4='TRACE: '; set -x; echo hi").0, "TRACE: echo hi\n");
+
+    // Nesting inside `$(...)` repeats `$PS4`'s first character once per level.
+    assert_eq!(
+        rush_stderr("set -x; x=$(echo hi)").0,
+        "++ echo hi\n+ x=hi\n"
+    );
+    assert_eq!(
+        rush_stderr("set -x; x=$(echo $(echo hi))").0,
+        "+++ echo hi\n++ echo hi\n+ x=hi\n"
+    );
+
+    // `set +x` turns it back off.
+    assert_eq!(rush_stderr("set -x; set +x; echo hi").0, "+ set +x\n");
 }
 
 #[test]

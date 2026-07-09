@@ -27,10 +27,11 @@ which is now down to a single open item (C36) — `local`, `getopts`,
 `source`/`.`, `eval`, `exec`, and `umask` all landed alongside
 `read`/`printf`/`shift`. C36 (a PATH-visibility bug in
 `command`/`type`/`hash`) turned up while closing out `source`; C37
-while closing out `eval`; C38 while closing out `exec`. Tier III
-(`set -euo pipefail`, the header nearly every production shell script
-opens with) is now half done — `-e` (already done), `-u` (C18), and
-`-o pipefail` (C19) all work; only `-x` (C20) is left of the header itself.
+while closing out `eval`; C38 while closing out `exec`. `set -euo
+pipefail` — the header nearly every production shell script opens with —
+now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
+and `-x` (C20, xtrace) alongside them, leaving only trap signals beyond
+`EXIT`/`INT` (C21) open in this tier.
 
 ---
 
@@ -52,7 +53,7 @@ applicable to that shell's own model.
 | `eval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `exec` (process replacement) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `umask` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `set -e` / `-u` / `-o pipefail` | 🟡§ | 🟡 | ✅ | ✅ | ✅ | — |
+| `set -e` / `-u` / `-o pipefail` / `-x` | ✅§ | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed / associative arrays | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -71,7 +72,9 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 ‡ `wait` (`pid`/`%job`, or none) is done, along with its `$!` prerequisite;
 `disown` remains missing.
 
-§ `-e`, `-u`, and `-o pipefail` are all done; `-x` (C20) is still missing.
+§ `-e`, `-u`, `-o pipefail`, and `-x` are all done; `-x`'s trace doesn't
+cover a compound's own header line (`for i in 1 2`, `case a in`), only the
+commands actually inside its body.
 
 ---
 
@@ -79,7 +82,7 @@ splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
-- **Tier III — scripting-safety idioms:** 4 (2 done)
+- **Tier III — scripting-safety idioms:** 4 (3 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10
 - **Tier V — interactive UX:** 3
 
@@ -577,10 +580,33 @@ status; with it, the *rightmost* non-zero status among all stages (not
 bash with a distinct exit code at each position to disambiguate), or 0 if
 every stage succeeded.
 
-### C20 — `set -x` (xtrace)
+### C20 — `set -x` (xtrace) ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh. The standard way to debug a
-misbehaving script — echoes each command before it runs. Rush has no
-debugging aid like this at all today. **Effort: S–M.**
+misbehaving script — echoes each command before it runs. Rush previously
+had no debugging aid like this at all.
+
+Added `vars::set_xtrace`/`xtrace` (mirroring the other `set` flags' own
+thread-local state) and `exec::trace_pipeline`, called from the one place
+both the foreground and `$(...)`-capture paths funnel every already-expanded
+`Pipeline` through (`run_foreground`/`capture_pipeline`) — so it covers a
+plain command, each stage of a real pipeline, an assignment-only statement,
+and (since `if`/`while`/`until` conditions run through this same machinery)
+a compound's own condition, all in one hook. Each traced line is prefixed
+with `$PS4` (default `+ `, falling back to the environment like `$PS1`
+does); a leading `NAME=value` assignment traces on its own line before the
+command it applies to; a word containing whitespace or a shell-special
+character is re-quoted with single quotes for display. Nesting inside
+`$(...)` repeats `$PS4`'s first character once per level (`vars::
+with_deeper_trace`, wrapping `expand::command_substitute`) — `++ ` one
+level down, `+++ ` two, exactly matching real bash, verified directly
+including two-deep nesting and a custom `$PS4`.
+
+Known gap, accepted for this scope: a compound's own *header* line — `for i
+in 1 2`, `case a in` — isn't traced, only the commands actually inside its
+body (which *do* trace correctly, per iteration/branch). Matching bash's
+exact header format for every compound kind was a bigger lift than this
+item's effort budget justified next to the headline case (seeing every
+command that actually ran).
 
 ### C21 — Trap signals beyond `EXIT`/`INT` actually firing (tracked)
 `TERM`/`HUP` are POSIX-mandated; `ERR`/`DEBUG` are bash/ksh/zsh extensions.

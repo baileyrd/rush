@@ -606,10 +606,13 @@ fn take_arith(chars: &mut Peekable<Chars>) -> Result<String, String> {
     }
 }
 
-/// Run `src` as its own command line (operators and all) and capture its stdout.
+/// Run `src` as its own command line (operators and all) and capture its
+/// stdout. One level deeper for `set -x`'s own nesting-depth indicator
+/// (`crate::vars::with_deeper_trace`) — a command run here is one level of
+/// `$(...)` down from whatever's expanding this substitution.
 fn command_substitute(src: &str) -> Result<String, String> {
     let list = parser::parse(src).map_err(|e| e.to_string())?;
-    crate::exec::capture_list(&list)
+    crate::vars::with_deeper_trace(|| crate::exec::capture_list(&list))
 }
 
 /// A variable's value, or `None` if unset — shell variables shadow the

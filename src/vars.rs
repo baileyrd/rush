@@ -41,6 +41,13 @@ thread_local! {
     // `set -o pipefail`: a pipeline's own exit status is the rightmost
     // non-zero stage, not just its last (see `exec::pipeline_status`).
     static PIPEFAIL: RefCell<bool> = const { RefCell::new(false) };
+    // `set -x`: echo each command to stderr before running it (see
+    // `exec::trace_command`).
+    static XTRACE: RefCell<bool> = const { RefCell::new(false) };
+    // How many levels of `$(...)` command substitution are currently being
+    // expanded — `set -x`'s prefix repeats its first character once per
+    // level, matching real bash (see `exec::trace_command`).
+    static TRACE_DEPTH: RefCell<u32> = const { RefCell::new(0) };
     // The exit status of the most recent command substitution performed
     // while expanding a command's words, if any (see `reset_last_subst_status`).
     static LAST_SUBST_STATUS: RefCell<Option<i32>> = const { RefCell::new(None) };
@@ -86,6 +93,29 @@ pub fn set_pipefail(on: bool) {
 
 pub fn pipefail() -> bool {
     PIPEFAIL.with(|e| *e.borrow())
+}
+
+pub fn set_xtrace(on: bool) {
+    XTRACE.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn xtrace() -> bool {
+    XTRACE.with(|e| *e.borrow())
+}
+
+pub fn trace_depth() -> u32 {
+    TRACE_DEPTH.with(|d| *d.borrow())
+}
+
+/// Run `f` with the command-substitution trace depth one level deeper —
+/// wraps a `$(...)` expansion so any tracing inside it gets the right
+/// number of repeated prefix characters, restored afterward regardless of
+/// how `f` returns.
+pub fn with_deeper_trace<T>(f: impl FnOnce() -> T) -> T {
+    TRACE_DEPTH.with(|d| *d.borrow_mut() += 1);
+    let result = f();
+    TRACE_DEPTH.with(|d| *d.borrow_mut() -= 1);
+    result
 }
 
 /// Clear the "did a command substitution just run" marker. Called right

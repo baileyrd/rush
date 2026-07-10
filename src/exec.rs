@@ -1345,9 +1345,22 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
         let is_last = i == n - 1;
         let (mut command, real_pipe_read) = build_stage(cmd, prev_stdout.take(), is_last, capture)?;
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            // A standalone command (not one stage among several): nothing
+            // else to unwind or wait for, so there's a real, simple status
+            // to report directly (C37) instead of aborting the whole
+            // script — matching real bash's own "command not found"/status
+            // 127 (or 126 for "found but couldn't run"). A failing stage
+            // *within* a multi-command pipeline keeps today's existing
+            // behavior — see the identical, more-detailed comment in
+            // `job::spawn_pipeline` for why that narrower case isn't
+            // covered here too.
+            Err(e) if i == 0 && is_last => {
+                return Ok((spawn_failure_status(&cmd.argv[0], &e), captured));
+            }
+            Err(e) => return Err(format!("{}: {e}", cmd.argv[0])),
+        };
         // `Command` keeps any file-backed `Stdio` (our manually-made pipe
         // included) alive in its own fields until dropped. For an ordinary
         // file that's harmless, but a lingering parent-side copy of a pipe's
@@ -1565,6 +1578,24 @@ fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> 
     match sink {
         Sink::Inherit | Sink::Pipe => Ok(Sink::Inherit),
         Sink::File(f) => f.try_clone().map(Sink::File).map_err(|e| e.to_string()),
+    }
+}
+
+/// Prints the usual "command not found"/"found but couldn't run it"-style
+/// message for a failed spawn and returns the matching POSIX exit status —
+/// 127 specifically for "no such command" (`io::ErrorKind::NotFound`), 126
+/// for anything else (permission denied, is a directory, …) — matching
+/// every comparison shell's own convention here (verified directly against
+/// real bash: `126` for `/some/dir` or a non-executable file, `127` for a
+/// plain typo). Doesn't try to match bash's own message wording, only its
+/// functional behavior, same as every other error message in this shell.
+pub(crate) fn spawn_failure_status(name: &str, err: &std::io::Error) -> i32 {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        eprintln!("rush: {name}: command not found");
+        127
+    } else {
+        eprintln!("rush: {name}: {err}");
+        126
     }
 }
 

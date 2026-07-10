@@ -1664,3 +1664,61 @@ fn backslash_escaped_dollar_composes_with_real_expansion_in_the_same_string() {
     let (out, _) = rush(r#"FOO=bar; echo "\\$FOO""#);
     assert_eq!(out, "\\bar\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn unknown_command_reports_127_instead_of_aborting_the_script() {
+    // C37: a mistyped/nonexistent command used to print the raw OS spawn
+    // error and abort the whole script right there — the `echo` right
+    // after it never even ran. Now it's an ordinary failing command:
+    // status 127 ("command not found"), and the rest of the script
+    // continues, matching real bash exactly.
+    let (out, status) = rush("echo before; totallynonexistentcmd_c37; echo after");
+    assert_eq!(out, "before\nafter\n");
+    assert_eq!(status, 0); // `after`'s own status, the last thing that ran
+
+    let (out, status) = rush("totallynonexistentcmd_c37; echo status=$?");
+    assert_eq!(out, "status=127\n");
+    assert_eq!(status, 0);
+
+    let (err, _) = rush_stderr("totallynonexistentcmd_c37");
+    assert!(err.contains("totallynonexistentcmd_c37"), "got: {err:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn unknown_command_still_triggers_errexit() {
+    let (out, status) = rush("set -e; totallynonexistentcmd_c37; echo should_not_print");
+    assert_eq!(out, "");
+    assert_eq!(status, 127);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_found_but_unexecutable_file_reports_126_not_127() {
+    let path = std::env::temp_dir().join(format!("rush_c37_noexec_{}.txt", std::process::id()));
+    std::fs::write(&path, "not a script\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let (out, _) = rush(&format!("{}; echo status=$?", path.to_str().unwrap()));
+    assert_eq!(out, "status=126\n");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn unknown_command_in_a_command_substitution_reports_127_and_captures_nothing() {
+    let (out, status) = rush("x=$(totallynonexistentcmd_c37); echo \"status=$? captured=[$x]\"");
+    assert_eq!(out, "status=127 captured=[]\n");
+    assert_eq!(status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn backgrounding_an_unknown_command_does_not_abort_the_script_either() {
+    let (out, status) = rush("totallynonexistentcmd_c37 & echo done");
+    assert_eq!(out, "done\n");
+    assert_eq!(status, 0);
+}

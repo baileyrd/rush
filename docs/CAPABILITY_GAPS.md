@@ -19,16 +19,21 @@ the cross-shell context that shows why they matter, not newly discovered.
 **Bottom line:** rush's actual scope today is closest to **dash** — a solid,
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top. Tier I's original 6 items are done, and so now is C35 (`\$` inside
+on top. Tier I's original 6 items are done, and so now are C35 (`\$` inside
 double quotes wasn't staying literal — fixed by giving the lexer a
 separate, never-re-expanded `WordPart::Literal("$")` for it instead of
 just stripping the backslash and leaving a bare `$` indistinguishable
-from a real, unescaped one); two more (C37, an unknown-command-aborts-
-the-script bug; C38, redirects to fd 3+ silently landing on fd 1) turned
-up while closing out Tier II, which is now fully closed out too —
-`local`, `getopts`, `command`/`type`/`hash`, `wait` (with its own
-prerequisite, `$!`), `source`/`.`, `eval`, `exec`, and `umask` all landed
-alongside `read`/`printf`/`shift`. C36 (a PATH-visibility bug in
+from a real, unescaped one) and C37 (an unknown command name used to
+print a raw OS error and abort the whole script instead of reporting
+status 127 and continuing — fixed for a standalone command, the headline
+case; a not-found command as one stage of a multi-command pipeline is a
+deliberately out-of-scope narrower remainder, needing real process-group
+unwinding rush's `Command`-based spawn path can't cheaply do). C38
+(redirects to fd 3+ silently landing on fd 1) turned up while closing out
+Tier II, which is now fully closed out too — `local`, `getopts`,
+`command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
+`source`/`.`, `eval`, `exec`, and `umask` all landed alongside
+`read`/`printf`/`shift`. C36 (a PATH-visibility bug in
 `command`/`type`/`hash`, plus a deeper root cause — the shell never
 seeded its own variable table from the inherited environment at startup,
 so a *bare* `PATH=$PATH:dir` silently failed to reach a spawned child's
@@ -232,7 +237,7 @@ completion *system* (as opposed to this fixed case list) provides.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 10 (7 done)
+- **Tier I — correctness/POSIX risk:** 10 (8 done)
 - **Tier II — missing standard builtins:** 12 (12 done — complete)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
@@ -368,20 +373,59 @@ correctly (`\bar`), confirming the fix didn't overreach into misreading a
 literal backslash followed by an unrelated, unescaped `$` as the escape
 case. **Effort: S.**
 
-### C37 — An unknown command name aborts the whole script instead of failing with status 127 (tracked)
+### C37 — An unknown command name aborts the whole script instead of failing with status 127 (tracked) ✅ done
 POSIX-mandated in every comparison shell here: running a command that
 doesn't resolve — a typo, something not on `$PATH` — prints an error to
 stderr (bash: `command not found`) and continues the script with `$?` set
-to 127. Rush instead prints the raw OS spawn error (`No such file or
-directory (os error 2)`) and **aborts the entire script right there** — an
-`echo` placed right after the bad command never even runs. Found while
-diffing `eval "nonexistent_cmd"` against bash (C15), but reproduces for any
+to 127. Rush used to print the raw OS spawn error (`No such file or
+directory (os error 2)`) and **abort the entire script right there** — an
+`echo` placed right after the bad command never even ran. Found while
+diffing `eval "nonexistent_cmd"` against bash (C15), but reproduced for any
 top-level mistyped command — not specific to `eval` at all, and arguably
 the highest-impact item in this tier, since it fires on the single most
-common shell-scripting mistake there is. **Effort: S** — `build_stage`'s
-spawn-failure path (`exec.rs`) needs to turn a not-found spawn error into
-an ordinary exit-127 result instead of the `Result::Err` it propagates
-today, matching how every other non-zero exit status is already handled.
+common shell-scripting mistake there is.
+
+**Fix**: a new `exec::spawn_failure_status(name, &io_error)` prints the
+usual message and returns the right POSIX status — 127 for
+`io::ErrorKind::NotFound` ("no such command"), 126 for anything else
+(permission denied, is a directory, …) — verified directly against real
+bash (`126` for a non-executable file or a directory, `127` for a plain
+typo; rush's own message *wording* differs, same as every other error in
+this shell, but the functional status matches exactly). Wired in at both
+of this shell's two `Command::spawn()` call sites (`job::spawn_pipeline`,
+the Unix job-control path used for virtually everything on this shell's
+primary platform, and `exec::run`, used for command substitution and the
+non-Unix foreground fallback) — for a **standalone command** (not one
+stage among several in a pipeline), a spawn failure now returns this
+status as an ordinary `Ok(...)` result instead of propagating a hard
+`Err`, so the rest of the script keeps running exactly like it does after
+any other failing command — including still triggering `set -e`,
+verified directly.
+
+**Explicitly out of scope, a deliberate, documented scope-narrowing**: a
+command that fails to spawn as a **non-first-or-only stage of a
+multi-command pipeline** (`cmd1 | badcmd | cmd3`) still aborts the whole
+script, as before. Real bash's own C-level fork-then-exec model gives
+every pipeline stage a real, if short-lived, process no matter what (the
+exec step is what can fail, *inside* an already-forked, already-
+process-grouped child) — Rust's `std::process::Command::spawn` hides that
+distinction entirely, reporting a failed exec atomically as a single
+`Err` with no pid ever exposed to the caller at all. Synthesizing a fake
+per-stage exit code and correctly unwinding an already-established
+process group (`job::spawn_pipeline`'s `pgid`/`wait_pgid`, which expects
+one real pid per stage) for this narrower case is real architectural
+work this item's effort budget doesn't cover. The very same limitation
+applies to **backgrounding** a standalone unknown command (`badcmd &`):
+the script no longer aborts (the actual headline fix), but — for the same
+reason — there's no real pid for `$!`/`jobs` to report, unlike real
+bash's own short-lived one.
+
+Verified directly against real bash across: a standalone typo (mid-script
+and as the sole command), a found-but-not-executable file and a directory
+(126 vs. a typo's 127), `set -e` still catching it, command substitution
+(captures nothing, reports 127), and backgrounding (doesn't abort the
+script; no synthetic `$!`, a documented gap). **Effort: S** for the
+standalone-command fix that was this item's actual described scope.
 
 ### C38 — Redirects to any fd other than 0/1/2 silently collapse to fd 1 (tracked)
 POSIX-mandated: `cmd 3>file`, `cmd 4<&5`, `exec 3>file` (holding a
@@ -690,12 +734,11 @@ convention for a top-level syntax error.
 
 Found but **out of scope** here, and not specific to `eval`: running any
 unknown command name anywhere in a rush script — not just inside `eval` —
-prints a raw OS error and *aborts the entire script* instead of reporting
-exit status 127 and continuing, the way every POSIX shell does. Discovered
-while diffing `eval "nonexistent_cmd"` against bash, but reproduces with a
-plain top-level typo too. Tracked separately as C37 — likely higher-impact
-than most of this tier, since it affects *any* mistyped command, not one
-particular feature.
+used to print a raw OS error and *abort the entire script* instead of
+reporting exit status 127 and continuing, the way every POSIX shell does.
+Discovered while diffing `eval "nonexistent_cmd"` against bash, but
+reproduced with a plain top-level typo too. Fixed separately as C37 (see
+Tier I).
 
 ### C16 — `exec` ✅ done
 Two standard idioms currently impossible in rush: `exec cmd` (process

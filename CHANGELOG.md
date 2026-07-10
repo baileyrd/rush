@@ -1096,3 +1096,37 @@ nothing calls `std::env::remove_var` or blocks default inheritance. Real
 bash's child genuinely no longer has the variable at all. See
 `docs/CAPABILITY_GAPS.md`'s C40 entry for the full writeup and fix
 options under consideration.
+
+### Fix: an unknown command name aborted the whole script instead of failing with status 127 (C37)
+Running a command that doesn't resolve — a typo, something not on
+`$PATH` — used to print the raw OS spawn error and abort the entire
+script right there; an `echo` placed right after it never even ran. The
+single most common shell-scripting mistake there is, now handled like
+every other failing command.
+
+- **New `exec::spawn_failure_status(name, &io_error)`** prints the usual
+  message and returns the right POSIX status: 127 for
+  `io::ErrorKind::NotFound`, 126 for anything else (permission denied, is
+  a directory, …) — verified directly against real bash's own convention.
+- Wired in at both `Command::spawn()` call sites — `job::spawn_pipeline`
+  (the Unix job-control path, used for virtually everything on this
+  shell's primary platform) and `exec::run` (command substitution, and
+  the non-Unix foreground fallback). For a **standalone command**, a
+  spawn failure now returns this status as an ordinary result instead of
+  a hard error, so the rest of the script keeps running — including
+  still triggering `set -e`, verified directly.
+- Explicitly out of scope, a deliberate scope-narrowing: a command that
+  fails to spawn as one stage *within* a multi-command pipeline still
+  aborts the script, as before — real bash's fork-then-exec model always
+  gives every stage a real (if short-lived) process, so the exec failure
+  happens *inside* an already-forked, already-grouped child; Rust's
+  `Command::spawn` hides that distinction and reports it atomically with
+  no pid ever exposed, so there's no cheap way to synthesize a per-stage
+  status and unwind an already-established process group here. The same
+  limitation means backgrounding a standalone unknown command (`badcmd
+  &`) no longer aborts the script (the actual fix), but has no synthetic
+  pid for `$!`/`jobs` either.
+- Verified directly against real bash across a standalone typo, a
+  found-but-not-executable file/directory (126 vs. 127), `set -e`,
+  command substitution, and backgrounding. Adds 5 new integration tests;
+  full suite and clippy stay clean.

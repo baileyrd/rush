@@ -106,7 +106,16 @@ pub fn init() {
 /// doesn't expose (it's built for handing to a `Command`, not reading back
 /// out of). A `Simple` stage converts it to `Stdio` at the point it's fed
 /// into `build_stage`.
-fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
+/// What [`spawn_pipeline`] produced: either a real, live process group to
+/// wait on, or — for a standalone (non-piped) command whose spawn failed
+/// with an ordinary "not found"/"not executable" error (C37) — a status to
+/// report directly, with no process at all behind it.
+enum SpawnOutcome {
+    Live { pgid: pid_t, pids: Vec<pid_t> },
+    Immediate(i32),
+}
+
+fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
     let n = pipeline.commands.len();
     let mut pids = Vec::with_capacity(n);
     let mut pgid: pid_t = 0;
@@ -139,9 +148,30 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
                     });
                 }
 
-                let mut child = command
-                    .spawn()
-                    .map_err(|e| format!("{}: {e}", cmd.argv[0]))?;
+                let mut child = match command.spawn() {
+                    Ok(c) => c,
+                    // A standalone command (not one stage among several):
+                    // no process group established yet, nothing else to
+                    // unwind or wait for, so there's a real, simple status
+                    // to report directly instead of aborting the script —
+                    // matching real bash's own "command not found"/status
+                    // 127 (or 126 for "found but couldn't run") rather than
+                    // propagating the raw OS spawn error as a hard `Err`.
+                    // A failing stage *within* a multi-command pipeline
+                    // (`i > 0`, or more stages still to come) keeps today's
+                    // existing behavior — an accepted, documented gap:
+                    // unwinding an already-established process group and
+                    // synthesizing a fake exit code mid-pipeline needs real
+                    // architectural work this item's effort budget doesn't
+                    // cover.
+                    Err(e) if i == 0 && is_last => {
+                        return Ok(SpawnOutcome::Immediate(crate::exec::spawn_failure_status(
+                            &cmd.argv[0],
+                            &e,
+                        )));
+                    }
+                    Err(e) => return Err(format!("{}: {e}", cmd.argv[0])),
+                };
                 crate::exec::feed_heredoc(&mut child, cmd);
                 let pid = child.id() as pid_t;
 
@@ -178,7 +208,7 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<(pid_t, Vec<pid_t>), String> {
         pids.push(pid);
     }
 
-    Ok((pgid, pids))
+    Ok(SpawnOutcome::Live { pgid, pids })
 }
 
 /// Fork a compound command (`if`/`while`/`(...)`/…) as one stage of a real
@@ -242,7 +272,12 @@ fn spawn_compound_stage(
 /// Run a pipeline in the foreground, returning its exit status. If it stops
 /// (Ctrl-Z), it is added to the job table and we return `128 + SIGTSTP`.
 pub fn run_foreground(pipeline: &Pipeline) -> Result<i32, String> {
-    let (pgid, pids) = spawn_pipeline(pipeline)?;
+    let (pgid, pids) = match spawn_pipeline(pipeline)? {
+        // A standalone command that failed to spawn (C37) — already
+        // reported, nothing to wait for.
+        SpawnOutcome::Immediate(status) => return Ok(status),
+        SpawnOutcome::Live { pgid, pids } => (pgid, pids),
+    };
     give_terminal(pgid);
 
     let result = wait_pgid(pgid, &pids);
@@ -261,7 +296,18 @@ pub fn run_foreground(pipeline: &Pipeline) -> Result<i32, String> {
 
 /// Run a pipeline in the background: record it and print `[id] pgid`.
 pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
-    let (pgid, pids) = spawn_pipeline(pipeline)?;
+    let (pgid, pids) = match spawn_pipeline(pipeline)? {
+        // A standalone command that failed to spawn (C37) — already
+        // reported. Real bash still gets a real, if short-lived, pid here
+        // (it forks unconditionally, and only the exec step inside that
+        // child can fail); Rust's `Command::spawn` hides that distinction
+        // entirely and reports the failure atomically with no pid exposed
+        // at all, so there's nothing to give `$!`/`jobs` here — an
+        // accepted, documented gap. The script still isn't aborted, which
+        // is the actual headline bug this item fixes.
+        SpawnOutcome::Immediate(_) => return Ok(()),
+        SpawnOutcome::Live { pgid, pids } => (pgid, pids),
+    };
     let cmd = crate::exec::pipeline_text(pipeline);
     let id = add_job(pgid, &pids, &cmd, JobState::Running);
     // `$!` is the *last* stage's own pid (verified against real bash

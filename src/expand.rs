@@ -283,6 +283,14 @@ pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Op
             RawRedirect::Heredoc { body, expand } => {
                 heredoc = Some(if *expand { expand_dollars(body)? } else { body.clone() });
             }
+            // A single word, same expansion as any other redirect target
+            // (no splitting/globbing — verified directly: `x="a b"; cat
+            // <<< $x` still feeds `a b` as one line, not two words), plus
+            // a trailing `\n` — always appended, even if the expanded
+            // text already ends in one, matching real bash exactly.
+            RawRedirect::HereString(word) => {
+                heredoc = Some(format!("{}\n", expand_word(word)?));
+            }
         }
     }
     Ok((redirects, heredoc))

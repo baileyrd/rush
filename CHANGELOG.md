@@ -829,3 +829,22 @@ groundwork.
   no array-element lvalues (`arr[i]++`) or comma operator.
 - Adds 7 new `arith.rs` unit tests, 2 new parser unit tests, and 8 new
   `exec_behavior.rs` integration tests; full suite and clippy stay clean.
+
+### Here-strings `<<<` (C30)
+- New `RedirOp::HereString` (lexer): checked for right after `<<`, before
+  falling into ordinary heredoc-delimiter reading, so `<<<` is never
+  misread as `<<` followed by a stray `<`.
+- New `RawRedirect::HereString(Word)` (parser): the word is read exactly
+  like any other redirect's filename.
+- Expansion (`expand.rs`) treats that word as an ordinary redirect
+  target — single-word expansion, no splitting/globbing (verified
+  directly: `x="a b"; cat <<< $x` still feeds `a b` as one line) —
+  appends exactly one `\n` (always, even if the text already ends with
+  one, matching real bash), and drops the result into the same
+  `heredoc: Option<String>` slot a real here-document's body already
+  uses. `exec.rs` needed zero changes: the feeding path
+  (`redirect_stdio`/`feed_heredoc`) was already generic over "some
+  string feeds stdin." A later `<<`/`<<<` on the same command overwrites
+  an earlier one, same "last redirect for a given fd wins" rule as any
+  other redirect, verified directly.
+- Adds 1 new integration test; full suite and clippy stay clean.

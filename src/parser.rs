@@ -92,6 +92,11 @@ pub enum RawRedirect {
     /// `<<DELIM` here-document; `body` is the collected text, expanded unless the
     /// delimiter was quoted.
     Heredoc { body: String, expand: bool },
+    /// `<<< word` here-string (bash/ksh/zsh — not POSIX sh/dash): `word` is
+    /// expanded as a single word (no splitting/globbing, same as any other
+    /// redirect target), then fed to stdin with a trailing `\n` appended —
+    /// same slot `Heredoc`'s own body uses.
+    HereString(Word),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +389,7 @@ impl Parser {
             RedirOp::BothAppend => RawRedirect::Both { file: self.expect_word("&>>")?, append: true },
             RedirOp::Dup(target) => RawRedirect::Dup { fd: r.fd, target },
             RedirOp::Heredoc { body, expand } => RawRedirect::Heredoc { body, expand },
+            RedirOp::HereString => RawRedirect::HereString(self.expect_word("<<<")?),
         })
     }
 

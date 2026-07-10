@@ -83,6 +83,11 @@ pub enum RedirOp {
     /// `<<` here-document: `body` is the collected text, `expand` is false when
     /// the delimiter was quoted.
     Heredoc { body: String, expand: bool },
+    /// `<<<` here-string (bash/ksh/zsh — not POSIX sh/dash): the next word,
+    /// `$`-expanded and with a trailing `\n` appended, becomes stdin — the
+    /// parser reads that word same as it would for `<`'s filename, and
+    /// expansion feeds it through the same `heredoc` slot `<<` itself uses.
+    HereString,
 }
 
 /// A lexing failure. `Incomplete` means the input is an unfinished prefix (an
@@ -195,8 +200,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
             '<' => {
                 chars.next();
                 if chars.peek() == Some(&'<') {
-                    // `<<` / `<<-` here-document.
                     chars.next();
+                    if chars.peek() == Some(&'<') {
+                        // `<<<` here-string — the word that follows is
+                        // read by the parser same as any other redirect's
+                        // filename, not here in the lexer.
+                        chars.next();
+                        tokens.push(Token::Redirect(Redir { fd: 0, op: RedirOp::HereString }));
+                        continue;
+                    }
+                    // `<<` / `<<-` here-document.
                     let strip = chars.peek() == Some(&'-');
                     if strip {
                         chars.next();

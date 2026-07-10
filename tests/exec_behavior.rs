@@ -524,6 +524,21 @@ fn heredoc_feeds_stdin() {
     assert_eq!(rush("cat <<EOF\nhello\nEOF\n").0, "hello\n");
 }
 
+#[test]
+fn here_string_feeds_stdin_with_a_trailing_newline_always_appended() {
+    assert_eq!(rush(r#"cat <<< "hi""#).0, "hi\n");
+    // Even when the content already ends in one — bash always appends
+    // exactly one more, verified directly.
+    assert_eq!(rush("cat <<< \"abc\n\"").0, "abc\n\n");
+    // A single word, not split/globbed like an ordinary unquoted
+    // expansion elsewhere would be — same rule as any other redirect
+    // target.
+    assert_eq!(rush(r#"x="a b"; cat <<< $x"#).0, "a b\n");
+    // A later `<<<` (or `<<`) on the same command wins over an earlier
+    // one, same "last redirect for this fd wins" rule as any other.
+    assert_eq!(rush("cat << EOF <<< \"override\"\nheredoc body\nEOF").0, "override\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn forked_subshell_isolates_exit_from_the_shell() {

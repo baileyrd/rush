@@ -1481,3 +1481,14 @@ pipeline is exempt from both). Implemented together: leading `!`
 (`$(! true; echo $?)` → 1), exemption threaded through the existing
 errexit signal. Verified against bash across fourteen scenarios; adds
 2 integration tests.
+
+### New: `${PIPESTATUS[@]}` — per-stage pipeline exit statuses (C54)
+Always expanded empty before. Now recorded at the reap point
+(`job::wait_pgid`'s per-stage vector, the same one pipefail consumes)
+plus a one-element array for every single-stage command (builtins,
+compounds, assignments, `cmd &`) — bash updates it for every command,
+verified. Matched subtleties: reading it twice shows the first echo's
+own `(0)`; `! false` records the un-negated `(1)`; pipefail doesn't
+distort the per-stage values; all existing array read forms compose.
+Not set inside `$(...)` (a bash substitution is a subshell whose
+PIPESTATUS never escapes). Adds 1 integration test.

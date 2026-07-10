@@ -356,6 +356,10 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
         }
     }
 
+    // `${PIPESTATUS[@]}` (C54): the per-stage vector, recorded exactly
+    // where the stages are reaped. A single-stage pipeline gets set here
+    // too, then (harmlessly, identically) again by `run_pipeline_node`.
+    crate::vars::set_pipestatus(&codes);
     Wait::Done(crate::exec::pipeline_status(&codes))
 }
 

@@ -163,6 +163,7 @@ fn run_job(job: &Job) -> Result<(i32, bool), String> {
         #[cfg(unix)]
         close_pending_proc_subs();
         crate::vars::set_last_status(0);
+        crate::vars::set_pipestatus(&[0]); // `cmd &` → PIPESTATUS=(0), same as bash
         Ok((0, true))
     } else {
         run_andor(&job.list)
@@ -217,6 +218,14 @@ fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
     } else {
         run_foreground(raw)?
     };
+    // `${PIPESTATUS[@]}` (C54), single-stage case — builtins, functions,
+    // compounds, assignments, one external command alike get a
+    // one-element array. Recorded *before* negation: `! false` leaves
+    // `PIPESTATUS=(1)` in bash (verified). The multi-stage vector is
+    // recorded where the stages are actually reaped (`job::wait_pgid`).
+    if raw.commands.len() == 1 {
+        crate::vars::set_pipestatus(&[status]);
+    }
     Ok(negate_if(raw.negated, status))
 }
 

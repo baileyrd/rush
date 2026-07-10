@@ -19,10 +19,14 @@ the cross-shell context that shows why they matter, not newly discovered.
 **Bottom line:** rush's actual scope today is closest to **dash** — a solid,
 mostly-POSIX execution core (real pipes, real job control, real forked
 subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top. Tier I's original 6 items are done; three more (C35, a real
-quoting bug; C37, an unknown-command-aborts-the-script bug; C38, redirects
-to fd 3+ silently landing on fd 1) turned up while closing out Tier II,
-which is now down to a single open item (C36) — `local`, `getopts`,
+on top. Tier I's original 6 items are done, and so now is C35 (`\$` inside
+double quotes wasn't staying literal — fixed by giving the lexer a
+separate, never-re-expanded `WordPart::Literal("$")` for it instead of
+just stripping the backslash and leaving a bare `$` indistinguishable
+from a real, unescaped one); two more (C37, an unknown-command-aborts-
+the-script bug; C38, redirects to fd 3+ silently landing on fd 1) turned
+up while closing out Tier II, which is now down to a single open item
+(C36) — `local`, `getopts`,
 `command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
 `source`/`.`, `eval`, `exec`, and `umask` all landed alongside
 `read`/`printf`/`shift`. C36 (a PATH-visibility bug in
@@ -223,7 +227,7 @@ completion *system* (as opposed to this fixed case list) provides.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 9 (6 done)
+- **Tier I — correctness/POSIX risk:** 9 (7 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
@@ -326,16 +330,38 @@ trailing `-a`/`-o` chain (verified against real bash directly). All prior
 single-expression forms (`-z`, `a = b`, `! EXPR`, a lone string) are
 unaffected.
 
-### C35 — Backslash-escaped `$` inside double quotes isn't literal (tracked)
+### C35 — Backslash-escaped `$` inside double quotes isn't literal (tracked) ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh: inside `"..."`, `\$` shall
 produce a literal `$` (suppressing expansion of whatever follows), same as
-`\"`/`\\` are already handled. Rush currently drops the backslash but still
-expands the parameter anyway — `echo "\$?"` prints the exit status instead
-of the literal text `$?`, and `echo "\$FOO"` prints `$FOO`'s *value*
+`\"`/`\\` are already handled. Rush used to drop the backslash but still
+expand the parameter anyway — `echo "\$?"` printed the exit status instead
+of the literal text `$?`, and `echo "\$FOO"` printed `$FOO`'s *value*
 instead of the literal text `$FOO`. Silent wrongness, not an error, so it
-fits this tier; found while verifying C13's `$!` against real bash (not
-specific to `$!` — reproduces for `$?`, a plain `$FOO`, everything).
-**Effort: S.**
+fit this tier; found while verifying C13's `$!` against real bash (not
+specific to `$!` — reproduced for `$?`, a plain `$FOO`, everything).
+
+**Root cause and fix**: the lexer already special-cased `\"`/`\\`/`\$`
+identically — strip the backslash, push the escaped char straight into the
+double-quoted text — which is fine for `"`/`\`, but not for `$`: that text
+becomes a `WordPart::Quoted` string, re-scanned by `expand.rs` for
+`$`/`$(...)` *later*, so a bare `$` left behind by stripping `\$`'s
+backslash is indistinguishable from a real, unescaped `$` by the time
+expansion runs. The fix (`lexer.rs`) makes `\$` flush whatever quoted text
+came before it, emit a separate `WordPart::Literal("$")` — never
+re-expanded, by definition, exactly the same guarantee `'...'` already
+gives — and then keep lexing the rest of the double-quoted span as
+before. No new escape-recognition logic was needed in `expand.rs` itself;
+the fix is entirely about which `WordPart` variant the lexer already had
+available to represent "this stays literal."
+
+Verified directly against real bash across the cases above plus:
+composing an escaped `\$` with a real, still-expanding `$FOO` in the same
+string (`"pre\$mid$FOO"` → `pre$midbar`); and the easy-to-conflate `\\$FOO`
+case (a literal backslash from `\\`, followed by an ordinary, *still-
+expanding* `$FOO` — not itself the `\$` escape) continuing to expand
+correctly (`\bar`), confirming the fix didn't overreach into misreading a
+literal backslash followed by an unrelated, unescaped `$` as the escape
+case. **Effort: S.**
 
 ### C37 — An unknown command name aborts the whole script instead of failing with status 127 (tracked)
 POSIX-mandated in every comparison shell here: running a command that

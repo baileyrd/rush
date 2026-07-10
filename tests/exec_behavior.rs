@@ -1604,3 +1604,28 @@ fn bang_history_is_a_no_op_in_script_mode() {
     assert_eq!(status, 0);
     assert_eq!(out, "hi\n!!\n");
 }
+
+#[test]
+fn backslash_escaped_dollar_in_double_quotes_stays_literal() {
+    // C35: `\$` inside `"..."` must produce a literal `$` (suppressing
+    // expansion of whatever follows) — same as `\"`/`\\` already do.
+    // Previously rush dropped the backslash but still expanded the
+    // parameter anyway (`"\$?"` printed the exit status, not `$?`).
+    let (out, status) = rush(r#"echo "\$?""#);
+    assert_eq!(status, 0);
+    assert_eq!(out, "$?\n");
+
+    let (out, _) = rush(r#"FOO=bar; echo "\$FOO""#);
+    assert_eq!(out, "$FOO\n");
+}
+
+#[test]
+fn backslash_escaped_dollar_composes_with_real_expansion_in_the_same_string() {
+    let (out, _) = rush(r#"FOO=bar; echo "pre\$mid$FOO""#);
+    assert_eq!(out, "pre$midbar\n");
+
+    // A literal backslash (from `\\`) followed by a real, still-expanding
+    // `$FOO` isn't mistaken for the `\$` escape.
+    let (out, _) = rush(r#"FOO=bar; echo "\\$FOO""#);
+    assert_eq!(out, "\\bar\n");
+}

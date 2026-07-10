@@ -1588,3 +1588,16 @@ caller-named variable" mechanism) is frame-scoped, local frames now
 capturing prior nameref mappings; circular refs stop following instead
 of hanging. Scalars and whole arrays work in both directions. Adds 1
 integration test.
+
+### New: `printf %q` (C63)
+Quotes an argument for reuse as shell input — bash/zsh's backslash
+style, `''` for empty, `$'...'` for control characters. Byte-identical
+to bash across the probe set; round-trips through `eval`. Adds 1
+integration test.
+
+### New: `$'...'` ANSI-C quoting (found while landing C63)
+Rush's own `%q` and `${v@Q}` output uses `$'a\nb'` for control
+characters — and rush couldn't re-read it (`w=$'a\nb'` assigned the
+literal text; recorded as an untracked gap in C60's write-up). `$'...'`
+now lexes as a literal with the `@E` escape set interpreted at lex
+time, verified against bash; `%q` round-trips through `eval`.

@@ -1751,7 +1751,8 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// `${v@E}` (C60): interpret backslash escapes the way `$'...'` would.
-fn ansi_unescape(value: &str) -> String {
+/// Also used by the lexer for `$'...'` ANSI-C quoting itself.
+pub(crate) fn ansi_unescape(value: &str) -> String {
     let mut out = String::new();
     let mut chars = value.chars();
     while let Some(c) = chars.next() {

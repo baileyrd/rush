@@ -176,7 +176,7 @@ fn main() -> std::io::Result<()> {
     // rather than panicking).
     #[cfg(unix)]
     unsafe {
-        crate::sys::signal(libc::SIGPIPE, libc::SIG_DFL);
+        crate::sys::signal(crate::sys::SIGPIPE, crate::sys::SIG_DFL);
     }
     // `TERM`/`HUP` traps (C21) need to work in every mode, not just
     // interactively — the target use case (a container's PID 1 catching

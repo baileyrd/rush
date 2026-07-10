@@ -1852,7 +1852,7 @@ fn umask_cmd(argv: &[String]) -> i32 {
     match u32::from_str_radix(mode_str, 8) {
         Ok(mode) if mode <= 0o777 => {
             unsafe {
-                crate::sys::umask(mode as libc::mode_t);
+                crate::sys::umask(mode as crate::sys::mode_t);
             }
             0
         }
@@ -1864,7 +1864,7 @@ fn umask_cmd(argv: &[String]) -> i32 {
 }
 
 #[cfg(unix)]
-fn symbolic_umask(mask: libc::mode_t) -> String {
+fn symbolic_umask(mask: crate::sys::mode_t) -> String {
     let class = |shift: u32| -> String {
         let bits = (mask >> shift) & 0o7;
         let mut s = String::new();
@@ -1902,26 +1902,26 @@ struct UlimitResource {
 
 #[cfg(unix)]
 const ULIMIT_RESOURCES: &[UlimitResource] = &[
-    UlimitResource { letter: 'c', resource: libc::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512 },
-    UlimitResource { letter: 'd', resource: libc::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024 },
-    UlimitResource { letter: 'f', resource: libc::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512 },
+    UlimitResource { letter: 'c', resource: crate::sys::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512 },
+    UlimitResource { letter: 'd', resource: crate::sys::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024 },
+    UlimitResource { letter: 'f', resource: crate::sys::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512 },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'e', resource: libc::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1 },
+    UlimitResource { letter: 'e', resource: crate::sys::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1 },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'i', resource: libc::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1 },
-    UlimitResource { letter: 'l', resource: libc::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024 },
-    UlimitResource { letter: 'm', resource: libc::RLIMIT_RSS as i32, label: "max memory size             (kbytes, -m)", scale: 1024 },
-    UlimitResource { letter: 'n', resource: libc::RLIMIT_NOFILE as i32, label: "open files                          (-n)", scale: 1 },
+    UlimitResource { letter: 'i', resource: crate::sys::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1 },
+    UlimitResource { letter: 'l', resource: crate::sys::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024 },
+    UlimitResource { letter: 'm', resource: crate::sys::RLIMIT_RSS as i32, label: "max memory size             (kbytes, -m)", scale: 1024 },
+    UlimitResource { letter: 'n', resource: crate::sys::RLIMIT_NOFILE as i32, label: "open files                          (-n)", scale: 1 },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'q', resource: libc::RLIMIT_MSGQUEUE as i32, label: "POSIX message queues         (bytes, -q)", scale: 1 },
+    UlimitResource { letter: 'q', resource: crate::sys::RLIMIT_MSGQUEUE as i32, label: "POSIX message queues         (bytes, -q)", scale: 1 },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'r', resource: libc::RLIMIT_RTPRIO as i32, label: "real-time priority                  (-r)", scale: 1 },
-    UlimitResource { letter: 's', resource: libc::RLIMIT_STACK as i32, label: "stack size                  (kbytes, -s)", scale: 1024 },
-    UlimitResource { letter: 't', resource: libc::RLIMIT_CPU as i32, label: "cpu time                   (seconds, -t)", scale: 1 },
-    UlimitResource { letter: 'u', resource: libc::RLIMIT_NPROC as i32, label: "max user processes                  (-u)", scale: 1 },
-    UlimitResource { letter: 'v', resource: libc::RLIMIT_AS as i32, label: "virtual memory              (kbytes, -v)", scale: 1024 },
+    UlimitResource { letter: 'r', resource: crate::sys::RLIMIT_RTPRIO as i32, label: "real-time priority                  (-r)", scale: 1 },
+    UlimitResource { letter: 's', resource: crate::sys::RLIMIT_STACK as i32, label: "stack size                  (kbytes, -s)", scale: 1024 },
+    UlimitResource { letter: 't', resource: crate::sys::RLIMIT_CPU as i32, label: "cpu time                   (seconds, -t)", scale: 1 },
+    UlimitResource { letter: 'u', resource: crate::sys::RLIMIT_NPROC as i32, label: "max user processes                  (-u)", scale: 1 },
+    UlimitResource { letter: 'v', resource: crate::sys::RLIMIT_AS as i32, label: "virtual memory              (kbytes, -v)", scale: 1024 },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'x', resource: libc::RLIMIT_LOCKS as i32, label: "file locks                          (-x)", scale: 1 },
+    UlimitResource { letter: 'x', resource: crate::sys::RLIMIT_LOCKS as i32, label: "file locks                          (-x)", scale: 1 },
 ];
 
 /// `ulimit [-SH] [-a | -<letter> [limit]]` (C46) — get/set process resource
@@ -1964,11 +1964,11 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
         }
     }
 
-    let display = |raw: libc::rlim_t, scale: u64| -> String {
-        if raw == libc::RLIM_INFINITY { "unlimited".to_string() } else { (raw / scale).to_string() }
+    let display = |raw: crate::sys::rlim_t, scale: u64| -> String {
+        if raw == crate::sys::RLIM_INFINITY { "unlimited".to_string() } else { (raw / scale).to_string() }
     };
-    let get = |res: &UlimitResource| -> Option<libc::rlimit> {
-        let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let get = |res: &UlimitResource| -> Option<crate::sys::rlimit> {
+        let mut rl = crate::sys::rlimit { rlim_cur: 0, rlim_max: 0 };
         (unsafe { crate::sys::getrlimit(res.resource as _, &mut rl) } == 0).then_some(rl)
     };
 
@@ -1997,11 +1997,11 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
         return 0;
     };
 
-    let new_raw: libc::rlim_t = if operand == "unlimited" {
-        libc::RLIM_INFINITY
+    let new_raw: crate::sys::rlim_t = if operand == "unlimited" {
+        crate::sys::RLIM_INFINITY
     } else {
         match operand.parse::<u64>() {
-            Ok(n) => n.saturating_mul(res.scale) as libc::rlim_t,
+            Ok(n) => n.saturating_mul(res.scale) as crate::sys::rlim_t,
             Err(_) => {
                 eprintln!("ulimit: {operand}: invalid number");
                 return 1;

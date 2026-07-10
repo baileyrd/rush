@@ -23,7 +23,7 @@ thread_local! {
 static PENDING_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]
-extern "C" fn record_signal(sig: libc::c_int) {
+extern "C" fn record_signal(sig: crate::sys::c_int) {
     PENDING_SIGNAL.store(sig, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -36,13 +36,13 @@ extern "C" fn record_signal(sig: libc::c_int) {
 #[cfg(unix)]
 pub fn install_signal_handlers() {
     unsafe {
-        crate::sys::signal(libc::SIGTERM, record_signal as *const () as libc::sighandler_t);
-        crate::sys::signal(libc::SIGHUP, record_signal as *const () as libc::sighandler_t);
+        crate::sys::signal(crate::sys::SIGTERM, record_signal as *const () as crate::sys::sighandler_t);
+        crate::sys::signal(crate::sys::SIGHUP, record_signal as *const () as crate::sys::sighandler_t);
     }
 }
 
 #[cfg(unix)]
-fn signal_name(sig: libc::c_int) -> Option<&'static str> {
+fn signal_name(sig: crate::sys::c_int) -> Option<&'static str> {
     crate::job::SIGNAL_TABLE.iter().find(|&&(_, s)| s == sig).map(|&(n, _)| n)
 }
 
@@ -65,9 +65,9 @@ fn sync_signal_disposition(name: &str, trapped: bool) {
     if let Some(&(_, sig)) = crate::job::SIGNAL_TABLE.iter().find(|(n, _)| *n == name) {
         unsafe {
             if trapped {
-                crate::sys::signal(sig, record_signal as *const () as libc::sighandler_t);
+                crate::sys::signal(sig, record_signal as *const () as crate::sys::sighandler_t);
             } else {
-                crate::sys::signal(sig, libc::SIG_DFL);
+                crate::sys::signal(sig, crate::sys::SIG_DFL);
             }
         }
     }

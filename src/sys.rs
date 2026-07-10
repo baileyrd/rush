@@ -1,13 +1,14 @@
-//! Syscall facade: the `libc` crate by default, `rusty_libc` under the
-//! `rusty-libc` feature.
+//! Syscall facade: the `libc` crate (default) or `rusty_libc` (the `rusty-libc`
+//! feature). This is the **only** module that names `libc`; the rest of rush
+//! uses `sys::` for every syscall, type, and constant, so a
+//! `--no-default-features --features rusty-libc` build links no `libc` at all.
 //!
-//! Only the syscall *functions* rush issues live here; every function mirrors
-//! the `libc` signature it replaces — same arguments, same `unsafe`-ness, same
-//! return convention (`-1`/errno on failure) — so call sites change only the
-//! path (`libc::waitpid` → `sys::waitpid`) and keep their existing `unsafe`
-//! blocks. Constants (`SIG*`, `RLIMIT_*`, `W*` flags, `F_*`, `STDIN_FILENO`)
-//! and types (`c_int`, `pid_t`, `rlimit`, …) are backend-independent and stay
-//! referenced as `libc::…`.
+//! Each backend exports the same surface — the syscall *functions* rush issues
+//! (mirroring the `libc` signatures: same args, same `unsafe`-ness, same
+//! `-1`/errno convention), the C types (`c_int`, `pid_t`, `rlimit`, …), and the
+//! constants (`SIG*`, `RLIMIT_*`, `W*`, `F_*`, `STDIN_FILENO`). The libc
+//! backend re-exports them from `libc`; the rusty-libc backend from
+//! `rusty_libc` (defining the handful `rusty_libc` doesn't ship).
 //!
 //! ## fork
 //!
@@ -16,9 +17,8 @@
 //! `clone(SIGCHLD)` fork, which does not — so it is only sound because rush is
 //! single-threaded at every fork point: on Linux the here-document feeders are
 //! backed by [`memfd_heredoc`] (an in-memory file) rather than background
-//! threads, so no other thread can be holding a lock across a fork. See
-//! `docs/LIBC_DEPENDENCY_ANALYSIS.md` §4.2. `std::process::Command` still uses
-//! std's own spawn path in both backends.
+//! threads. See `docs/LIBC_DEPENDENCY_ANALYSIS.md` §4.2. `std::process::Command`
+//! still uses std's own spawn path in both backends.
 //!
 //! ## errno
 //!
@@ -26,13 +26,16 @@
 //! glibc's TLS `errno`, so `std::io::Error::last_os_error()` is meaningless
 //! after its calls. Read errno through [`last_os_error`] instead: it reads
 //! glibc's `errno` in the default backend and, in the `rusty-libc` backend,
-//! the code stashed by the last failed wrapper. Every call site that inspects
-//! errno after a `sys::` call uses `sys::last_os_error()`.
+//! the code stashed by the last failed wrapper.
 
 #![allow(non_snake_case)] // W* helpers keep their libc names.
+#![allow(non_camel_case_types)] // C type aliases keep their libc names.
 #![allow(clippy::missing_safety_doc)] // These mirror libc; safety is libc's.
 
 pub use imp::*;
+
+#[cfg(all(unix, not(feature = "libc-backend"), not(feature = "rusty-libc")))]
+compile_error!("enable one syscall backend: the default `libc-backend`, or `rusty-libc`");
 
 /// Build a rewound, memory-backed file containing `body` — the thread-free
 /// here-document backing (Linux only). The caller either `dup2`s it onto a
@@ -53,9 +56,21 @@ pub fn memfd_heredoc(body: &[u8]) -> std::io::Result<std::fs::File> {
 }
 
 // ---- default backend: the libc crate -------------------------------------
-#[cfg(not(feature = "rusty-libc"))]
+#[cfg(all(feature = "libc-backend", not(feature = "rusty-libc")))]
 mod imp {
-    use libc::{c_int, mode_t, pid_t, rlimit, sighandler_t, uid_t};
+    // C types and every constant rush uses come straight from libc.
+    pub use libc::{c_int, mode_t, pid_t, rlim_t, rlimit, sighandler_t, uid_t};
+    // Which constants a given build actually references depends on cfg (e.g.
+    // `F_GETFD` only on the non-Linux here-doc path), so allow unused here.
+    #[allow(unused_imports)]
+    pub use libc::{
+        FD_CLOEXEC, F_GETFD, F_SETFD, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE,
+        RLIMIT_LOCKS, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC,
+        RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_SIGPENDING, RLIMIT_STACK, RLIM_INFINITY, SIGABRT, SIGALRM,
+        SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL, SIGPIPE, SIGQUIT,
+        SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIG_DFL,
+        SIG_IGN, STDIN_FILENO, WCONTINUED, WNOHANG, WUNTRACED,
+    };
 
     /// errno as an `io::Error`; glibc's TLS `errno` in this backend.
     pub fn last_os_error() -> std::io::Error {
@@ -166,9 +181,50 @@ mod imp {
 // ---- rusty-libc backend --------------------------------------------------
 #[cfg(feature = "rusty-libc")]
 mod imp {
-    use libc::{c_int, mode_t, pid_t, rlimit, sighandler_t, uid_t};
     use rusty_libc::{fd, process, rlimit as rl, signal as sig, termios, umask as um, wait, Errno};
     use std::cell::Cell;
+
+    // C types rush uses. Linux is the only target for this backend, so these
+    // are the Linux/glibc widths.
+    pub type c_int = i32;
+    pub type pid_t = i32;
+    pub type mode_t = u32;
+    pub type rlim_t = u64;
+    pub type uid_t = u32;
+    /// A signal disposition (`SIG_DFL`/`SIG_IGN`/`SIG_ERR` or a handler pointer
+    /// cast to an integer), matching libc's `sighandler_t`.
+    pub type sighandler_t = usize;
+
+    /// Kernel/glibc `struct rlimit`, both fields 64-bit. Field names match
+    /// libc's so call sites are backend-agnostic.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct rlimit {
+        pub rlim_cur: rlim_t,
+        pub rlim_max: rlim_t,
+    }
+
+    // Constants: values from rusty_libc where it ships them, else defined here.
+    // `F_GETFD` is only referenced on the non-Linux here-doc path, so allow it
+    // to be unused on Linux.
+    #[allow(unused_imports)]
+    pub use rusty_libc::fd::{FD_CLOEXEC, F_GETFD, F_SETFD};
+    pub use rusty_libc::rlimit::{
+        RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE, RLIMIT_LOCKS, RLIMIT_MEMLOCK,
+        RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_RTPRIO,
+        RLIMIT_SIGPENDING, RLIMIT_STACK, RLIM_INFINITY,
+    };
+    pub use rusty_libc::signal::{
+        SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL,
+        SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1,
+        SIGUSR2, SIG_DFL, SIG_IGN,
+    };
+    pub use rusty_libc::wait::{WCONTINUED, WNOHANG, WUNTRACED};
+
+    /// `signal` returning this indicates an error (matches libc's `SIG_ERR`).
+    pub const SIG_ERR: sighandler_t = usize::MAX;
+    /// Standard input file descriptor.
+    pub const STDIN_FILENO: c_int = 0;
 
     thread_local! {
         // errno from the last failed rusty_libc wrapper (see module note).
@@ -257,7 +313,7 @@ mod imp {
             Ok(prev) => prev,
             Err(e) => {
                 stash(e);
-                libc::SIG_ERR
+                SIG_ERR
             }
         }
     }

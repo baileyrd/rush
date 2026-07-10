@@ -23,7 +23,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
-use libc::{c_int, pid_t};
+use crate::sys::{c_int, pid_t};
 
 use crate::exec::{CompoundStage, Pipeline, Stage};
 
@@ -65,27 +65,27 @@ thread_local! {
 
 /// The job-control signals the shell ignores and children reset to default.
 const JOB_SIGNALS: [c_int; 5] = [
-    libc::SIGINT,
-    libc::SIGQUIT,
-    libc::SIGTSTP,
-    libc::SIGTTIN,
-    libc::SIGTTOU,
+    crate::sys::SIGINT,
+    crate::sys::SIGQUIT,
+    crate::sys::SIGTSTP,
+    crate::sys::SIGTTIN,
+    crate::sys::SIGTTOU,
 ];
 
 /// Set up job control: only when stdin is a terminal. Idempotent enough to call
 /// once at startup.
 pub fn init() {
-    let interactive = unsafe { crate::sys::isatty(libc::STDIN_FILENO) } == 1;
+    let interactive = unsafe { crate::sys::isatty(crate::sys::STDIN_FILENO) } == 1;
     let pid = unsafe { crate::sys::getpid() };
 
     if interactive {
         unsafe {
             for &sig in &JOB_SIGNALS {
-                crate::sys::signal(sig, libc::SIG_IGN);
+                crate::sys::signal(sig, crate::sys::SIG_IGN);
             }
             // Become a process-group leader and take the terminal.
             crate::sys::setpgid(pid, pid);
-            crate::sys::tcsetpgrp(libc::STDIN_FILENO, pid);
+            crate::sys::tcsetpgrp(crate::sys::STDIN_FILENO, pid);
         }
     }
 
@@ -141,9 +141,9 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
                     command.pre_exec(move || {
                         crate::sys::setpgid(0, target_pgid);
                         for &sig in &JOB_SIGNALS {
-                            crate::sys::signal(sig, libc::SIG_DFL);
+                            crate::sys::signal(sig, crate::sys::SIG_DFL);
                         }
-                        crate::sys::signal(libc::SIGCHLD, libc::SIG_DFL);
+                        crate::sys::signal(crate::sys::SIGCHLD, crate::sys::SIG_DFL);
                         Ok(())
                     });
                 }
@@ -236,9 +236,9 @@ fn spawn_compound_stage(
             unsafe {
                 crate::sys::setpgid(0, target_pgid);
                 for &sig in &JOB_SIGNALS {
-                    crate::sys::signal(sig, libc::SIG_DFL);
+                    crate::sys::signal(sig, crate::sys::SIG_DFL);
                 }
-                crate::sys::signal(libc::SIGCHLD, libc::SIG_DFL);
+                crate::sys::signal(crate::sys::SIGCHLD, crate::sys::SIG_DFL);
             }
             if let Some(stdin) = &stdin_src {
                 unsafe {
@@ -336,7 +336,7 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
 
     while live > 0 {
         let mut status: c_int = 0;
-        let wpid = unsafe { crate::sys::waitpid(-pgid, &mut status, libc::WUNTRACED) };
+        let wpid = unsafe { crate::sys::waitpid(-pgid, &mut status, crate::sys::WUNTRACED) };
         if wpid == -1 {
             if retry_after_interrupt() {
                 continue;
@@ -387,7 +387,7 @@ pub fn reap_background() {
 
     loop {
         let mut status: c_int = 0;
-        let flags = libc::WNOHANG | libc::WUNTRACED | libc::WCONTINUED;
+        let flags = crate::sys::WNOHANG | crate::sys::WUNTRACED | crate::sys::WCONTINUED;
         let wpid = unsafe { crate::sys::waitpid(-1, &mut status, flags) };
         if wpid <= 0 {
             break; // 0: no change; -1: no children
@@ -580,7 +580,7 @@ fn kill_cmd(argv: &[String]) -> i32 {
             }
         }
     }
-    let mut sig = libc::SIGTERM;
+    let mut sig = crate::sys::SIGTERM;
     let mut start = 1;
     if let Some(first) = argv.get(1).and_then(|a| a.strip_prefix('-')) {
         match parse_signal(first) {
@@ -638,27 +638,27 @@ pub fn ids() -> Vec<usize> {
 /// from the original seven names to the full set a script plausibly
 /// sends, each mapped to its real `libc` constant.
 pub(crate) const SIGNAL_TABLE: &[(&str, c_int)] = &[
-    ("HUP", libc::SIGHUP),
-    ("INT", libc::SIGINT),
-    ("QUIT", libc::SIGQUIT),
-    ("ILL", libc::SIGILL),
-    ("TRAP", libc::SIGTRAP),
-    ("ABRT", libc::SIGABRT),
-    ("BUS", libc::SIGBUS),
-    ("FPE", libc::SIGFPE),
-    ("KILL", libc::SIGKILL),
-    ("USR1", libc::SIGUSR1),
-    ("SEGV", libc::SIGSEGV),
-    ("USR2", libc::SIGUSR2),
-    ("PIPE", libc::SIGPIPE),
-    ("ALRM", libc::SIGALRM),
-    ("TERM", libc::SIGTERM),
-    ("CHLD", libc::SIGCHLD),
-    ("CONT", libc::SIGCONT),
-    ("STOP", libc::SIGSTOP),
-    ("TSTP", libc::SIGTSTP),
-    ("TTIN", libc::SIGTTIN),
-    ("TTOU", libc::SIGTTOU),
+    ("HUP", crate::sys::SIGHUP),
+    ("INT", crate::sys::SIGINT),
+    ("QUIT", crate::sys::SIGQUIT),
+    ("ILL", crate::sys::SIGILL),
+    ("TRAP", crate::sys::SIGTRAP),
+    ("ABRT", crate::sys::SIGABRT),
+    ("BUS", crate::sys::SIGBUS),
+    ("FPE", crate::sys::SIGFPE),
+    ("KILL", crate::sys::SIGKILL),
+    ("USR1", crate::sys::SIGUSR1),
+    ("SEGV", crate::sys::SIGSEGV),
+    ("USR2", crate::sys::SIGUSR2),
+    ("PIPE", crate::sys::SIGPIPE),
+    ("ALRM", crate::sys::SIGALRM),
+    ("TERM", crate::sys::SIGTERM),
+    ("CHLD", crate::sys::SIGCHLD),
+    ("CONT", crate::sys::SIGCONT),
+    ("STOP", crate::sys::SIGSTOP),
+    ("TSTP", crate::sys::SIGTSTP),
+    ("TTIN", crate::sys::SIGTTIN),
+    ("TTOU", crate::sys::SIGTTOU),
 ];
 
 fn parse_signal(name: &str) -> Option<c_int> {
@@ -722,7 +722,7 @@ fn fg_cmd(argv: &[String]) -> i32 {
     println!("{}", job.cmd);
     give_terminal(job.pgid);
     unsafe {
-        crate::sys::killpg(job.pgid, libc::SIGCONT);
+        crate::sys::killpg(job.pgid, crate::sys::SIGCONT);
     }
 
     let result = wait_pgid(job.pgid, &job.pids);
@@ -752,7 +752,7 @@ fn bg_cmd(argv: &[String]) -> i32 {
         let job = &mut s.jobs[idx];
         job.state = JobState::Running;
         unsafe {
-            crate::sys::killpg(job.pgid, libc::SIGCONT);
+            crate::sys::killpg(job.pgid, crate::sys::SIGCONT);
         }
         println!("[{}] {} &", job.id, job.cmd);
         0
@@ -847,7 +847,7 @@ fn give_terminal(pgid: pid_t) {
     if job_control_enabled() {
         unsafe {
             // SIGTTOU is ignored in the shell, so this never stops us.
-            crate::sys::tcsetpgrp(libc::STDIN_FILENO, pgid);
+            crate::sys::tcsetpgrp(crate::sys::STDIN_FILENO, pgid);
         }
     }
 }

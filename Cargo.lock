@@ -26,9 +26,10 @@ source = "git+https://github.com/baileyrd/rusty_libc?branch=main#c00b6040ad50b36
 [[package]]
 name = "rusty_lines"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_lines?branch=main#0a4aac1c3dfaf0c73056ddd6bb6f9cdc500efce7"
+source = "git+https://github.com/baileyrd/rusty_lines?branch=main#4a85feed9a5ee267d6cabfc499ef3bcb75d3d231"
 dependencies = [
  "libc",
+ "rusty_libc",
  "unicode-width",
 ]
 

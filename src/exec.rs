@@ -569,7 +569,7 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
             crate::trap::exit_shell(status);
         }
         pid => {
-            let mut status: libc::c_int = 0;
+            let mut status: crate::sys::c_int = 0;
             loop {
                 if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
                     return Ok(crate::job::exit_code(status));
@@ -889,8 +889,8 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
     // the default dispositions in the parent before forking closes the
     // race; the parent reinstalls its own handlers immediately after.
     unsafe {
-        crate::sys::signal(libc::SIGTERM, libc::SIG_DFL);
-        crate::sys::signal(libc::SIGHUP, libc::SIG_DFL);
+        crate::sys::signal(crate::sys::SIGTERM, crate::sys::SIG_DFL);
+        crate::sys::signal(crate::sys::SIGHUP, crate::sys::SIG_DFL);
     }
     match unsafe { crate::sys::fork() } {
         -1 => Err(crate::sys::last_os_error().to_string()),
@@ -914,8 +914,8 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             let read_fd = from_child_read.into_raw_fd();
             let write_fd = to_child_write.into_raw_fd();
             unsafe {
-                crate::sys::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                crate::sys::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                crate::sys::fcntl(read_fd, crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+                crate::sys::fcntl(write_fd, crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
             }
             crate::vars::set_array(name, vec![read_fd.to_string(), write_fd.to_string()]);
             crate::vars::set(&format!("{name}_PID"), &pid.to_string());
@@ -1352,8 +1352,8 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
 fn set_cloexec(f: &File) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
     let fd = f.as_raw_fd();
-    let flags = unsafe { crate::sys::fcntl(fd, libc::F_GETFD, 0) };
-    if flags == -1 || unsafe { crate::sys::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
+    let flags = unsafe { crate::sys::fcntl(fd, crate::sys::F_GETFD, 0) };
+    if flags == -1 || unsafe { crate::sys::fcntl(fd, crate::sys::F_SETFD, flags | crate::sys::FD_CLOEXEC) } == -1 {
         return Err(crate::sys::last_os_error().to_string());
     }
     Ok(())
@@ -1547,7 +1547,7 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
             let mut read = read;
             read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
             loop {
-                let mut status: libc::c_int = 0;
+                let mut status: crate::sys::c_int = 0;
                 if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
                     return Ok((crate::job::exit_code(status), captured));
                 }
@@ -1601,7 +1601,7 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
             let mut read = read;
             read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
             loop {
-                let mut status: libc::c_int = 0;
+                let mut status: crate::sys::c_int = 0;
                 if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
                     return Ok((crate::job::exit_code(status), captured));
                 }
@@ -1628,7 +1628,7 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
 /// must survive, unclosed, until *after* the caller has finished spawning
 /// whatever command this substitution's path was expanded into — only then
 /// does the spawned child actually inherit it (fork+exec inherits open,
-/// non-`CLOEXEC` fds unchanged, and `make_pipe`'s raw `libc::pipe` already
+/// non-`CLOEXEC` fds unchanged, and `make_pipe`'s raw `crate::sys::pipe` already
 /// doesn't set `CLOEXEC`, so no extra bookkeeping is needed there) — so the
 /// `File` is stashed in `PENDING_PROC_SUBS` rather than dropped here, for
 /// `close_pending_proc_subs` to close once that's safe to do.
@@ -1654,7 +1654,7 @@ pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, 
             // child automatically; this child runs the parsed command
             // list in-process instead, so it needs the same reset by hand.
             unsafe {
-                crate::sys::signal(libc::SIGPIPE, libc::SIG_DFL);
+                crate::sys::signal(crate::sys::SIGPIPE, crate::sys::SIG_DFL);
             }
             // Child: `>(cmd)` reads from the pipe (its stdin); `<(cmd)`
             // writes to it (its stdout). Neither original fd is needed
@@ -1719,9 +1719,9 @@ fn close_pending_proc_subs() {
     let pending = PENDING_PROC_SUBS.with(|p| std::mem::take(&mut *p.borrow_mut()));
     for (file, pid) in pending {
         drop(file);
-        let mut status: libc::c_int = 0;
+        let mut status: crate::sys::c_int = 0;
         unsafe {
-            crate::sys::waitpid(pid, &mut status, libc::WNOHANG);
+            crate::sys::waitpid(pid, &mut status, crate::sys::WNOHANG);
         }
     }
 }

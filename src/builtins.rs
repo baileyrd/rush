@@ -1535,21 +1535,31 @@ fn set_cmd(argv: &[String]) -> i32 {
 fn trap_cmd(argv: &[String]) -> i32 {
     if argv.len() == 1 {
         for (name, command) in crate::trap::all() {
-            println!("trap -- '{command}' {name}");
+            // Listing prints real signals `SIG`-prefixed, `EXIT` bare —
+            // matching real bash's own `trap` output format exactly.
+            let display = if name == "EXIT" { name } else { format!("SIG{name}") };
+            println!("trap -- '{command}' {display}");
         }
         return 0;
     }
+    // Signal specs normalize to the canonical bare name delivery keys on
+    // (C44): `15`, `SIGTERM`, `sigterm`, and `TERM` are all the same trap.
+    // An invalid spec errors (status 1) without blocking the *other* specs
+    // in the same call from registering — matching real bash, verified
+    // directly (`trap 'cmd' BOGUS TERM` errors *and* registers TERM).
     let command = &argv[1];
-    if command == "-" {
-        for name in &argv[2..] {
-            crate::trap::unset(name);
+    let mut status = 0;
+    for spec in &argv[2..] {
+        match crate::trap::normalize_signal_spec(spec) {
+            Some(name) if command == "-" => crate::trap::unset(name),
+            Some(name) => crate::trap::set(name, command),
+            None => {
+                eprintln!("trap: {spec}: invalid signal specification");
+                status = 1;
+            }
         }
-        return 0;
     }
-    for name in &argv[2..] {
-        crate::trap::set(name, command);
-    }
-    0
+    status
 }
 
 #[cfg(test)]

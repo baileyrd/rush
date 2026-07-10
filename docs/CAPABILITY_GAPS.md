@@ -317,7 +317,7 @@ syntax directly.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 14 (13 done, 1 open — C44)
+- **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (12 done, 5 open — C45–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
@@ -325,8 +325,8 @@ syntax directly.
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C43 are
-now done and the remaining 30 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C44 are
+now done (re-closing Tier I completely) and the remaining 29 are open.
 
 ---
 
@@ -837,7 +837,7 @@ all of the above plus ksh93/zsh's `typeset -u` equivalents for the
 headline cases; regression tests: three unit tests (`vars.rs`) and three
 integration tests (`tests/exec_behavior.rs`).
 
-### C44 — `trap` with a numeric or `SIG`-prefixed signal spec registers but never fires (tracked)
+### C44 — `trap` with a numeric or `SIG`-prefixed signal spec registers but never fires ✅ done
 POSIX explicitly permits the numeric form; present in bash/dash. Multiple
 signal *names* in one `trap` call already work correctly (`trap 'cmd'
 INT TERM`) — this is specifically the numeric (`trap 'cmd' 15`) and
@@ -851,6 +851,32 @@ runs, with no error at registration time either. **Effort: S** — a
 normalization step in `trap_cmd` (numeric → canonical name via the same
 table `kill`'s signal parsing already needs, strip a leading `SIG`)
 before the name is used as `trap.rs`'s lookup key.
+
+Implemented: new `trap::normalize_signal_spec` collapses numeric (`15` →
+`TERM`, `0` → `EXIT`, per POSIX), `SIG`-prefixed (`SIGTERM`), and
+lowercase (`sigterm`, `term` — bash accepts these too, verified)
+spellings to the canonical bare name delivery keys on, backed by a
+22-entry name↔number table (the x86-64 Linux numbers, the same ones
+bash's own `trap -l` shows there). `trap_cmd` (`builtins.rs`) normalizes
+both registration *and* removal (`trap - 15` now removes a trap
+registered as `TERM`), and an invalid spec is finally an error at
+registration time — `trap: BOGUS: invalid signal specification`, status
+1 — rather than a silently-orphaned entry. Two adjacent bash behaviors
+were probed and matched while here: an invalid spec does *not* block the
+other specs in the same call from registering (`trap 'cmd' BOGUS TERM`
+errors and still registers `TERM`, verified directly), and the `trap`
+listing prints real signals `SIG`-prefixed with `EXIT` bare
+(`trap -- 'echo T' SIGTERM`), which rush's listing used to get wrong by
+printing the raw stored key.
+
+Verified against real bash across: `trap 'cmd' 15` / `SIGTERM` /
+`sigterm` all firing on a real delivered `SIGTERM`, `trap 'cmd' 0`
+firing at exit, `trap - 15` restoring the default disposition (shell
+dies 143, matching bash), both invalid-spec cases (status, diagnostic,
+valid-spec-still-registers), and the listing format. Regression tests:
+one unit test (`trap.rs`, the normalization table) and three integration
+tests (`tests/exec_behavior.rs`) covering firing via every spelling,
+invalid-spec handling, and listing output.
 
 ---
 

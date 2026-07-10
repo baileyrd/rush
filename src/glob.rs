@@ -79,15 +79,18 @@ fn walk(dir: &Path, segs: &[&str], i: usize, prefix: &str, out: &mut Vec<String>
     }
 }
 
-/// Does any unescaped `*`, `?`, or `[` appear in this component?
+/// Does any unescaped `*`, `?`, `[`, or extglob opener (`@(`, `+(`, `!(`
+/// — `?(`/`*(` are already covered by their first character) appear in
+/// this component?
 fn has_meta(seg: &str) -> bool {
-    let mut chars = seg.chars();
+    let mut chars = seg.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\\' => {
                 chars.next();
             }
             '*' | '?' | '[' => return true,
+            '@' | '+' | '!' if chars.peek() == Some(&'(') => return true,
             _ => {}
         }
     }
@@ -121,6 +124,18 @@ fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
     loop {
         if pi == p.len() {
             return si == s.len();
+        }
+        // Extended globs (C57): `?(...)`/`*(...)`/`+(...)`/`@(...)`/`!(...)`
+        // with `|`-separated alternatives — always on, like ksh93 (bash
+        // gates them behind `shopt -s extglob`; rush has no shopt, and
+        // without extglob bash makes these a hard syntax error anyway, so
+        // always-on is strictly more compatible).
+        if pi + 1 < p.len()
+            && matches!(p[pi], '?' | '*' | '+' | '@' | '!')
+            && p[pi + 1] == '('
+            && let Some((alts, rest)) = parse_extglob(p, pi + 1)
+        {
+            return match_extglob(p[pi], &alts, p, rest, s, si);
         }
         match p[pi] {
             '*' => {
@@ -193,6 +208,84 @@ fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
 enum ClassItem {
     Range(char, char),
     Named(fn(char) -> bool),
+}
+
+/// Split an extglob group starting at `open` (the `(`) into its
+/// top-level `|`-separated alternatives, returning them plus the index
+/// just past the closing `)`. `None` if the group never closes (the
+/// `(` then falls through as a literal character, same as before C57).
+fn parse_extglob(p: &[char], open: usize) -> Option<(Vec<Vec<char>>, usize)> {
+    let mut alts = Vec::new();
+    let mut cur = Vec::new();
+    let mut depth = 1usize;
+    let mut i = open + 1;
+    while i < p.len() {
+        match p[i] {
+            '(' => {
+                depth += 1;
+                cur.push('(');
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    alts.push(cur);
+                    return Some((alts, i + 1));
+                }
+                cur.push(')');
+            }
+            '|' if depth == 1 => alts.push(std::mem::take(&mut cur)),
+            '\\' => {
+                cur.push('\\');
+                if i + 1 < p.len() {
+                    i += 1;
+                    cur.push(p[i]);
+                }
+            }
+            c => cur.push(c),
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Match one extglob group (`kind` is its prefix character) followed by
+/// the rest of the pattern (`p[rest..]`) against `s[si..]`. Alternatives
+/// are full glob patterns themselves (nesting recurses naturally); every
+/// split point is tried, backtracking-style. Semantics verified against
+/// bash (`shopt -s extglob`): `?` is exactly 0 or 1 occurrence (`aax`
+/// does NOT match `?(a)x`), `*`/`+` are 0+/1+ repetitions, `@` exactly
+/// one, and `!` matches any prefix that is *not* matched in full by any
+/// alternative (`abfile` matches `!(a|b)file`; `afile` doesn't).
+fn match_extglob(kind: char, alts: &[Vec<char>], p: &[char], rest: usize, s: &[char], si: usize) -> bool {
+    let alt_matches = |from: usize, to: usize| alts.iter().any(|alt| matches(alt, 0, &s[from..to], 0));
+    match kind {
+        '@' => (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k)),
+        '?' => {
+            matches(p, rest, s, si) || (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k))
+        }
+        '!' => (si..=s.len()).any(|k| !alt_matches(si, k) && matches(p, rest, s, k)),
+        // `*` / `+`: repetitions. Try the tail at every point reachable by
+        // consuming zero (`*` only) or more alternative-matched chunks.
+        '*' | '+' => {
+            fn reachable(
+                alt_matches: &dyn Fn(usize, usize) -> bool,
+                p: &[char],
+                rest: usize,
+                s: &[char],
+                from: usize,
+                min_done: bool,
+            ) -> bool {
+                if min_done && matches(p, rest, s, from) {
+                    return true;
+                }
+                // Consume one more non-empty alternative-matched chunk.
+                ((from + 1)..=s.len())
+                    .any(|k| alt_matches(from, k) && reachable(alt_matches, p, rest, s, k, true))
+            }
+            reachable(&alt_matches, p, rest, s, si, kind == '*')
+        }
+        _ => false,
+    }
 }
 
 struct Class {
@@ -343,6 +436,40 @@ mod tests {
         assert!(match_component("a[[:digit]", "a:"));
         assert!(!match_component("a[[:digit]", "a["));
         assert!(!match_component("a[[:digit]", "a5"));
+    }
+
+    // C57: extended globs — each expectation mirrors bash under
+    // `shopt -s extglob` (verified directly).
+    #[test]
+    fn extended_globs() {
+        assert!(match_component("@(a|b)file", "afile"));
+        assert!(match_component("@(a|b)file", "bfile"));
+        assert!(!match_component("@(a|b)file", "cfile"));
+        assert!(!match_component("@(a|b)file", "abfile"));
+
+        // `?`: exactly 0 or 1 occurrence.
+        assert!(match_component("?(a)x", "x"));
+        assert!(match_component("?(a)x", "ax"));
+        assert!(!match_component("?(a)x", "aax"));
+
+        // `*`: 0+, `+`: 1+.
+        assert!(match_component("*(a)", ""));
+        assert!(match_component("+(a)", "aaa"));
+        assert!(!match_component("+(a)", ""));
+        assert!(match_component("+(a|b)file", "abfile"));
+
+        // `!`: any prefix not matched in full by an alternative.
+        assert!(match_component("!(a|b)file", "cfile"));
+        assert!(match_component("!(a|b)file", "abfile"));
+        assert!(!match_component("!(a|b)file", "afile"));
+
+        // Nesting, and alternatives that are themselves glob patterns.
+        assert!(match_component("@(f@(o|x)o)", "foo"));
+        assert!(match_component("@(*.txt|*.rs)", "glob.rs"));
+        assert!(!match_component("@(*.txt|*.rs)", "glob.c"));
+
+        // An unterminated group falls back to literal characters.
+        assert!(match_component("a@(b", "a@(b"));
     }
 
     #[test]

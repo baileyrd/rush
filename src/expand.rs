@@ -914,7 +914,7 @@ impl Splitter {
             let f = self.current();
             f.plain.push_str(text);
             f.pattern.push_str(text);
-            if text.contains(['*', '?', '[']) {
+            if has_glob_meta(text) {
                 f.globbable = true;
             }
             return;
@@ -953,7 +953,7 @@ impl Splitter {
                 let f = self.current();
                 f.plain.push_str(&chunk);
                 f.pattern.push_str(&chunk);
-                if chunk.contains(['*', '?', '[']) {
+                if has_glob_meta(&chunk) {
                     f.globbable = true;
                 }
             }
@@ -1013,6 +1013,17 @@ pub(crate) fn expand_cond_regex(word: &Word) -> Result<String, String> {
         }
     }
     Ok(pattern)
+}
+
+/// Whether unquoted text contains anything the glob matcher would treat
+/// as a metacharacter — `*`/`?`/`[`, or an extglob opener (`@(`/`+(`/`!(`,
+/// C57; `?(`/`*(` are already covered by their first character).
+fn has_glob_meta(text: &str) -> bool {
+    if text.contains(['*', '?', '[']) {
+        return true;
+    }
+    let b = text.as_bytes();
+    (1..b.len()).any(|i| b[i] == b'(' && matches!(b[i - 1], b'@' | b'+' | b'!'))
 }
 
 /// Append `s` to a glob pattern, backslash-escaping characters that would

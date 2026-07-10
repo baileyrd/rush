@@ -1796,6 +1796,13 @@ fn set_cmd(argv: &[String]) -> i32 {
                 'u' => crate::vars::set_nounset(on),
                 'x' => crate::vars::set_xtrace(on),
                 'C' => crate::vars::set_noclobber(on),
+                // `set -n` is ignored by an interactive shell (matching
+                // bash — it would lock the session out otherwise).
+                'n' => {
+                    if !crate::vars::interactive() {
+                        crate::vars::set_noexec(on);
+                    }
+                }
                 'p' => crate::vars::set_pipefail(on),
                 _ => unreachable!(),
             }
@@ -1841,7 +1848,7 @@ fn set_cmd(argv: &[String]) -> i32 {
                 let on = other.starts_with('-');
                 for c in other[1..].chars() {
                     match c {
-                        'e' | 'u' | 'x' | 'C' => pending.push((c, on)),
+                        'e' | 'u' | 'x' | 'C' | 'n' => pending.push((c, on)),
                         'o' => match args.next().map(String::as_str) {
                             Some("pipefail") => pending.push(('p', on)),
                             Some(name) => {

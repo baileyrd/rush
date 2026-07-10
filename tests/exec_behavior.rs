@@ -2273,3 +2273,45 @@ fn noclobber_refuses_overwrite_and_clobber_overrides() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn set_n_parses_but_runs_nothing() {
+    // C51: `set -n` was rejected outright; `rush -n` didn't exist.
+    // Mid-script, everything after `set -n` is skipped — including the
+    // `set +n` that would undo it (one-way, matching bash).
+    let (out, status) = rush("echo one; set -n; echo two; set +n; echo three");
+    assert_eq!(out, "one\n");
+    assert_eq!(status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn rush_dash_n_is_syntax_check_only() {
+    // The `sh -n script.sh` linting idiom: clean syntax → status 0 and no
+    // execution; a syntax error → status 2.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rush"))
+        .args(["-n", "-c", "echo should_not_run"])
+        .output()
+        .expect("spawn rush");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(0));
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rush"))
+        .args(["-n", "-c", "echo hi("])
+        .output()
+        .expect("spawn rush");
+    assert_eq!(output.status.code(), Some(2));
+
+    // Script-file mode too.
+    let f = std::env::temp_dir().join(format!("rush_c51_{}.sh", std::process::id()));
+    std::fs::write(&f, "echo nope\n").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-n")
+        .arg(&f)
+        .output()
+        .expect("spawn rush");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(0));
+    let _ = std::fs::remove_file(&f);
+}

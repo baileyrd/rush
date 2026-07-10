@@ -158,6 +158,14 @@ fn run_job(job: &Job) -> Result<(i32, bool), String> {
 }
 
 fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
+    // `set -n` (noexec, C51): everything still parses, nothing runs. The
+    // check sits here — the choke point every top-level and compound-body
+    // command funnels through — so a mid-script `set -n` stops the rest of
+    // the script (including the `set +n` that would undo it, matching
+    // bash's own one-way behavior, verified directly).
+    if crate::vars::noexec() {
+        return Ok((0, false));
+    }
     // Update `$?` after every pipeline, so a later one in the same line can read
     // it (e.g. `false || echo $?`).
     let mut status = run_pipeline_node(&list.first)?;

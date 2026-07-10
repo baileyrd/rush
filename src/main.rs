@@ -174,6 +174,21 @@ fn main() -> rustyline::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // `rush -n …` (C51): the standard `sh -n script.sh` linting idiom —
+    // parse everything, report syntax errors (status 2), execute nothing
+    // (status 0 when the syntax is clean). Composes with both `-c` and a
+    // script file by simply pre-setting the same noexec flag `set -n`
+    // uses; `run_source`'s parse still happens, `exec::run_andor` skips
+    // every job.
+    let args: Vec<String> = if args.get(1).map(String::as_str) == Some("-n") {
+        vars::set_noexec(true);
+        let mut rest = args.clone();
+        rest.remove(1);
+        rest
+    } else {
+        args
+    };
+
     // Non-interactive modes: `rush -c "cmd" [name args…]` and `rush FILE [args…]`.
     match args.get(1).map(String::as_str) {
         Some("-c") => {

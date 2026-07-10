@@ -13,7 +13,6 @@ mod alias;
 mod arith;
 mod builtins;
 mod completion;
-mod editor;
 mod exec;
 mod expand;
 mod func;
@@ -28,7 +27,43 @@ mod vars;
 
 use std::path::PathBuf;
 
-use editor::{Editor, ReadResult};
+use rusty_lines::{Editor, Hooks, ReadResult};
+
+/// rush's side of the editor's `Hooks` seam: completion, hints,
+/// highlighting, and abbreviations come from `completion.rs`; the
+/// vi-mode flag and `$VISUAL`/`$EDITOR` from the shell's own variable
+/// table (so `set -o vi` and an in-shell `EDITOR=…` both take effect
+/// live); an interrupted read fires pending signal traps.
+struct ShellHooks;
+
+impl Hooks for ShellHooks {
+    fn complete(&self, line: &str, pos: usize) -> (usize, Vec<rusty_lines::Candidate>) {
+        completion::complete(line, pos)
+    }
+    fn hint(&self, line: &str, history: &[String]) -> Option<String> {
+        completion::hint(line, history)
+    }
+    fn highlight(&self, line: &str) -> String {
+        completion::highlight_line(line)
+    }
+    fn expand_abbreviation(&self, line: &str, cursor: usize) -> Option<(usize, String)> {
+        completion::abbr_expansion(line, cursor)
+    }
+    fn vi_mode(&self) -> bool {
+        vars::edit_mode_vi()
+    }
+    fn external_editor(&self) -> Option<String> {
+        vars::get("VISUAL")
+            .filter(|e| !e.is_empty())
+            .or_else(|| vars::get("EDITOR").filter(|e| !e.is_empty()))
+    }
+    fn on_interrupted_read(&self) {
+        // A deferred TERM/HUP landed mid-read; let trap machinery see it
+        // at this safe point.
+        #[cfg(unix)]
+        trap::check_pending();
+    }
+}
 
 fn history_path() -> Option<PathBuf> {
     let mut p = PathBuf::from(std::env::var_os("HOME")?);
@@ -230,10 +265,11 @@ fn run_source(src: &str) -> i32 {
 
 fn interactive() -> std::io::Result<()> {
     vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
-    // Rush's own hand-rolled editor (src/editor.rs) — completion,
-    // hints, highlighting, abbreviations, emacs/vi keymaps (checked
-    // live, so `set -o vi` needs no rebuild), and the right prompt
-    // ($RPS1, C71) all live there.
+    // The line editor lives in the rusty_lines crate (extracted from
+    // this repo's former src/editor.rs); rush plugs in completion,
+    // hints, highlighting, abbreviations, the vi-mode flag, and trap
+    // handling through `ShellHooks`. The right prompt ($RPS1, C71) is
+    // read_line's second argument.
     let mut rl = Editor::new();
     let hist = history_path();
     if let Some(ref h) = hist {
@@ -272,7 +308,7 @@ fn interactive() -> std::io::Result<()> {
         let rprompt = vars::get("RPS1")
             .and_then(|raw| expand::expand_dollars(&raw).ok())
             .unwrap_or_default();
-        match rl.read_line(&prompt, &rprompt)? {
+        match rl.read_line(&prompt, &rprompt, &ShellHooks)? {
             ReadResult::Line(line) => {
                 if buffer.is_empty() && line.trim().is_empty() {
                     continue;

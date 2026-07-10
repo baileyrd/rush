@@ -10,9 +10,11 @@ repository = "https://github.com/baileyrd/rush"
 # `[[ $s =~ regex ]]` (C56). The practical ERE engine; its syntax isn't a
 # byte-for-byte POSIX ERE match, but agrees on everything the tests cover.
 regex = "1"
-# Display-column widths for the hand-rolled line editor's render engine
-# (src/editor.rs) — Unicode tables only, no code of consequence.
-unicode-width = "0.2"
+# The line editor (formerly src/editor.rs, extracted to its own crate):
+# raw-mode terminal, emacs + vi keymaps, kill ring, undo, history search,
+# bracketed paste, $RPS1 right prompt. rush drives it through its `Hooks`
+# trait (completion, hints, highlighting, abbreviations, vi-mode flag).
+rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", branch = "main" }
 
 # Job control (process groups, terminal hand-off, signals) is Unix-only; the
 # raw libc bindings are the most stable surface for it.

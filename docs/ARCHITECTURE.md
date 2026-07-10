@@ -135,11 +135,17 @@ read-eval-print loop and all I/O concerns:
 - Delegates parsing and execution, printing any error as `rush: …` to stderr
   without exiting.
 
-### `editor.rs` — hand-rolled line editor
-Rush's own replacement for the `rustyline` dependency, feature-audited
+### line editing — the `rusty_lines` crate
+Formerly `src/editor.rs`, now extracted to its own repo
+(<https://github.com/baileyrd/rusty_lines>) and pulled in as a git
+dependency. Rush drives it through the crate's `Hooks` trait —
+`ShellHooks` in `main.rs` wires completion/hints/highlighting/
+abbreviations to `completion.rs`, the vi-mode flag and `$VISUAL`/
+`$EDITOR` to `vars`, and interrupted reads to `trap::check_pending`.
+The editor itself is rush's old hand-rolled one, feature-audited
 against GNU readline, libedit, zsh ZLE, fish, linenoise, replxx,
 rustyline, and reedline — the survey and the documented narrowings live
-in `docs/LINE_EDITOR.md`. Raw terminal mode (termios, RAII-restored) plus
+in the crate's README. Raw terminal mode (termios, RAII-restored) plus
 a bracketed-paste guard, unbuffered fd-0 key decoding (UTF-8 + escape
 sequences with modifier parameters — Ctrl/Alt-arrows — and the paste
 envelope, with a short poll disambiguating a lone ESC), and a render

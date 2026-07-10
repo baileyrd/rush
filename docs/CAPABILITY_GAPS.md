@@ -321,13 +321,13 @@ syntax directly.
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
-- **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
+- **Tier V — interactive UX:** 9 (4 done, 5 open — C69–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C67 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C68 are
 now done (re-closing Tiers I through IV completely) and the remaining
-6 (all Tier V, interactive UX) are open.
+5 (all Tier V, interactive UX) are open.
 
 ---
 
@@ -2794,7 +2794,7 @@ approximations: a here-doc body's own newlines don't advance `$LINENO`
 the current source stack rather than the function's definition site.
 One integration test covers the bag.
 
-### C68 — No syntax highlighting or live validation of the command line (tracked)
+### C68 — No syntax highlighting or live validation of the command line ✅ done
 Native in fish (real-time), available in zsh (`zsh-syntax-highlighting`),
 absent from bash/dash/ksh93. Rush's `RushHelper` (`src/completion.rs`)
 implements `Completer`/`Hinter` but its `Highlighter` impl is limited to
@@ -2812,6 +2812,24 @@ plus a first-word-only PATH/builtin/function/alias lookup for the
 command-not-found case; live validation (unmatched quotes, etc.) rides
 the same re-lex pass, which is why the two are budgeted together rather
 than separately.
+
+Implemented in `RushHelper`'s existing `Highlighter` impl, as the
+write-up predicted — same wiring point as C33, new logic only. One
+deviation from the sketch, for cause: the classifier is a small
+dedicated span scanner rather than a re-lex through `lexer.rs`, because
+the real lexer returns tokens *without byte spans* and hard-errors on
+exactly the incomplete input an in-progress line is made of. The
+fish-style scheme: command-position words (including after `|`/`;`/`&`,
+with assignment prefixes skipped) resolve through the full
+keyword/builtin/function/alias/`$PATH` chain and render green or —
+the pre-Enter command-not-found flag — red; quoted strings yellow with
+an *unmatched* quote's whole tail red (the live-validation half);
+comments dimmed; `$var`/`${...}` cyan; operators magenta.
+`highlight_char` requests repaint on every change. C33's dimmed-hint
+rendering is untouched beside it. Unit tests cover the classification
+matrix (resolvable/unresolvable command words, matched/unmatched
+quotes, comments, vars, pipe-resets-command-position, assignment
+prefixes).
 
 ### C69 — Tab completion shows one candidate at a time, no columned list (tracked)
 Native list/menu display in fish, zsh, and bash (bash-completion or even

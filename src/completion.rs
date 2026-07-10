@@ -101,6 +101,126 @@ impl Highlighter for RushHelper {
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
         Cow::Owned(format!("\x1b[2m{hint}\x1b[0m"))
     }
+
+    // Live syntax highlighting (C68), fish-style: command words are green
+    // when they resolve (keyword/builtin/function/alias/`$PATH`) and red
+    // when they don't; strings yellow (an *unmatched* quote's span red —
+    // the live-validation half); comments dimmed; `$`-expansions cyan;
+    // operators magenta. Built on a small, error-tolerant span scanner —
+    // deliberately not the real lexer, which returns tokens without byte
+    // spans and hard-errors on exactly the incomplete input an
+    // in-progress line is made of.
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        Cow::Owned(highlight_line(line))
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize, _kind: rustyline::highlight::CmdKind) -> bool {
+        true
+    }
+}
+
+/// Classify `line` into colored spans — see `Highlighter::highlight`.
+fn highlight_line(line: &str) -> String {
+    const RESET: &str = "\x1b[0m";
+    const GREEN: &str = "\x1b[32m";
+    const RED: &str = "\x1b[31m";
+    const YELLOW: &str = "\x1b[33m";
+    const CYAN: &str = "\x1b[36m";
+    const MAGENTA: &str = "\x1b[35m";
+    const DIM: &str = "\x1b[2m";
+
+    let mut out = String::with_capacity(line.len() * 2);
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut command_position = true;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '#' => {
+                // Comment to end of line.
+                out.push_str(DIM);
+                out.extend(&chars[i..]);
+                out.push_str(RESET);
+                break;
+            }
+            '\'' | '"' => {
+                let quote = c;
+                let close = chars[i + 1..].iter().position(|&q| q == quote).map(|p| i + 1 + p);
+                match close {
+                    Some(end) => {
+                        out.push_str(YELLOW);
+                        out.extend(&chars[i..=end]);
+                        out.push_str(RESET);
+                        i = end + 1;
+                    }
+                    None => {
+                        // Unmatched quote: the rest of the line flags red.
+                        out.push_str(RED);
+                        out.extend(&chars[i..]);
+                        out.push_str(RESET);
+                        break;
+                    }
+                }
+            }
+            '$' => {
+                let mut end = i + 1;
+                if chars.get(end) == Some(&'{') {
+                    while end < chars.len() && chars[end] != '}' {
+                        end += 1;
+                    }
+                    end = (end + 1).min(chars.len());
+                } else {
+                    while end < chars.len() && (chars[end] == '_' || chars[end].is_ascii_alphanumeric()) {
+                        end += 1;
+                    }
+                }
+                out.push_str(CYAN);
+                out.extend(&chars[i..end]);
+                out.push_str(RESET);
+                i = end.max(i + 1);
+            }
+            '|' | '&' | ';' | '<' | '>' | '(' | ')' => {
+                out.push_str(MAGENTA);
+                out.push(c);
+                out.push_str(RESET);
+                command_position = true;
+                i += 1;
+            }
+            c if c.is_whitespace() => {
+                out.push(c);
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                while i < chars.len()
+                    && !chars[i].is_whitespace()
+                    && !matches!(chars[i], '|' | '&' | ';' | '<' | '>' | '(' | ')' | '\'' | '"' | '$' | '#')
+                {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                if command_position && !word.contains('=') {
+                    let ok = crate::parser::RESERVED.contains(&word.as_str())
+                        || crate::builtins::is_builtin(&word)
+                        || crate::func::exists(&word)
+                        || crate::alias::get(&word).is_some()
+                        || crate::builtins::resolve_in_path(&word).is_some();
+                    out.push_str(if ok { GREEN } else { RED });
+                    out.push_str(&word);
+                    out.push_str(RESET);
+                    command_position = false;
+                } else {
+                    // Assignment prefixes (`FOO=bar cmd`) keep command
+                    // position for the next word.
+                    if !(command_position && word.contains('=')) {
+                        command_position = false;
+                    }
+                    out.push_str(&word);
+                }
+            }
+        }
+    }
+    out
 }
 impl Validator for RushHelper {}
 impl Helper for RushHelper {}
@@ -444,6 +564,36 @@ mod tests {
 
         assert_eq!(helper.hint("", 0, &ctx), None);
         assert_eq!(helper.hint("echo hi", 7, &ctx), None);
+    }
+
+    // C68: span classification — command words green/red by
+    // resolvability, unmatched quotes red, comments dimmed, $vars cyan.
+    #[test]
+    fn highlight_classifies_spans() {
+        let h = highlight_line("echo hi");
+        assert!(h.starts_with("\x1b[32mecho\x1b[0m"), "got: {h:?}");
+
+        let h = highlight_line("nosuchcmd_xyz hi");
+        assert!(h.starts_with("\x1b[31mnosuchcmd_xyz\x1b[0m"), "got: {h:?}");
+
+        let h = highlight_line("echo \"done");
+        assert!(h.contains("\x1b[31m\"done\x1b[0m"), "unmatched quote red: {h:?}");
+        let h = highlight_line("echo \"done\"");
+        assert!(h.contains("\x1b[33m\"done\"\x1b[0m"), "matched quote yellow: {h:?}");
+
+        let h = highlight_line("echo $HOME # note");
+        assert!(h.contains("\x1b[36m$HOME\x1b[0m"), "var cyan: {h:?}");
+        assert!(h.contains("\x1b[2m# note\x1b[0m"), "comment dim: {h:?}");
+
+        // The word after a pipe is a command word again; keywords count.
+        let h = highlight_line("true | nosuch_c68");
+        assert!(h.contains("\x1b[31mnosuch_c68\x1b[0m"), "got: {h:?}");
+        let h = highlight_line("if true");
+        assert!(h.starts_with("\x1b[32mif\x1b[0m"), "keyword green: {h:?}");
+
+        // An assignment prefix keeps command position for the next word.
+        let h = highlight_line("FOO=1 echo x");
+        assert!(h.contains("\x1b[32mecho\x1b[0m"), "got: {h:?}");
     }
 
     #[test]

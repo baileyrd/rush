@@ -2137,3 +2137,34 @@ fn readonly_prefix_assignment_errors_but_still_runs() {
     let (out, _) = rush("readonly x=1; x=2 /bin/sh -c 'echo child_x=$x' 2>/dev/null; echo after");
     assert_eq!(out, "child_x=\nafter\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn ulimit_reads_and_sets_limits() {
+    // C46: `ulimit` was "command not found" — its total absence blocked
+    // the ubiquitous `ulimit -n`/`ulimit -c 0` operational-script openers.
+    // With no flag the subject is -f (file size), same as bash.
+    let (out, status) = rush("ulimit");
+    assert_eq!(status, 0);
+    assert!(!out.trim().is_empty());
+
+    // Lowering -n applies to the process and is inherited by children —
+    // observed via a real child /bin/sh reporting its own limit.
+    let (out, _) = rush("ulimit -n 1024; ulimit -n; /bin/sh -c 'ulimit -n'");
+    assert_eq!(out, "1024\n1024\n");
+
+    // -S sets only the soft limit; -H still reports the original hard one.
+    let (out, _) = rush("hard=$(ulimit -H -n); ulimit -S -n 512; echo \"$(ulimit -n) $([ \"$(ulimit -H -n)\" = \"$hard\" ] && echo same)\"");
+    assert_eq!(out, "512 same\n");
+
+    // -a dumps labeled lines in bash's own format.
+    let (out, _) = rush("ulimit -a");
+    assert!(out.lines().any(|l| l.starts_with("open files") && l.contains("-n")), "got: {out:?}");
+
+    // Error paths: unknown flag is usage error 2, a bad number is 1.
+    let (_, status) = rush("ulimit -z 2>/dev/null");
+    assert_eq!(status, 2);
+    let (err, status) = rush_stderr("ulimit -n abc");
+    assert!(err.contains("abc: invalid number"), "got: {err:?}");
+    assert_eq!(status, 1);
+}

@@ -1171,6 +1171,23 @@ fn capture_pipeline_expanded(raw: &RawPipeline, out: &mut String) -> Result<i32,
         crate::vars::set_last_status(status);
         return Ok(status);
     }
+    // A sole builtin or shell function: `run` below spawns externals only,
+    // which used to mean `$(umask)`, `$(type x)`, `$(ulimit -n)`, and
+    // `$(myfunc)` all failed with "command not found" unless an external
+    // twin happened to exist on PATH (found while landing C46, whose
+    // `$(ulimit -n)` is exactly this shape). Capture these in-process via
+    // the same fork-with-fd1-on-a-pipe scheme `capture_compound` uses —
+    // a real subshell, which is also bash's own semantics for `$(...)`
+    // (its side effects, `$(cd /tmp)` included, don't escape).
+    #[cfg(unix)]
+    if let [Stage::Simple(cmd)] = pipeline.commands.as_slice()
+        && cmd.argv.first().is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
+    {
+        let (status, captured) = capture_shell_command(cmd)?;
+        out.push_str(&captured);
+        crate::vars::set_last_status(status);
+        return Ok(status);
+    }
     let (status, captured) = run(&pipeline, true)?;
     out.push_str(&captured);
     crate::vars::set_last_status(status);
@@ -1248,6 +1265,52 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
 #[cfg(not(unix))]
 fn capture_compound(_rc: &RawCompound) -> Result<(i32, String), String> {
     Err("compound commands cannot be captured on this platform".into())
+}
+
+/// Capture a sole builtin's or shell function's output for `$(...)` — the
+/// in-process analogue of `capture_compound`, sharing its exact
+/// fork/pipe/waitpid scheme (see that function's doc comment for the
+/// mechanics, including why the parent must drop its write end before
+/// reading). The child runs the builtin via the ordinary
+/// `run_builtin_foreground` path (so the builtin's own redirects apply as
+/// usual, after fd 1 already points at the capture pipe) or the function
+/// via `call_function`, then exits with its status.
+#[cfg(unix)]
+fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
+    use std::os::unix::io::AsRawFd;
+
+    let (read, write) = make_pipe()?;
+    match unsafe { libc::fork() } {
+        -1 => Err(std::io::Error::last_os_error().to_string()),
+        0 => {
+            unsafe {
+                libc::dup2(write.as_raw_fd(), 1);
+            }
+            drop(write);
+            drop(read);
+            let status = if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
+                call_function(&cmd.argv).unwrap_or(1)
+            } else {
+                run_builtin_foreground(cmd).unwrap_or(1)
+            };
+            crate::trap::exit_shell(status);
+        }
+        pid => {
+            drop(write);
+            let mut captured = String::new();
+            let mut read = read;
+            read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
+            loop {
+                let mut status: libc::c_int = 0;
+                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1 {
+                    return Ok((crate::job::exit_code(status), captured));
+                }
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Process substitution — `<(cmd)` (read side) or `>(cmd)` (write side).

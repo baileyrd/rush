@@ -318,15 +318,15 @@ syntax directly.
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
-- **Tier II — missing standard builtins:** 17 (13 done, 4 open — C46–C49)
+- **Tier II — missing standard builtins:** 17 (14 done, 3 open — C47–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C45 are
-now done (re-closing Tier I completely) and the remaining 28 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C46 are
+now done (re-closing Tier I completely) and the remaining 27 are open.
 
 ---
 
@@ -1260,7 +1260,7 @@ tests (`tests/exec_behavior.rs` — assign-and-lock plus fatality,
 builtin-mediated non-fatality, listing/`declare -r`/`local -r`, prefix
 assignment).
 
-### C46 — `ulimit` entirely missing (tracked)
+### C46 — `ulimit` entirely missing ✅ done
 Present in every comparison shell **including dash** — like C45, this is
 a POSIX-family baseline (XSI-mandated), not a bash-only convenience.
 Container/daemon/CI scripts routinely open with `ulimit -n`/`ulimit -c
@@ -1270,6 +1270,45 @@ over `libc::getrlimit`/`setrlimit`, with the resource-letter table
 (`-n`/`-c`/`-s`/`-f`/`-u`/`-v`/…), soft-vs-hard (`-S`/`-H`), `-a` (dump
 all), and the `unlimited` keyword — broad surface but mechanically
 straightforward, no interaction with the rest of the shell.
+
+Implemented per the sketch: a 15-resource table (letter, `RLIMIT_*` id,
+bash's own `-a` label, unit scale — 512-byte blocks for `-c`/`-f`,
+kbytes for the memory sizes, matching bash's reporting units), over real
+`getrlimit`/`setrlimit`. Reading reports the soft limit unless `-H`;
+setting applies to both limits unless `-S`/`-H` narrows it (verified:
+`ulimit -S -n 512` lowers only the soft limit, `-H -n` still shows the
+original hard one); `unlimited` maps to `RLIM_INFINITY`; bare `ulimit`
+is `-f`, same as bash; a set limit is inherited by spawned children
+(verified via a real child `/bin/sh` reporting its own `-n`). Error
+paths match bash: unknown flag → usage, status 2; non-numeric limit →
+status 1. The Linux-only resources (`-e`/`-i`/`-q`/`-r`/`-x`) are
+cfg-gated so non-Linux Unix builds keep the portable ten. Accepted,
+documented narrowings: bash's read-only `-p` (pipe size) and
+`-b`/`-k`/`-P`/`-R`/`-T`, and the `hard`/`soft` keywords as limit
+operands.
+
+**A real, broader pre-existing gap found while verifying**: a sole
+*builtin* (or shell function!) inside `$(...)` was spawned as an
+external command — `$(umask)`, `$(type x)`, `$(myfunc)`, and C46's own
+`$(ulimit -n)` all failed with "command not found" unless an external
+twin happened to exist on PATH (which is why `$(pwd)`/`$(echo …)` had
+always *seemed* fine — `/bin/pwd` was doing the work). Fixed in
+`capture_pipeline_expanded` (`exec.rs`): a sole builtin/function stage
+now captures in-process via the same fork-with-fd1-on-a-pipe scheme
+`capture_compound` already uses — a real subshell, which is also bash's
+own `$(...)` semantics (side effects like `$(cd /tmp)` don't escape,
+verified). Remaining narrower limitation, deliberately documented
+rather than silently wrong: *multi-command* substitutions still run
+each pipeline separately in the parent's context, so `$(cd /tmp; pwd)`
+prints the parent's cwd rather than `/tmp` — the "whole substitution is
+one subshell" architecture is its own future item.
+
+Verified against real bash: `-n`/`-c`/default-`-f` values byte-identical,
+the full `-a` dump line-identical over the implemented set, both error
+paths, `-S`/`-H` split, child inheritance. Regression tests: one
+integration test covering read/set/inherit/`-S`-vs-`-H`/`-a`/both error
+paths, plus the substitution fix is exercised by `$(ulimit -n)` inside
+it.
 
 ### C47 — `command -p` (default-`$PATH` form) not supported (tracked)
 POSIX-mandated; present in bash/dash. `command -v`/`command -V`/the

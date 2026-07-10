@@ -823,14 +823,49 @@ fn command_bypass(cmd: &Command) -> Option<Command> {
     if cmd.argv.first().map(String::as_str) != Some("command") {
         return None;
     }
-    match cmd.argv.get(1).map(String::as_str) {
-        Some("-v") | Some("-V") | None => None,
-        Some(_) => {
-            let mut inner = cmd.clone();
-            inner.argv.remove(0);
-            Some(inner)
+    // Skip over leading flag words to find what follows: a lookup flag
+    // (`-v`/`-V`, alone or clustered as in `-pv`) means this is the pure
+    // lookup form, handled entirely by the `command` builtin — not a
+    // bypass. `-p` (C47) without `-v`/`-V` is the default-`$PATH`
+    // *execution* form: strip the flags and pin argv[0] to its
+    // default-path resolution now (an absolute path), so the ordinary
+    // spawn below can't be swayed by the shell's own `$PATH`.
+    let mut idx = 1;
+    let mut default_path = false;
+    while let Some(word) = cmd.argv.get(idx) {
+        let Some(flags) = word.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            break;
+        };
+        if !flags.chars().all(|c| matches!(c, 'p' | 'v' | 'V')) {
+            break;
+        }
+        if flags.contains(['v', 'V']) {
+            return None;
+        }
+        default_path = true;
+        idx += 1;
+    }
+    if idx >= cmd.argv.len() {
+        return None; // bare `command`, or `command -p` with nothing to run
+    }
+    let mut inner = cmd.clone();
+    inner.argv.drain(..idx);
+    if default_path {
+        match crate::builtins::resolve_in_default_path(&inner.argv[0]) {
+            // A builtin still wins over a default-path file, same as bash
+            // (`command -p echo` runs the builtin) — leave it alone.
+            _ if builtins::is_builtin(&inner.argv[0]) => {}
+            Some(path) => inner.argv[0] = path.display().to_string(),
+            // Leave the name untouched: with no `/` and no default-path
+            // hit, the spawn fails with the ordinary "command not found"
+            // (127) path.
+            None if !inner.argv[0].contains('/') => {
+                inner.argv[0] = format!("{}/", inner.argv[0]); // guaranteed NotFound, skips PATH search
+            }
+            None => {}
         }
     }
+    Some(inner)
 }
 
 /// Expand and run a single pipeline in the foreground.
@@ -1803,7 +1838,11 @@ fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> 
 /// functional behavior, same as every other error message in this shell.
 pub(crate) fn spawn_failure_status(name: &str, err: &std::io::Error) -> i32 {
     if err.kind() == std::io::ErrorKind::NotFound {
-        eprintln!("rush: {name}: command not found");
+        // A trailing `/` here is (almost always) the synthetic one
+        // `resolve_program`/`command_bypass` append to force a clean
+        // NotFound instead of a PATH search — don't leak it into the
+        // diagnostic.
+        eprintln!("rush: {}: command not found", name.strip_suffix('/').unwrap_or(name));
         127
     } else {
         eprintln!("rush: {name}: {err}");

@@ -1268,13 +1268,26 @@ fn classify(name: &str, keywords: bool) -> Option<Kind> {
 /// `/` is treated as an explicit path (checked directly, not searched for)
 /// rather than a `$PATH` lookup.
 pub(crate) fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
+    // `vars::get` alone — no `std::env` fallback (C36/C40): falling back
+    // would resurrect `PATH`'s original, inherited value after `unset`.
+    resolve_in_path_string(name, crate::vars::get("PATH"))
+}
+
+/// As [`resolve_in_path`], but against the fixed default system path —
+/// `command -p`'s search (C47), which deliberately ignores the shell's own
+/// (possibly compromised or customized) `$PATH`. The same "/bin:/usr/bin"
+/// real bash's `command -p` uses here (its `confstr(_CS_PATH)` value on
+/// Linux, verified via `getconf PATH`).
+pub(crate) fn resolve_in_default_path(name: &str) -> Option<std::path::PathBuf> {
+    resolve_in_path_string(name, Some("/bin:/usr/bin".to_string()))
+}
+
+fn resolve_in_path_string(name: &str, path: Option<String>) -> Option<std::path::PathBuf> {
     if name.contains('/') {
         let p = Path::new(name);
         return is_executable_file(p).then(|| p.to_path_buf());
     }
-    // `vars::get` alone — no `std::env` fallback (C36/C40): falling back
-    // would resurrect `PATH`'s original, inherited value after `unset`.
-    let path = crate::vars::get("PATH")?;
+    let path = path?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))
@@ -1304,25 +1317,60 @@ fn is_executable_file(p: &Path) -> bool {
 /// already has) is a narrower case this falls back to reporting rather
 /// than executing.
 fn command_cmd(argv: &[String]) -> i32 {
-    match argv.get(1).map(String::as_str) {
-        Some("-v") => command_v(&argv[2..], false),
-        Some("-V") => command_v(&argv[2..], true),
-        None => 0,
-        Some(_) => {
+    // Flags may cluster (`command -pv ls`, same as bash). `-p` (C47)
+    // switches the lookup to the fixed default system path. The
+    // *execution* forms (`command name …`, `command -p name …`) are
+    // intercepted earlier by `exec::command_bypass` and never reach here.
+    let mut default_path = false;
+    let mut verbose: Option<bool> = None;
+    let mut idx = 1;
+    while idx < argv.len() {
+        let Some(flags) = argv[idx].strip_prefix('-').filter(|f| !f.is_empty()) else {
+            break;
+        };
+        if !flags.chars().all(|c| matches!(c, 'p' | 'v' | 'V')) {
+            break;
+        }
+        for c in flags.chars() {
+            match c {
+                'p' => default_path = true,
+                'v' => verbose = Some(false),
+                'V' => verbose = Some(true),
+                _ => unreachable!(),
+            }
+        }
+        idx += 1;
+    }
+    match verbose {
+        Some(v) => command_v(&argv[idx..], v, default_path),
+        None if idx >= argv.len() => 0,
+        None => {
             eprintln!("command: running a command isn't supported here (only as the sole stage of a pipeline)");
             127
         }
     }
 }
 
-fn command_v(names: &[String], verbose: bool) -> i32 {
+fn command_v(names: &[String], verbose: bool, default_path: bool) -> i32 {
     if names.is_empty() {
         eprintln!("command: usage: command -{} name ...", if verbose { "V" } else { "v" });
         return 2;
     }
     let mut found_any = false;
     for name in names {
-        if let Some(kind) = classify(name, false) {
+        // `-p`: only the default system path is consulted — a name that
+        // resolves solely through the shell's own `$PATH` (or an alias/
+        // function/builtin: bash still reports those) keeps bash's own
+        // precedence, but the file lookup itself uses the fixed path.
+        let kind = if default_path {
+            match classify(name, false) {
+                Some(Kind::File(_)) | None => resolve_in_default_path(name).map(Kind::File),
+                other => other,
+            }
+        } else {
+            classify(name, false)
+        };
+        if let Some(kind) = kind {
             found_any = true;
             if verbose {
                 println!("{}", kind.describe(name));

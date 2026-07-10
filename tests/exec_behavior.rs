@@ -2168,3 +2168,29 @@ fn ulimit_reads_and_sets_limits() {
     assert!(err.contains("abc: invalid number"), "got: {err:?}");
     assert_eq!(status, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn command_p_uses_the_default_system_path() {
+    // C47: `command -p` treated `-p` as the command name itself. It now
+    // executes/looks up through the fixed default system path, immune to
+    // the shell's own $PATH.
+    let (out, _) = rush("PATH=/nowhere; command -p ls /dev/null; echo st=$?");
+    assert_eq!(out, "/dev/null\nst=0\n");
+
+    // Lookup forms, clustered and separate, also ignore $PATH.
+    let (out, _) = rush("PATH=/nowhere; command -pv ls; command -p -v ls");
+    assert_eq!(out, "/bin/ls\n/bin/ls\n");
+
+    // A builtin still wins over a default-path file, same as bash.
+    let (out, _) = rush("command -p echo built");
+    assert_eq!(out, "built\n");
+
+    // Not found anywhere on the default path: ordinary 127, clean message.
+    let (out, status) = rush("command -p totallynonexistent_c47 2>/dev/null; echo st=$?");
+    assert_eq!(out, "st=127\n");
+    assert_eq!(status, 0);
+    let (err, _) = rush_stderr("command -p totallynonexistent_c47");
+    assert!(err.contains("totallynonexistent_c47: command not found"), "got: {err:?}");
+    assert!(!err.contains("totallynonexistent_c47/"), "synthetic slash leaked: {err:?}");
+}

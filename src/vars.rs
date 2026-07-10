@@ -169,6 +169,9 @@ thread_local! {
     // Whether this shell is running its interactive REPL — `$-` includes
     // `i` when set (see `option_flags`).
     static INTERACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    // `set -o vi` / `set -o emacs` (C73): the requested line-editing
+    // mode; the interactive loop rebuilds its editor when this changes.
+    static EDIT_MODE_VI: RefCell<bool> = const { RefCell::new(false) };
     // `set -C` (noclobber, C50): a plain `>` redirect refuses to truncate
     // an existing regular file (see `exec::open_write`); `>|` overrides.
     static NOCLOBBER: RefCell<bool> = const { RefCell::new(false) };
@@ -441,6 +444,14 @@ pub fn set_noclobber(on: bool) {
 
 pub fn noclobber() -> bool {
     NOCLOBBER.with(|e| *e.borrow())
+}
+
+pub fn set_edit_mode_vi(on: bool) {
+    EDIT_MODE_VI.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn edit_mode_vi() -> bool {
+    EDIT_MODE_VI.with(|e| *e.borrow())
 }
 
 pub fn set_interactive(on: bool) {

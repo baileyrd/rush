@@ -1675,3 +1675,17 @@ first, `~`-abbreviated); `cd -N` jumps into it (zsh's spelling);
 spelling correction is interactive-only like fish's — a unique sibling
 within edit distance 2 is taken with a stderr notice, while script
 typos still fail. Adds unit + integration tests.
+
+### Fix: coproc kill race (found by an intermittent test hang)
+A `kill $COPROC_PID` racing in before the forked child could reset its
+inherited TERM/HUP deferring handlers was silently swallowed. The
+default dispositions are now set in the parent *before* the fork
+(closing the race); the parent reinstalls its own handlers immediately
+after.
+
+### New: runtime `set -o vi` / `set -o emacs` (C73)
+The option rides C52's `-o` machinery; the interactive loop rebuilds
+its editor with the new `EditMode` before the next prompt, re-applying
+the helper and abbreviation binding and carrying the in-memory history
+across entry by entry. No `$-` letter, matching bash. Adds 1
+integration test.

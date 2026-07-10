@@ -882,18 +882,22 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
 
     let (to_child_read, to_child_write) = make_pipe()?; // parent writes → child stdin
     let (from_child_read, from_child_write) = make_pipe()?; // child stdout → parent reads
+    // The coprocess must die on a plain `kill $NAME_PID` — but the child
+    // inherits the parent's TERM/HUP record-and-defer handlers across
+    // fork, and a kill racing in *before* the child could reset them was
+    // silently swallowed (caught as an intermittent test hang). Setting
+    // the default dispositions in the parent before forking closes the
+    // race; the parent reinstalls its own handlers immediately after.
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGHUP, libc::SIG_DFL);
+    }
     match unsafe { libc::fork() } {
         -1 => Err(std::io::Error::last_os_error().to_string()),
         0 => {
             unsafe {
                 libc::dup2(to_child_read.as_raw_fd(), 0);
                 libc::dup2(from_child_write.as_raw_fd(), 1);
-                // The coprocess must die on a plain `kill $NAME_PID`: the
-                // parent's TERM/HUP record-and-defer handlers are
-                // inherited across fork and would otherwise swallow the
-                // signal while blocked on the inner command.
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
-                libc::signal(libc::SIGHUP, libc::SIG_DFL);
             }
             drop(to_child_read);
             drop(to_child_write);
@@ -904,6 +908,7 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             crate::trap::exit_shell(status);
         }
         pid => {
+            crate::trap::install_signal_handlers(); // restore the deferring handlers
             drop(to_child_read);
             drop(from_child_write);
             let read_fd = from_child_read.into_raw_fd();

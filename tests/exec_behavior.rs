@@ -2867,3 +2867,15 @@ fn cd_niceties() {
     let (_, status) = rush("cd /nonexistent-c72-typo 2>/dev/null");
     assert_eq!(status, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn set_o_vi_and_emacs_toggle_the_edit_mode_option() {
+    // C73: `set -o vi` was "invalid option name". The option now tracks
+    // (and the interactive loop rebuilds its editor when it changes —
+    // that half is interactive-only); listings include it.
+    let (out, _) = rush("set -o vi; set -o");
+    assert!(out.lines().any(|l| l == "vi             \ton"), "got: {out:?}");
+    let (out, _) = rush("set -o vi; set -o emacs; set +o");
+    assert!(out.lines().any(|l| l == "set +o vi"), "got: {out:?}");
+}

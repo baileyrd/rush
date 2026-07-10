@@ -17,12 +17,9 @@
 
 use std::collections::HashSet;
 
-/// One completion candidate: the text shown in the columned list, and the
-/// text inserted into the buffer.
-pub struct Candidate {
-    pub display: String,
-    pub replacement: String,
-}
+/// One completion candidate (the editor crate's type): the text shown in
+/// the columned list, and the text inserted into the buffer.
+pub use rusty_lines::Candidate;
 
 /// A `Candidate` whose display and replacement are the same name.
 fn plain(name: String) -> Candidate {

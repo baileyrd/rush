@@ -1744,3 +1744,18 @@ in `$EDITOR`, and Esc backing the cursor up one. Deliberate narrowings
 (multi-line buffer editing, programmable bindings, macros, registers,
 completion paging) are documented in the survey. Adds 12 unit tests
 and 14 new pty scenarios (28 total, all passing).
+
+### Changed: the line editor extracted to its own crate — `rusty_lines`
+`src/editor.rs` (and its capability survey, formerly
+`docs/LINE_EDITOR.md`) moved to a standalone repository,
+<https://github.com/baileyrd/rusty_lines>, pulled in as a git
+dependency. The editor's shell-specific seams became the crate's
+`Hooks` trait — completion, hints, highlighting, abbreviation
+expansion, the live vi-mode flag, `$VISUAL`/`$EDITOR` resolution, and
+the interrupted-read (EINTR → pending-trap) callback — implemented by
+a small `ShellHooks` in `main.rs` wiring them back to
+`completion.rs`/`vars`/`trap`, so behavior is unchanged (all 28 pty
+scenarios pass as before). `completion::Candidate` is now a re-export
+of the crate's type; `unicode-width` moved with the editor. The
+editor's 17 unit tests live in the crate; rush keeps the pty harness,
+which exercises the integration.

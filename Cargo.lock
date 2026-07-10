@@ -58,6 +58,15 @@ version = "0.1.1"
 dependencies = [
  "libc",
  "regex",
+ "rusty_lines",
+]
+
+[[package]]
+name = "rusty_lines"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_lines?branch=main#ca7de9fb4e91a5cfe03aec6880a2d43eeaab3a48"
+dependencies = [
+ "libc",
  "unicode-width",
 ]
 

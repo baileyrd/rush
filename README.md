@@ -34,7 +34,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 
 | Feature | Status | Notes |
 |---|---|---|
-| REPL with line editing | ✅ | hand-rolled (`src/editor.rs`), readline-parity feature set (see `docs/LINE_EDITOR.md`): emacs + vi keymaps, kill ring, undo, history + incremental/prefix search, bracketed paste, C-x C-e, `$RPS1` right prompt |
+| REPL with line editing | ✅ | hand-rolled, readline-parity feature set — extracted to its own crate, [`rusty_lines`](https://github.com/baileyrd/rusty_lines): emacs + vi keymaps, kill ring, undo, history + incremental/prefix search, bracketed paste, C-x C-e, `$RPS1` right prompt |
 | Tab completion | ✅ | builtins and `$PATH` executables in command position; `$`/`${` completes variable names, `cd` completes directories only, `export`/`unset`/`local`/`declare` complete variable names, `alias`/`unalias` complete alias names, `fg`/`bg`/`kill`/`wait` complete `%n` job specs (Unix); files otherwise |
 | Persistent history | ✅ | stored in `~/.rush_history` |
 | History expansion (`!!`, `!n`, `!$`, `!*`, `!:n`) | ✅ | bash-style bang-history recall; interactive only, quoting/escaping matches bash |

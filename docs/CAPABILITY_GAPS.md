@@ -319,14 +319,14 @@ syntax directly.
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
-- **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
+- **Tier III — scripting-safety idioms:** 10 (6 done, 4 open — C51–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C49 are
-now done (re-closing Tiers I and II completely) and the remaining 24
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C50 are
+now done (re-closing Tiers I and II completely) and the remaining 23
 are open.
 
 ---
@@ -1559,7 +1559,7 @@ that arrive when nothing is blocking at all.
 Out of scope for this item, matching its stated boundary: `ERR`/`DEBUG`
 (bash/ksh/zsh extensions, not POSIX-mandated) remain unimplemented.
 
-### C50 — `set -C` (`noclobber`) and the `>|` override (tracked)
+### C50 — `set -C` (`noclobber`) and the `>|` override ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh. A real scripting-safety
 idiom in the same family as `set -euo pipefail` — refuses to let an
 ordinary `>` redirect silently truncate/overwrite an existing file,
@@ -1571,6 +1571,24 @@ filename after ">"`. **Effort: M** — a `noclobber` flag in `vars.rs`
 (mirroring `errexit`/`nounset`), an existence check before an ordinary
 `Write`-mode redirect opens its target, a new `RedirOp::Clobber`
 variant, and lexer support for the `>|` token.
+
+Implemented per the sketch, all four pieces: a `NOCLOBBER` thread-local
+(mirroring `errexit`'s, toggled by `set -C`/`set +C`, surfacing as `C`
+in `$-`); a new `RedirOp::Clobber`/`RedirMode::Clobber` pair with `>|`
+lexed in `lex_gt_op` (so the explicit-fd form `2>| file` rides along
+free); and the enforcement centralized in `exec::open_write`, which now
+takes the mode — a plain `>` under noclobber refuses an existing
+*regular* file, while writing to an existing device (`> /dev/null`)
+stays fine, per POSIX and verified against bash. `>>` and `>|` are
+exempt; `&>` honors noclobber too (probed — bash refuses there as
+well). One inherited (not new) divergence, documented: rush treats any
+failed redirect open as fatal to the script where bash fails the one
+command with status 1 and continues — noclobber refusals inherit that
+pre-existing behavior; the original file's content survives either way.
+
+Verified against real bash: fresh-file create, refuse-and-preserve,
+`>|` override, `/dev/null`, `>>`, `&>`, `set +C`, and `$-` gaining and
+losing `C`. One integration test covers all of it.
 
 ### C51 — `set -n` (noexec / syntax-check only) not supported (tracked)
 POSIX-mandated; present in dash/bash/ksh/zsh — the standard `sh -n

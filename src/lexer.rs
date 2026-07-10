@@ -75,7 +75,8 @@ pub struct Redir {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirOp {
     Read,        // `<`        — fd from a file
-    Write,       // `>`        — fd to a file (truncate)
+    Write,       // `>`        — fd to a file (truncate; refused for an existing regular file under `set -C`)
+    Clobber,     // `>|`       — fd to a file (truncate even under `set -C`, C50)
     Append,      // `>>`       — fd to a file (append)
     Both,        // `&>`       — stdout+stderr to a file (truncate)
     BothAppend,  // `&>>`      — stdout+stderr to a file (append)
@@ -417,6 +418,11 @@ fn lex_gt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
                 .parse()
                 .map_err(|_| LexError::Syntax("expected a file descriptor after `>&`".into()))?;
             RedirOp::Dup(t)
+        }
+        // `>|` — noclobber override (C50): truncate even under `set -C`.
+        Some('|') => {
+            chars.next();
+            RedirOp::Clobber
         }
         _ => RedirOp::Write,
     })

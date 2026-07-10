@@ -103,6 +103,8 @@ pub enum RawRedirect {
 pub enum RedirMode {
     Read,
     Write,
+    /// `>|` — like `Write`, but exempt from `set -C` (noclobber, C50).
+    Clobber,
     Append,
 }
 
@@ -381,6 +383,9 @@ impl Parser {
             }
             RedirOp::Write => {
                 RawRedirect::File { fd: r.fd, file: self.expect_word(">")?, mode: RedirMode::Write }
+            }
+            RedirOp::Clobber => {
+                RawRedirect::File { fd: r.fd, file: self.expect_word(">|")?, mode: RedirMode::Clobber }
             }
             RedirOp::Append => {
                 RawRedirect::File { fd: r.fd, file: self.expect_word(">>")?, mode: RedirMode::Append }

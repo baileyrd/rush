@@ -1435,3 +1435,14 @@ Registered at the decl-word dispatch, the builtin dispatch (same
 transforms, both array forms, and C45's `-r` all work under `typeset`
 with zero additional code (verified against ksh93/zsh directly). Adds
 1 integration test.
+
+### New: `set -C` (noclobber) and the `>|` override (C50)
+`set -C` was rejected outright and `>|` didn't lex. Now: a plain `>`
+under noclobber refuses to truncate an existing *regular* file (devices
+like `/dev/null` stay writable, per POSIX and verified against bash);
+`>|` overrides; `>>` is exempt; `&>` honors it too (bash-verified); `C`
+appears in `$-`. Enforcement is centralized in `exec::open_write`, so
+the explicit-fd form (`2>| file`) rides along free. Inherited (not new)
+divergence, documented: rush treats a failed redirect open as fatal
+where bash fails the one command and continues. Adds 1 integration
+test.

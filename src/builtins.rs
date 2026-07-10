@@ -1795,6 +1795,7 @@ fn set_cmd(argv: &[String]) -> i32 {
                 'e' => crate::vars::set_errexit(on),
                 'u' => crate::vars::set_nounset(on),
                 'x' => crate::vars::set_xtrace(on),
+                'C' => crate::vars::set_noclobber(on),
                 'p' => crate::vars::set_pipefail(on),
                 _ => unreachable!(),
             }
@@ -1840,7 +1841,7 @@ fn set_cmd(argv: &[String]) -> i32 {
                 let on = other.starts_with('-');
                 for c in other[1..].chars() {
                     match c {
-                        'e' | 'u' | 'x' => pending.push((c, on)),
+                        'e' | 'u' | 'x' | 'C' => pending.push((c, on)),
                         'o' => match args.next().map(String::as_str) {
                             Some("pipefail") => pending.push(('p', on)),
                             Some(name) => {

@@ -136,20 +136,29 @@ read-eval-print loop and all I/O concerns:
   without exiting.
 
 ### `editor.rs` — hand-rolled line editor
-Rush's own replacement for the `rustyline` dependency. Raw terminal mode
-(termios, RAII-restored), unbuffered fd-0 key decoding (UTF-8 + escape
-sequences, with a short poll disambiguating a lone ESC), and a render
+Rush's own replacement for the `rustyline` dependency, feature-audited
+against GNU readline, libedit, zsh ZLE, fish, linenoise, replxx,
+rustyline, and reedline — the survey and the documented narrowings live
+in `docs/LINE_EDITOR.md`. Raw terminal mode (termios, RAII-restored) plus
+a bracketed-paste guard, unbuffered fd-0 key decoding (UTF-8 + escape
+sequences with modifier parameters — Ctrl/Alt-arrows — and the paste
+envelope, with a short poll disambiguating a lone ESC), and a render
 engine that repaints the edit region per keystroke: display-width math
-(ANSI-aware, wide-character-correct via `unicode-width`), soft-wrap row
-accounting with forced wraps at exact column boundaries, live syntax
-highlighting, the dimmed history hint, and the `$RPS1` right prompt —
-possible at all only because rush owns this layer. Keymaps: the emacs
-set, plus a vi-mode subset under `set -o vi` (checked live per
-`read_line`). History is in-memory with consecutive-dedup and plain-file
-persistence (tolerating rustyline's old `#V2` header); Ctrl-R is an
-incremental reverse search. Tab inserts the longest common completion
-prefix, then prints the columned candidate list. A non-tty stdin falls
-back to a plain silent read. End-to-end coverage lives in
+(ANSI-aware, wide-character-correct via `unicode-width`, control
+characters shown `^X`-style), soft-wrap row accounting with forced wraps
+at exact column boundaries, live syntax highlighting, the dimmed history
+hint, and the `$RPS1` right prompt — possible at all only because rush
+owns this layer. Keymaps: the full readline emacs set (kill ring with
+yank/yank-pop, undo, word-wise kill/case/transpose, M-. last-argument,
+quoted insert, C-x C-e edit-in-`$EDITOR`), plus a vi mode under
+`set -o vi` (counts, `d`/`c`/`y` operators over motions, `f F t T ; ,`
+finds — checked live per `read_line`). History is in-memory with
+consecutive-dedup and plain-file persistence (tolerating rustyline's old
+`#V2` header; multi-line entries joined bash-`cmdhist`-style); Ctrl-R /
+Ctrl-S are incremental search in both directions, PageUp/PageDown a
+prefix search. Tab inserts the longest common completion prefix, then
+prints the columned candidate list. A non-tty stdin falls back to a
+plain silent read. End-to-end coverage lives in
 `tests/pty/editor_pty_test.py`, driven under a real pseudo-terminal.
 
 ### `completion.rs` — tab completion

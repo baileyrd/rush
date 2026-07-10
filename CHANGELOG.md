@@ -1714,3 +1714,33 @@ bug: reading via `io::stdin()`'s buffer made `poll(2)` on fd 0 lie, so
 arrow keys decoded as ESC + literal `[A`; fd 0 is now read raw.
 Non-tty stdin falls back to a plain reader, so scripted/piped use is
 unchanged.
+
+### New: readline-parity editor batch — kill ring, undo, bracketed paste, full vi operators
+A follow-up capability audit of the hand-rolled editor against the
+field — GNU readline, libedit, zsh ZLE, fish, ksh93, linenoise, replxx,
+rustyline, reedline, prompt_toolkit/PSReadLine — recorded in a new
+`docs/LINE_EDITOR.md` feature matrix, then the gaps it found closed in
+one batch. Emacs keymap: a real kill ring (C-k/C-u/C-w/M-d/M-Backspace
+kill into it, consecutive kills grow one entry readline-style, C-y
+yanks, M-y rotates; the ring survives across lines), undo
+(C-_ / C-x C-u / C-z, self-insert runs coalescing as one unit), the two
+readline word flavors (M-b/M-f/M-d alphanumeric vs C-w whitespace),
+Ctrl/Alt-arrow word motion, M-t transpose-words, M-u/M-l/M-c case ops,
+M-. last-argument (repeat cycles older entries), M-< / M->, C-v/C-q
+quoted insert (control chars render `^X`-style via a visualization pass
+that keeps cursor math exact), and C-x C-e handing the line to
+`$VISUAL`/`$EDITOR` and executing the result. History: C-s forward
+incremental search joins C-r (IXON is already off; direction switches
+mid-search), and PageUp/PageDown (M-p/M-n) do zsh/fish-style prefix
+search. Bracketed paste (`ESC[?2004h`, RAII-guarded) delivers a paste
+as one event — tabs and escape bytes insert literally, nothing fires
+bindings, multi-line pastes keep their newlines (rendered `⏎`) and run
+as a unit on Enter, stored in history bash-`cmdhist`-style joined with
+`; `. vi mode grew from a subset to the standard normal-mode surface:
+counts, `d`/`c`/`y` operators over all motions (with the `cw`≡`ce`
+quirk), `f F t T ; ,` character finds, `x X D C s S Y r ~ p P u`,
+small-word `w b e` distinct from whitespace `W B E`, `^`, `v` to edit
+in `$EDITOR`, and Esc backing the cursor up one. Deliberate narrowings
+(multi-line buffer editing, programmable bindings, macros, registers,
+completion paging) are documented in the survey. Adds 12 unit tests
+and 14 new pty scenarios (28 total, all passing).

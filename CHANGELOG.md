@@ -1456,3 +1456,12 @@ flag `set -n` uses. Matches bash's subtleties: mid-script `set -n` is
 one-way (the `set +n` after it never executes), and an interactive
 shell ignores it entirely. `n` appears in `$-`. Adds 2 integration
 tests.
+
+### New: `set -o` long option names, and bare `set -o`/`set +o` listing (C52)
+`set -o errexit`/`nounset`/`xtrace`/`noclobber`/`noexec` now map to the
+same flags as the short forms (getting C41's validate-then-apply
+rollback for free), and a bare `set -o` lists options in bash's own
+table format (byte-identical over the tracked six) while `set +o`
+emits directly re-runnable lines — the `saved=$(set +o); eval "$saved"`
+round-trip works. Unknown `-o` names stay a hard error. Adds 1
+integration test.

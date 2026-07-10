@@ -319,14 +319,14 @@ syntax directly.
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
-- **Tier III — scripting-safety idioms:** 10 (7 done, 3 open — C52–C54)
+- **Tier III — scripting-safety idioms:** 10 (8 done, 2 open — C53–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C51 are
-now done (re-closing Tiers I and II completely) and the remaining 22
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C52 are
+now done (re-closing Tiers I and II completely) and the remaining 21
 are open.
 
 ---
@@ -1614,7 +1614,7 @@ avoid locking the session out). Verified against bash for all of:
 mid-script skip, one-way behavior, `-n -c`, `-n file`, and both exit
 statuses. Two integration tests cover it.
 
-### C52 — `set -o` long option names, and bare `set -o`/`set +o` listing (tracked)
+### C52 — `set -o` long option names, and bare `set -o`/`set +o` listing ✅ done
 POSIX-mandated (the long names themselves); present in dash/bash/ksh/zsh.
 `-e`/`-u`/`-x`/`-o pipefail` (C18–C20) are all done via their short forms
 and `-o pipefail` specifically — but `set -o errexit`/`set -o nounset`/
@@ -1626,6 +1626,21 @@ for introspection/debugging — fail with "option requires an argument"
 instead. **Effort: S** — map the long names to the existing flag setters
 already backing the short forms, and add a listing path over that same
 known-option table.
+
+Implemented per the sketch: the `-o`/`+o` arm in `set_cmd` now maps all
+six tracked long names — `errexit`, `nounset`, `xtrace`, `noclobber`,
+`noexec`, `pipefail` — onto the same pending-flag letters the short
+forms queue (so they also get C41's validate-then-apply rollback for
+free), and a bare `set -o`/`set +o` lists instead of erroring: `-o` in
+bash's own `name<padding>on|off` table format (verified byte-identical
+over the tracked options), `+o` as directly re-runnable `set -o name`/
+`set +o name` lines — round-tripping `saved=$(set +o); … ; eval
+"$saved"` restores the options, the idiom the listing form exists for,
+verified working. Scope note: bash lists dozens of shopt-adjacent
+options; rush lists exactly the six it tracks. An unknown `-o` name
+stays a hard error (status 1). One integration test covers the long
+spellings, both listing formats, the eval round-trip, and the error
+path.
 
 ### C53 — `trap ERR` never fires (tracked)
 Present in bash/ksh/zsh (not POSIX/dash) — a common error-handling/

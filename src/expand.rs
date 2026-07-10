@@ -302,6 +302,16 @@ pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Op
             RawRedirect::Dup { fd, target } => {
                 redirects.push(Redirect::Dup { fd: *fd, target: *target })
             }
+            // `fd>&$word` (C66): the word must expand to an fd number —
+            // the coproc idiom `<&"${COPROC[0]}"`.
+            RawRedirect::DupWord { fd, word } => {
+                let text = expand_word(word)?;
+                let target = text
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| format!("{text}: bad file descriptor"))?;
+                redirects.push(Redirect::Dup { fd: *fd, target });
+            }
             // Its `$`-expansions run unless the delimiter was quoted.
             RawRedirect::Heredoc { body, expand } => {
                 heredoc = Some(if *expand { expand_dollars(body)? } else { body.clone() });

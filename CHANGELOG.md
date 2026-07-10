@@ -1620,3 +1620,15 @@ fires on function return and when a sourced script finishes; `trap -l`
 prints bash's numbered five-per-line table; `trap -p [name...]` prints
 re-runnable trap lines with normalized-spec filtering. Adds 1
 integration test.
+
+### New: `coproc` — named bidirectional coprocesses (C66)
+Prerequisite first: `fd>&$word` / `fd<&"${arr[N]}"` redirects (the fd
+number arriving via expansion) via a new `RedirOp::DupWord`. Then
+`coproc [NAME] command`: fork with two real pipes, child on
+stdin/stdout, parent publishing `NAME=(read_fd write_fd)` + `NAME_PID`
+(fds close-on-exec like bash; `$!` set). Caught by testing: the forked
+child inherited the parent's TERM/HUP deferring handlers and swallowed
+`kill $COPROC_PID` — it now resets them to SIG_DFL, and a killed
+coprocess waits as 143 exactly like bash. Documented narrowings:
+wrapper shell (not a direct exec) and no `jobs`-table entry. Adds 1
+integration test.

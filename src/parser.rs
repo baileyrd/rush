@@ -93,6 +93,9 @@ pub enum RawRedirect {
     Both { file: Word, append: bool },
     /// `fd>&target` — `fd` duplicates `target` (e.g. `2>&1`).
     Dup { fd: u32, target: u32 },
+    /// `fd>&$word` / `fd<&"${arr[N]}"` — the target fd number comes from
+    /// a word, resolved at expansion time (C66).
+    DupWord { fd: u32, word: Word },
     /// `<<DELIM` here-document; `body` is the collected text, expanded unless the
     /// delimiter was quoted.
     Heredoc { body: String, expand: bool },
@@ -231,6 +234,10 @@ fn cond_primary(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, Par
 pub enum Compound {
     /// `[[ expr ]]` — the extended test (C55); see [`CondAst`].
     Cond(CondAst),
+    /// `coproc [NAME] command` (C66): run `command` as a background
+    /// coprocess with a bidirectional pipe — `NAME[0]`/`NAME[1]` become
+    /// its read/write fds in the parent (`COPROC` when unnamed).
+    Coproc { name: String, cmd: Box<RawCommand> },
     /// `if` with its `elif`s flattened into `branches` of `(condition, body)`.
     If {
         branches: Vec<(CommandList, CommandList)>,
@@ -333,7 +340,7 @@ impl fmt::Display for ParseError {
 
 pub(crate) const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case",
-    "esac", "select", "{", "}",
+    "esac", "select", "coproc", "{", "}",
 ];
 
 pub fn parse(input: &str) -> Result<CommandList, ParseError> {
@@ -484,6 +491,7 @@ impl Parser {
                 Some("select") => self.parse_select()?,
                 Some("case") => self.parse_case()?,
                 Some("{") => self.parse_group()?,
+                Some("coproc") => self.parse_coproc()?,
                 // A closing keyword here means a body was empty (e.g. `if; then`).
                 Some(kw) => return Err(ParseError::Syntax(format!("unexpected `{kw}`"))),
                 None => return self.parse_simple(),
@@ -493,6 +501,28 @@ impl Parser {
         // closing keyword — `while …; done < file`, `{ …; } > log`.
         let redirects = self.parse_trailing_redirects()?;
         Ok(RawCommand::Compound(RawCompound { compound: Box::new(compound), redirects }))
+    }
+
+    /// `coproc [NAME] command` (C66). A NAME is accepted only when the
+    /// command is a `{ ... }` group (bash's own rule — with a simple
+    /// command, the first word *is* the command); unnamed coprocesses use
+    /// `COPROC`.
+    fn parse_coproc(&mut self) -> Result<Compound, ParseError> {
+        self.pos += 1; // consume `coproc`
+        let mut name = "COPROC".to_string();
+        // `coproc NAME { ... }`: a plain name word directly followed by
+        // an opening `{`.
+        if let Some(Token::Word(parts)) = self.peek()
+            && let [WordPart::Unquoted(n)] = parts.as_slice()
+            && is_name(n)
+            && matches!(self.toks.get(self.pos + 1),
+                Some(Token::Word(p2)) if matches!(p2.as_slice(), [WordPart::Unquoted(s)] if s == "{"))
+        {
+            name = n.clone();
+            self.pos += 1;
+        }
+        let cmd = self.parse_command()?;
+        Ok(Compound::Coproc { name, cmd: Box::new(cmd) })
     }
 
     /// Parse zero or more redirects with no argv words — used for whatever
@@ -527,6 +557,7 @@ impl Parser {
             RedirOp::Both => RawRedirect::Both { file: self.expect_word("&>")?, append: false },
             RedirOp::BothAppend => RawRedirect::Both { file: self.expect_word("&>>")?, append: true },
             RedirOp::Dup(target) => RawRedirect::Dup { fd: r.fd, target },
+            RedirOp::DupWord => RawRedirect::DupWord { fd: r.fd, word: self.expect_word(">&")? },
             RedirOp::Heredoc { body, expand } => RawRedirect::Heredoc { body, expand },
             RedirOp::HereString => RawRedirect::HereString(self.expect_word("<<<")?),
         })
@@ -841,7 +872,7 @@ fn as_keyword(tok: &Token) -> Option<&'static str> {
 
 /// Reserved words that begin a command (vs. ones that close a construct).
 fn is_command_start(kw: &str) -> bool {
-    matches!(kw, "if" | "while" | "until" | "for" | "select" | "case" | "{")
+    matches!(kw, "if" | "while" | "until" | "for" | "select" | "case" | "coproc" | "{")
 }
 
 fn is_name(s: &str) -> bool {

@@ -507,6 +507,15 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
                 out.extend(matches);
                 continue;
             }
+            // No match (C58): `failglob` makes it a hard error (bash
+            // aborts the whole `-c` script there — verified); `nullglob`
+            // drops the word entirely; the default keeps the literal.
+            if crate::vars::shopt("failglob") {
+                return Err(format!("no match: {}", field.plain));
+            }
+            if crate::vars::shopt("nullglob") {
+                continue;
+            }
         }
         if field.plain.is_empty() && !field.quoted && !field.explicit {
             continue; // unquoted-empty field drops out, unless $IFS itself demarcated it

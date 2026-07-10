@@ -43,6 +43,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "exec" => Some(crate::exec::exec_cmd(argv)),
         "umask" => Some(umask_cmd(argv)),
         "ulimit" => Some(ulimit_cmd(argv)),
+        "shopt" => Some(shopt_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -52,8 +53,8 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "declare",
-    "typeset", "readonly",
+    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
+    "declare", "typeset", "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1794,6 +1795,82 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 /// command to stderr before running it (see `exec::trace_command`). Other
 /// flags/`-o` names aren't implemented yet; naming one is an error rather
 /// than a silently-ignored no-op.
+/// `shopt [-s|-u|-q|-p] [name...]` (C58) — query/toggle bash's shell
+/// options; rush recognizes the glob family (`nullglob`, `failglob`,
+/// `dotglob`, `globstar`, plus `extglob`, which defaults *on* — see
+/// C57). No names: list all (a `name<tab>on|off` table, or re-runnable
+/// `shopt -s/-u name` lines with `-p`). Names without `-s`/`-u`: query —
+/// print each (unless `-q`) and return 0 only if *all* are set. Unknown
+/// names are "invalid shell option name", status 1 — all formats and
+/// statuses matching real bash, verified directly.
+fn shopt_cmd(argv: &[String]) -> i32 {
+    let mut set_on = false;
+    let mut set_off = false;
+    let mut quiet = false;
+    let mut runnable = false;
+    let mut idx = 1;
+    while idx < argv.len() {
+        let Some(flags) = argv[idx]
+            .strip_prefix('-')
+            .filter(|f| !f.is_empty() && f.chars().all(|c| matches!(c, 's' | 'u' | 'q' | 'p')))
+        else {
+            break;
+        };
+        for c in flags.chars() {
+            match c {
+                's' => set_on = true,
+                'u' => set_off = true,
+                'q' => quiet = true,
+                'p' => runnable = true,
+                _ => unreachable!(),
+            }
+        }
+        idx += 1;
+    }
+    let names = &argv[idx..];
+
+    let print_one = |name: &str, on: bool| {
+        if runnable {
+            println!("shopt {} {name}", if on { "-s" } else { "-u" });
+        } else {
+            println!("{name:<15}\t{}", if on { "on" } else { "off" });
+        }
+    };
+
+    if names.is_empty() {
+        for &(name, _) in crate::vars::SHOPT_DEFAULTS {
+            let on = crate::vars::shopt(name);
+            if (set_on && !on) || (set_off && on) {
+                continue; // `shopt -s` alone lists only the set ones (and -u the unset), like bash
+            }
+            print_one(name, on);
+        }
+        return 0;
+    }
+
+    let mut status = 0;
+    for name in names {
+        if set_on || set_off {
+            if !crate::vars::set_shopt(name, set_on) {
+                eprintln!("shopt: {name}: invalid shell option name");
+                status = 1;
+            }
+        } else if crate::vars::SHOPT_DEFAULTS.iter().any(|(n, _)| n == name) {
+            let on = crate::vars::shopt(name);
+            if !quiet {
+                print_one(name, on);
+            }
+            if !on {
+                status = 1;
+            }
+        } else {
+            eprintln!("shopt: {name}: invalid shell option name");
+            status = 1;
+        }
+    }
+    status
+}
+
 /// `set -o` (bare) / `set +o` (bare) — list every tracked option (C52):
 /// the `-o` spelling in bash's own `name<padding>on|off` table format,
 /// the `+o` spelling as directly re-runnable `set -o name`/`set +o name`

@@ -1533,3 +1533,13 @@ extglob these are hard syntax errors in bash, so always-on is strictly
 more compatible). All four matcher surfaces — `case`, `[[ ]]`, filename
 expansion, `${v%pat}` — landed at once; filename expansion verified
 byte-identical to bash. Adds 1 unit + 1 integration test.
+
+### New: `shopt` builtin with `nullglob`/`failglob`/`dotglob`/`globstar`/`extglob` (C58)
+`shopt` covers list, `-p` (re-runnable), query, `-q`, `-s`, `-u` with
+bash's exact formats and statuses. `nullglob` drops an unmatched glob,
+`failglob` makes it a hard error (bash aborts the `-c` script there —
+matched), `dotglob` lets `*` see dotfiles, and `globstar` gives `**`
+real recursive descent — output byte-identical to bash on shared
+fixtures, including the `a/` zero-level quirk. `extglob` defaults on
+(C57) and is genuinely toggleable. Without globstar, `**` keeps
+collapsing to `*` as before. Adds 1 integration test.

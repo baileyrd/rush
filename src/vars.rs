@@ -175,6 +175,10 @@ thread_local! {
     // own doc comment for why this is a separate map rather than a `Var`
     // field.
     static ATTRS: RefCell<HashMap<String, Attrs>> = RefCell::new(HashMap::new());
+    // `shopt` options (C58) — only ever holds entries for options the
+    // user has explicitly toggled; `shopt()` falls back to the defaults
+    // table for the rest.
+    static SHOPTS: RefCell<HashMap<&'static str, bool>> = RefCell::new(HashMap::new());
 }
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
@@ -215,6 +219,33 @@ pub fn set_xtrace(on: bool) {
 
 pub fn xtrace() -> bool {
     XTRACE.with(|e| *e.borrow())
+}
+
+/// The `shopt` options rush recognizes (C58), with their defaults.
+/// `extglob` defaults *on* (ksh93-style; see C57's write-up for why),
+/// unlike bash's off — the rest match bash's own defaults.
+pub const SHOPT_DEFAULTS: &[(&str, bool)] = &[
+    ("dotglob", false),
+    ("extglob", true),
+    ("failglob", false),
+    ("globstar", false),
+    ("nullglob", false),
+];
+
+/// Current value of a `shopt` option; `false` for an unknown name.
+pub fn shopt(name: &str) -> bool {
+    SHOPTS.with(|m| m.borrow().get(name).copied()).unwrap_or_else(|| {
+        SHOPT_DEFAULTS.iter().find(|(n, _)| *n == name).map(|&(_, d)| d).unwrap_or(false)
+    })
+}
+
+/// Set a `shopt` option; `false` if the name isn't recognized.
+pub fn set_shopt(name: &str, on: bool) -> bool {
+    let Some(&(canonical, _)) = SHOPT_DEFAULTS.iter().find(|(n, _)| *n == name) else {
+        return false;
+    };
+    SHOPTS.with(|m| m.borrow_mut().insert(canonical, on));
+    true
 }
 
 pub fn set_noexec(on: bool) {

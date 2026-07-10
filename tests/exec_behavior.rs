@@ -2344,3 +2344,53 @@ fn set_o_long_names_and_listing() {
     assert!(err.contains("badname: invalid option name"), "got: {err:?}");
     assert_eq!(status, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn trap_err_fires_on_failing_commands() {
+    // C53: `trap 'cmd' ERR` registered but never fired. It now fires on
+    // exactly errexit's condition — every expectation below mirrors a
+    // directly-verified bash behavior.
+    let (out, _) = rush("trap 'echo E' ERR; false; false; echo end");
+    assert_eq!(out, "E\nE\nend\n");
+
+    // The handler sees the failing status as $?, and $? is restored to it
+    // afterward regardless of what the handler ran.
+    let (out, _) = rush("trap 'echo E:$?' ERR; false; echo end");
+    assert_eq!(out, "E:1\nend\n");
+    let (out, _) = rush("trap 'true' ERR; false; echo st=$?");
+    assert_eq!(out, "st=1\n");
+
+    // Not fired: if/while conditions, non-final &&/|| commands, negated
+    // pipelines, or inside a function (bash's no-errtrace default).
+    let (out, _) = rush("trap 'echo E' ERR; if false; then :; fi; false && echo x; ! true; f(){ false; true; }; f; echo end");
+    assert_eq!(out, "end\n");
+
+    // Fired: a failing final &&/|| command, a failing pipeline, a function
+    // returning nonzero at top level, and (before the exit) under set -e.
+    let (out, _) = rush("trap 'echo E' ERR; true && false; true | false; f(){ return 3; }; f; echo end");
+    assert_eq!(out, "E\nE\nE\nend\n");
+    let (out, status) = rush("set -e; trap 'echo E' ERR; false; echo nope");
+    assert_eq!((out.as_str(), status), ("E\n", 1));
+}
+
+#[cfg(unix)]
+#[test]
+fn bang_negates_a_pipeline() {
+    // Found while landing C53 (they interact): `! cmd` didn't parse at
+    // all — "!: command not found". POSIX pipeline negation, plus its
+    // errexit exemption.
+    let (out, _) = rush("! false; echo st=$?; ! true; echo st=$?; ! ! true; echo st=$?");
+    assert_eq!(out, "st=0\nst=1\nst=0\n");
+
+    let (out, _) = rush("! true | false; echo st=$?");
+    assert_eq!(out, "st=0\n");
+
+    // Exempt from set -e even when the negated status is 1 (bash rule).
+    let (out, status) = rush("set -e; ! true; echo survived");
+    assert_eq!((out.as_str(), status), ("survived\n", 0));
+
+    // Inside a command substitution too, including $? visibility.
+    let (out, _) = rush("echo got=$(! true; echo $?)");
+    assert_eq!(out, "got=1\n");
+}

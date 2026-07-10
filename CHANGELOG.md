@@ -1465,3 +1465,19 @@ table format (byte-identical over the tracked six) while `set +o`
 emits directly re-runnable lines — the `saved=$(set +o); eval "$saved"`
 round-trip works. Unknown `-o` names stay a hard error. Adds 1
 integration test.
+
+### New: `trap ERR` fires (C53), and `!` pipeline negation exists at all
+`trap 'cmd' ERR` registered but never fired. It now fires on exactly
+errexit's condition — a reached, non-negated final command failing
+outside an `if`/`while` condition — whether or not `set -e` is on, and
+before the errexit exit when it is. The handler sees the failing status
+as `$?`, restored afterward regardless of what the handler ran. Not
+fired inside functions (bash's no-`errtrace` default, documented).
+
+Found while landing it: **`! cmd` (POSIX pipeline negation) didn't
+parse at all** — and it interacts directly with ERR/errexit (a negated
+pipeline is exempt from both). Implemented together: leading `!`
+(repeatable) on a pipeline, negated status in run and capture paths
+(`$(! true; echo $?)` → 1), exemption threaded through the existing
+errexit signal. Verified against bash across fourteen scenarios; adds
+2 integration tests.

@@ -129,8 +129,20 @@ fn exec_list_impl(list: &CommandList, check_errexit: bool) -> Result<i32, String
         if crate::vars::flow_pending() {
             break;
         }
-        if check_errexit && crate::vars::errexit() && status != 0 && last_ran {
-            crate::trap::exit_shell(status);
+        if check_errexit && status != 0 && last_ran {
+            // `trap 'cmd' ERR` (C53) fires on exactly the condition
+            // errexit checks — a reached, non-negated final command
+            // failing outside an `if`/`while` condition — whether or not
+            // `set -e` is on, and *before* the errexit exit when it is
+            // (order verified against bash). Not fired inside a function
+            // call: bash's ERR trap isn't inherited by functions unless
+            // `set -o errtrace`, which rush doesn't implement (documented).
+            if crate::vars::function_depth() == 0 {
+                crate::trap::fire_err(status);
+            }
+            if crate::vars::errexit() {
+                crate::trap::exit_shell(status);
+            }
         }
     }
     Ok(status)
@@ -171,7 +183,11 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     let mut status = run_pipeline_node(&list.first)?;
     crate::vars::set_last_status(status);
     // If there's no `rest`, `first` *is* the last pipeline, and it just ran.
-    let mut last_ran = list.rest.is_empty();
+    // A `!`-negated pipeline reports `last_ran = false` even when it did
+    // run: the only consumer is the errexit/ERR check, and a negated
+    // pipeline is exempt from both (verified against bash: `set -e; ! true`
+    // survives, and `true && ! true` fires no ERR trap).
+    let mut last_ran = list.rest.is_empty() && !list.first.negated;
     if crate::vars::flow_pending() {
         return Ok((status, last_ran));
     }
@@ -180,7 +196,7 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
         if should_run(*connector, status) {
             status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
-            last_ran = i == final_idx;
+            last_ran = i == final_idx && !raw.negated;
             if crate::vars::flow_pending() {
                 break;
             }
@@ -196,10 +212,24 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
 /// A pipeline that is a single compound command (`if`/`while`/`for`) is run
 /// directly; everything else goes through the simple-command path.
 fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
-    if let [RawCommand::Compound(rc)] = raw.commands.as_slice() {
-        return run_compound_with_redirects(rc);
+    let status = if let [RawCommand::Compound(rc)] = raw.commands.as_slice() {
+        run_compound_with_redirects(rc)?
+    } else {
+        run_foreground(raw)?
+    };
+    Ok(negate_if(raw.negated, status))
+}
+
+/// `! pipeline` — logical negation of an exit status (0 ↔ 1); any nonzero
+/// becomes 0, matching bash.
+fn negate_if(negated: bool, status: i32) -> i32 {
+    if !negated {
+        status
+    } else if status == 0 {
+        1
+    } else {
+        0
     }
-    run_foreground(raw)
 }
 
 /// Run a sole compound command, applying any redirects trailing its close
@@ -1193,12 +1223,21 @@ fn capture_andor(list: &AndOrList, out: &mut String) -> Result<i32, String> {
 fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> {
     if let [RawCommand::Compound(rc)] = raw.commands.as_slice() {
         let (status, captured) = capture_compound(rc)?;
+        let status = negate_if(raw.negated, status);
         out.push_str(&captured);
         crate::vars::set_last_status(status);
         return Ok(status);
     }
 
-    let result = capture_pipeline_expanded(raw, out);
+    let result = capture_pipeline_expanded(raw, out).map(|s| {
+        let s = negate_if(raw.negated, s);
+        if raw.negated {
+            // `capture_pipeline_expanded` set `$?` before the negation —
+            // put the negated value there too (`$(! true; echo $?)` → 1).
+            crate::vars::set_last_status(s);
+        }
+        s
+    });
     #[cfg(unix)]
     close_pending_proc_subs();
     result

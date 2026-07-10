@@ -43,7 +43,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Prompt customization | ✅ | `PS1` (var or env), with `\w`/`\W`/`\u`/`\h`/`\$`/`\?`/`\n`/`\\`; falls back to `cwd $ ` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
-| Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring; a compound (`if`/`while`/`(...)`/…) can be one stage among several on Unix (forks) |
+| Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring; `!` negation; a compound (`if`/`while`/`(...)`/…) can be one stage among several on Unix (forks) |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files, any fd (`3>file`, `4<&5`); fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) / here-strings (`<<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion); `cmd <<< "$var"` |
 | Process substitution | ✅ | `<(cmd)`/`>(cmd)` via a real pipe + `/dev/fd/N`, non-blocking and concurrent (Unix only) |
@@ -54,7 +54,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | `set -o pipefail` | ✅ | a pipeline's status is the rightmost non-zero stage, not just its last; applies inside `$(...)` too |
 | `set -C` (noclobber) | ✅ | `>` refuses to overwrite an existing regular file; `>|` overrides; `>>`/devices exempt |
 | `set -x` (xtrace) | ✅ | echoes each command (`$PS4`-prefixed) before running it; nesting in `$(...)` repeats `$PS4`'s first character |
-| `trap` | ✅ | `EXIT` (every exit path), `INT` (Ctrl-C at an idle prompt), and (Unix) `TERM`/`HUP` — real signals, interrupting a blocking wait immediately; numeric/`SIG`-prefixed/lowercase specs all accepted (`trap 'cmd' 15`) |
+| `trap` | ✅ | `EXIT` (every exit path), `INT` (Ctrl-C at an idle prompt), and (Unix) `TERM`/`HUP` — real signals, interrupting a blocking wait immediately; numeric/`SIG`-prefixed/lowercase specs all accepted (`trap 'cmd' 15`); `ERR` fires on errexit's condition |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment; `declare`/`local` `-u`/`-l`/`-i` attribute transforms; `readonly`/`declare -r` read-only variables |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding); `set -- args…`/`set args…` reassigns them |
 | Indexed arrays | ✅ | `arr=(a b c)`, `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, `${#arr[@]}`, `${!arr[@]}`, sparse arrays, `arr[i]=`/`arr[i]+=`, `unset 'arr[i]'`, `local arr=(...)` |

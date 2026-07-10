@@ -208,7 +208,8 @@ commands actually inside its body.
 
 ‖ `EXIT`/`INT`/`TERM`/`HUP` all fire now — including interrupting a
 blocking wait immediately, not just once the foreground job finishes on
-its own; `ERR`/`DEBUG` (bash/ksh/zsh extensions, not POSIX) remain
+its own — and `ERR` fires on errexit's exact condition (C53; not
+inherited by functions, bash's no-`errtrace` default). `DEBUG` remains
 unimplemented.
 
 ¶ Literal assignment, all read forms (`${arr[N]}`/`${arr[@]}`/`${arr[*]}`/
@@ -319,14 +320,14 @@ syntax directly.
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
-- **Tier III — scripting-safety idioms:** 10 (8 done, 2 open — C53–C54)
+- **Tier III — scripting-safety idioms:** 10 (9 done, 1 open — C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C52 are
-now done (re-closing Tiers I and II completely) and the remaining 21
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C53 are
+now done (re-closing Tiers I and II completely) and the remaining 20
 are open.
 
 ---
@@ -1642,7 +1643,7 @@ stays a hard error (status 1). One integration test covers the long
 spellings, both listing formats, the eval round-trip, and the error
 path.
 
-### C53 — `trap ERR` never fires (tracked)
+### C53 — `trap ERR` never fires ✅ done
 Present in bash/ksh/zsh (not POSIX/dash) — a common error-handling/
 cleanup-framework idiom, paired with `set -e` in the same spirit this
 tier's other items already cover. `trap 'cmd' ERR` registers
@@ -1653,6 +1654,33 @@ anywhere — confirmed directly (`trap '...' ERR; false` runs nothing).
 failed" rule) already identifies precisely the condition `ERR` needs to
 fire on; wiring a registered `ERR` trap into that same check is a
 comparatively small addition on top of already-shipped machinery.
+
+Implemented on exactly that machinery: `exec_list_impl`'s errexit check
+now fires a registered `ERR` trap on the same condition — a reached,
+non-negated final command failing outside an `if`/`while` condition —
+whether or not `set -e` is on, and *before* the errexit exit when it is
+(order verified against bash). The handler sees the failing status as
+`$?` on entry, and `$?` is restored to that status afterward regardless
+of what the handler ran (both bash-verified). Not fired inside a
+function call, matching bash's default — the `ERR` trap isn't inherited
+by functions unless `set -o errtrace`, which rush doesn't implement
+(documented narrowing; a function *returning* nonzero still fires at
+the call site). C44's spec normalizer needed an `ERR` arm too — it's a
+pseudo-signal like `EXIT` with no number and no `SIG` spelling, matched
+case-insensitively like bash.
+
+**A real, previously-untracked gap found while landing this**: `! cmd`
+— POSIX pipeline negation — didn't parse at all (`!: command not
+found`), and it interacts directly with ERR/errexit (a negated pipeline
+is exempt from both even when its status is 1 — verified: `set -e; !
+true` survives in bash, and `true && ! true` fires no ERR). Implemented
+in the same change: a leading `!` (repeatable — `! ! cmd` toggles, like
+bash) on `RawPipeline`, status negated in both the run and capture
+paths (`$(! true; echo $?)` prints 1, matching bash), with the
+exemption threaded through `run_andor`'s existing `last_ran` signal.
+
+Verified against real bash across fourteen scenarios. Two integration
+tests cover the ERR matrix and the negation semantics.
 
 ### C54 — `${PIPESTATUS[@]}` (per-stage pipeline exit statuses) not implemented (tracked)
 Present in bash (zsh has the same idea under `$pipestatus`, lowercase;

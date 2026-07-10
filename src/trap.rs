@@ -110,6 +110,12 @@ const SIGNALS: &[(&str, i32)] = &[
 /// `"TERM"`, so the handler never ran and the signal took the default
 /// disposition.
 pub fn normalize_signal_spec(spec: &str) -> Option<&'static str> {
+    // `ERR` (C53) is a shell pseudo-signal like `EXIT`, but with no
+    // number and no `SIG` spelling — matched by exact name only, same as
+    // bash (`trap 'cmd' err` works there too, case-insensitively).
+    if spec.eq_ignore_ascii_case("ERR") {
+        return Some("ERR");
+    }
     if let Ok(n) = spec.parse::<i32>() {
         return SIGNALS.iter().find(|&&(_, num)| num == n).map(|&(name, _)| name);
     }
@@ -149,6 +155,18 @@ pub fn fire(name: &str) {
     FIRING.with(|f| {
         f.borrow_mut().remove(name);
     });
+}
+
+/// Fire the `ERR` trap (if registered) for a command that failed with
+/// `status` (C53): the handler sees that status as `$?` on entry, and —
+/// matching bash, verified directly — `$?` is put back to the original
+/// failing status afterward, regardless of what the handler itself ran.
+pub fn fire_err(status: i32) {
+    if !TRAPS.with(|t| t.borrow().contains_key("ERR")) {
+        return;
+    }
+    fire("ERR");
+    crate::vars::set_last_status(status);
 }
 
 /// Fire the `EXIT` trap (if any), then terminate the process with `code`.

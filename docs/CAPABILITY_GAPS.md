@@ -129,11 +129,35 @@ codebase, all still consulted the real OS environment directly rather
 than `vars`'s own (correctly `unset`-aware) table. With that, every tier
 in this document is fully closed.
 
+**A fresh comparison pass** (this time verified live against all five
+comparison shells — dash, bash, zsh, ksh93, and fish were all actually
+installed and invoked directly, not just checked against documentation,
+a strictly higher bar than this document's original methodology)
+surfaced 33 new, previously-undocumented gaps, C41–C73, spanning all
+five tiers — none of these are done; they're freshly discovered and
+open. The headline finding is **C55: rush has no `[[ ]]` extended-test
+construct at all** — no lexer tokens, no parser production, nothing;
+`[[ foo = foo ]]` is "command not found," and `<`/`>` inside one are
+silently misparsed as ordinary file redirections. Close behind it:
+**C45, `readonly`/`declare -r` (read-only variables) is entirely
+missing**, despite being POSIX-mandated and present in all five
+comparison shells including dash — and worse than a mere missing
+feature, `readonly x=1` treats `x=1` as an argument to the unrecognized
+command, so the assignment itself is silently lost. And **C41: `$`
+(the shell's own PID), `$PPID`, and `$-` don't expand at all**, despite
+`$`/`$-` being POSIX-mandated and `$PPID` being near-universal — arguably
+the highest-impact single item in the whole fresh pass, given how often
+`$$` shows up in temp-file-naming idioms. The remaining 30 items are
+documented tier-by-tier below in the same style as C1–C40, each with a
+directly-verified repro and an S/M/L effort estimate; none of them have
+been implemented as part of this pass, which was scoped to discovery and
+documentation only.
+
 ---
 
 ## Comparison matrix
 
-A cross-section, not the full 38 below — enough to place rush relative to a
+A cross-section, not the full 73 below — enough to place rush relative to a
 strict POSIX shell (dash), the bash family, and the interactive-first shells
 (zsh, fish). ✅ full · 🟡 partial/simplified · ❌ not implemented · — not
 applicable to that shell's own model.
@@ -164,6 +188,9 @@ applicable to that shell's own model.
 | Context-aware completion | ✅§§§ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ✅*** | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
+| `[[ ]]` extended test | ❌× | ❌ | ✅ | ✅ | ✅ | ❌ |
+| `readonly` / read-only vars | ❌×× | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `$`/`$PPID`/`$-` special vars | ❌××× | ✅ | ✅ | ✅ | ✅ | 🟡 |
 
 \* Done for the interactive/script job-control path; a compound as one stage
 among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
@@ -263,15 +290,40 @@ any builtin, per-external-command argument specs (`git <TAB>`
 subcommands, `ssh <TAB>` known hosts) — the rest of what a real fish/zsh
 completion *system* (as opposed to this fixed case list) provides.
 
+× No `[[`/`]]` tokens anywhere in the lexer/parser — `[[ foo = foo ]]` is
+"command not found" (127), and `<`/`>` inside one are misparsed as
+ordinary file redirections (`[[ abc < abd ]]` tries to open a file named
+`abd`). fish has no `[[ ]]` syntax either (its own conditional model is
+built on `test`/`[` plus `and`/`or`, not a bash-style extended test). The
+single largest gap surfaced by this document's fresh comparison pass
+(C55).
+
+×× `readonly`/`declare -r` register nowhere in `vars.rs` — `readonly x=1`
+is "command not found," and the assignment itself is silently lost since
+`x=1` is parsed as an argument to the missing command rather than
+executed (C45).
+
+××× None of `$` (the shell's own PID), `$PPID` (parent PID), or `$-`
+(active option flags) expand — `expand.rs`'s `$`-scanner has no arm for
+any of them, so each prints as a literal string or empty. fish exposes
+the same information under its own differently-named variables
+(`$fish_pid`, no direct `$-` equivalent), so its own model only
+partially overlaps rather than matching the POSIX/bash-family syntax
+directly (C41).
+
 ---
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 10 (10 done — complete)
-- **Tier II — missing standard builtins:** 12 (12 done — complete)
-- **Tier III — scripting-safety idioms:** 5 (5 done — complete)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
-- **Tier V — interactive UX:** 3 (3 done — complete)
+- **Tier I — correctness/POSIX risk:** 14 (10 done, 4 open — C41–C44)
+- **Tier II — missing standard builtins:** 17 (12 done, 5 open — C45–C49)
+- **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
+- **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
+
+73 items tracked in total: the original C1–C40 (all done, see "Bottom
+line" above) plus 33 newly-discovered, currently-open items (C41–C73)
+from a fresh live comparison pass against dash/bash/ksh93/zsh/fish.
 
 ---
 
@@ -623,6 +675,66 @@ estimated — ended up needing the parent-side resolution fix and the
 broader fallback cleanup alongside the originally-scoped environment fix
 to fully close the gap the reproduction actually described.
 
+### C41 — `$$`, `$PPID`, `$-` don't expand (tracked)
+POSIX-mandated (`$$`, `$-`); `$PPID` a near-universal extension. Present
+in bash/dash/ksh/zsh (`$PPID` not in dash). Rush's `$`-scanner
+(`expand.rs`) has no arm for a second `$`, an unnamed-variable `PPID`
+read, or `$-`, so all three fall through to being treated as a bare `$`
+followed by ordinary text — `echo $$` prints the literal two-character
+string `$$`, not the shell's pid; `$PPID` and `$-` silently expand to
+empty. Silent wrongness, not an error, and `$$` in particular is one of
+the most common idioms in real scripts (`tmpfile=/tmp/x.$$`, `kill $$`),
+making this arguably the highest-impact single item in this whole
+document — surprising precisely because it's this basic. **Effort: S** —
+`$$` is `std::process::id()`; `$PPID` is `libc::getppid()` (Unix), seeded
+once; `$-` is a one-line assembly from the flags `vars.rs` already tracks
+for `errexit`/`nounset`/`xtrace`/`pipefail` (plus `i` for interactive
+mode).
+
+### C42 — POSIX bracket character classes (`[[:alpha:]]`, `[[:digit:]]`, …) in globs/`case` (tracked)
+POSIX-mandated; present in dash/bash/ksh/zsh (this one genuinely works in
+dash, unlike most of Tier IV's bash-family extensions — it's a POSIX
+baseline glob feature, not a convenience). `glob.rs`'s bracket-expression
+parser (`parse_class`) only understands single characters and `c-c`
+ranges; `[:alpha:]`-style named classes inside a bracket are misparsed as
+their own literal characters, so `case 5 in [[:digit:]]) …` silently
+never matches and `ls [[:alpha:]]*` silently matches nothing (rather
+than erroring) — silent wrongness affecting filename globbing, `case`,
+and the `${v#pat}`-family pattern-removal operators alike, since they all
+share the same matcher. **Effort: S–M** — localized to `glob.rs`'s
+bracket parser: recognize `[:name:]` and map the standard POSIX class
+names to predicates.
+
+### C43 — `declare -u` / `-l` / `-i` attributes are silently ignored (tracked)
+Present in bash/zsh (as `typeset`), and ksh93 (`typeset -u/-l/-i`); no
+POSIX/dash equivalent. The `declare`/`local` flag parser (`expand.rs`)
+recognizes only `-a`/`-A`; any other flag (`-u`, `-l`, `-i`, `-r`, `-n`,
+`-x`, `-p`) is misparsed as a bare variable name to declare (a no-op),
+and the real assignment proceeds as an ordinary scalar with no
+transform. `declare -u u=hello; echo $u` prints `hello`, not `HELLO`;
+`declare -i n; n=2+3; echo $n` prints the literal `2+3`, not `5`. Silent
+wrongness — no error, no diagnostic, just a wrong value — found alongside
+the array/`declare` gap survey below (C60/C62), which share the same
+root cause (no attribute field on `Var` beyond `exported: bool`).
+**Effort: M** — needs an attribute flag on `Var` (`vars.rs`), applied at
+every assignment (`-u`/`-l` transform the value; `-i` routes the RHS
+through the arithmetic evaluator `arith.rs` already provides).
+
+### C44 — `trap` with a numeric or `SIG`-prefixed signal spec registers but never fires (tracked)
+POSIX explicitly permits the numeric form; present in bash/dash. Multiple
+signal *names* in one `trap` call already work correctly (`trap 'cmd'
+INT TERM`) — this is specifically the numeric (`trap 'cmd' 15`) and
+`SIG`-prefixed (`trap 'cmd' SIGTERM`) spellings. `trap_cmd`
+(`builtins.rs`) stores the signal spec verbatim as a lookup key with no
+normalization, but `trap.rs`'s delivery-side check only ever looks up the
+canonical bare name (`"TERM"`, `"HUP"`) — so a trap registered under
+`"15"` or `"SIGTERM"` is silently orphaned: the signal arrives, the
+process takes the default disposition, and the registered handler never
+runs, with no error at registration time either. **Effort: S** — a
+normalization step in `trap_cmd` (numeric → canonical name via the same
+table `kill`'s signal parsing already needs, strip a leading `SIG`)
+before the name is used as `trap.rs`'s lookup key.
+
 ---
 
 ## Tier II — Missing standard builtins
@@ -953,6 +1065,70 @@ malformed mode fails with status 1 without touching the mask. Symbolic
 overwhelming common case in real scripts, matching this item's **Effort:
 S** scope.
 
+### C45 — `readonly` / `declare -r` (read-only variables) entirely missing (tracked)
+POSIX-mandated special builtin; present in every comparison shell,
+**including dash** — this is a POSIX baseline feature, not a bash-family
+extension, the same class as `read`/`printf`/`shift` this tier already
+closed out. `readonly` isn't registered as a builtin at all: `readonly
+x=1` prints `command not found` and — worse — since it's then resolved
+as an ordinary external-command invocation, `x=1` is treated as an
+argument to that missing command rather than an assignment, so `x` isn't
+even set. There is no notion of a read-only variable anywhere in
+`vars.rs` (no flag beyond `exported: bool`), so `declare -r` has the
+exact same "flag silently swallowed" problem as C43. **Effort: M** — a
+`readonly: bool` flag on `Var`, checked and rejected (with a nonzero
+status, matching every comparison shell) by `vars::set`/`assign`/
+`unset`/array-mutation; a new `readonly` builtin mirroring `export`'s own
+structure (plus `readonly -p` listing, `readonly -a`/`-A`), and wiring
+`declare -r`/`local -r` to the same flag.
+
+### C46 — `ulimit` entirely missing (tracked)
+Present in every comparison shell **including dash** — like C45, this is
+a POSIX-family baseline (XSI-mandated), not a bash-only convenience.
+Container/daemon/CI scripts routinely open with `ulimit -n`/`ulimit -c
+0`/`ulimit -s`; its total absence (`command not found`) blocks that whole
+class of operational scripts outright. **Effort: M** — a new builtin
+over `libc::getrlimit`/`setrlimit`, with the resource-letter table
+(`-n`/`-c`/`-s`/`-f`/`-u`/`-v`/…), soft-vs-hard (`-S`/`-H`), `-a` (dump
+all), and the `unlimited` keyword — broad surface but mechanically
+straightforward, no interaction with the rest of the shell.
+
+### C47 — `command -p` (default-`$PATH` form) not supported (tracked)
+POSIX-mandated; present in bash/dash. `command -v`/`command -V`/the
+function-bypass form (`command name`) are all done (C12) — this is
+specifically the `-p` flag, which searches a default, hardcoded PATH
+instead of the shell's own (possibly compromised/customized) one, for
+security-conscious or portable scripts that don't trust an inherited
+`$PATH`. Rush's `command` builtin treats `-p` as the command name itself
+rather than a flag, so `command -p echo hi` reports `-p: command not
+found`. **Effort: S** — parse the `-p` flag and route the lookup through
+a hardcoded default path (e.g. `confstr(_CS_PATH)`, or a fixed
+`/usr/bin:/bin`) instead of `vars::get("PATH")`.
+
+### C48 — `type -a` (list every match, not just the first) not supported (tracked)
+Present in bash/ksh93/zsh (not dash, which has no `type -a`). `type`/
+`type -t` (C12) already report the single highest-precedence match
+(function, then builtin, then `$PATH`); `-a` additionally lists every
+*other* match too — the standard way to check whether a name is shadowed
+(e.g. both a builtin and a same-named `$PATH` executable). Rush parses
+`-a` as a name to look up rather than a flag, so `type -a echo` reports
+`-a: not found` alongside `echo`'s own single match, silently never
+showing the shadowed alternatives. **Effort: M** — `type`'s classifier
+needs to keep going past the first hit and scan every `$PATH` directory
+for additional matches, not stop at the first.
+
+### C49 — `typeset` (ksh/zsh's own spelling of `declare`) isn't registered at all (tracked)
+ksh93 has *only* `typeset` (no `declare` at all); zsh and bash accept
+both as synonyms. Portable ksh/zsh-targeting scripts use `typeset`
+exclusively, and get a flat `command not found` from rush today — even
+for the `-a`/`-A` array forms `declare` itself already supports, since
+`typeset` doesn't route anywhere. **Effort: S** — add `"typeset"`
+alongside `"declare"` at the one dispatch point that already recognizes
+`declare`/`local` (`expand.rs`) and the builtin name table
+(`builtins.rs`); everything `declare` already supports (and everything
+future work adds to it, including C43/C45's attribute flags) becomes
+available under `typeset` for free.
+
 ---
 
 ## Tier III — Scripting-safety idioms
@@ -1117,6 +1293,66 @@ that arrive when nothing is blocking at all.
 
 Out of scope for this item, matching its stated boundary: `ERR`/`DEBUG`
 (bash/ksh/zsh extensions, not POSIX-mandated) remain unimplemented.
+
+### C50 — `set -C` (`noclobber`) and the `>|` override (tracked)
+POSIX-mandated; present in dash/bash/ksh/zsh. A real scripting-safety
+idiom in the same family as `set -euo pipefail` — refuses to let an
+ordinary `>` redirect silently truncate/overwrite an existing file,
+`>|` the explicit escape hatch when overwriting is actually intended.
+Rush's `set_cmd` rejects `-C` outright (`not supported`, status 1) — the
+option doesn't exist — and `>|` isn't recognized by the lexer at all
+(`RedirOp` has no clobber-override variant), erroring with `expected
+filename after ">"`. **Effort: M** — a `noclobber` flag in `vars.rs`
+(mirroring `errexit`/`nounset`), an existence check before an ordinary
+`Write`-mode redirect opens its target, a new `RedirOp::Clobber`
+variant, and lexer support for the `>|` token.
+
+### C51 — `set -n` (noexec / syntax-check only) not supported (tracked)
+POSIX-mandated; present in dash/bash/ksh/zsh — the standard `sh -n
+script.sh` linting idiom (parse the whole script, report syntax errors,
+run nothing). Rush's `set_cmd` rejects `-n` outright, and there's no
+parse-only mode at any entry point (`-c`, a script file, or interactive)
+— rush always executes what it parses. **Effort: M** — a flag that makes
+the top-level exec loop parse and skip instead of run, touching all
+three invocation modes; rush's existing clean parse/exec separation
+makes this a natural, if not entirely trivial, fit.
+
+### C52 — `set -o` long option names, and bare `set -o`/`set +o` listing (tracked)
+POSIX-mandated (the long names themselves); present in dash/bash/ksh/zsh.
+`-e`/`-u`/`-x`/`-o pipefail` (C18–C20) are all done via their short forms
+and `-o pipefail` specifically — but `set -o errexit`/`set -o nounset`/
+`set -o xtrace` (the long spellings many scripts prefer for readability)
+all fail with `invalid option name`, since `set_cmd` (`builtins.rs`) only
+recognizes `pipefail` after `-o`/`+o`. Bare `set -o` (list every option's
+current state) and `set +o` (list in a directly re-runnable form) — used
+for introspection/debugging — fail with "option requires an argument"
+instead. **Effort: S** — map the long names to the existing flag setters
+already backing the short forms, and add a listing path over that same
+known-option table.
+
+### C53 — `trap ERR` never fires (tracked)
+Present in bash/ksh/zsh (not POSIX/dash) — a common error-handling/
+cleanup-framework idiom, paired with `set -e` in the same spirit this
+tier's other items already cover. `trap 'cmd' ERR` registers
+successfully (`trap.rs` stores any name) but is simply never fired
+anywhere — confirmed directly (`trap '...' ERR; false` runs nothing).
+**Effort: S–M** — `exec::run_andor`'s existing `last_ran`/status tracking
+(built for `errexit`'s exact "final reached command in the and-or chain
+failed" rule) already identifies precisely the condition `ERR` needs to
+fire on; wiring a registered `ERR` trap into that same check is a
+comparatively small addition on top of already-shipped machinery.
+
+### C54 — `${PIPESTATUS[@]}` (per-stage pipeline exit statuses) not implemented (tracked)
+Present in bash (zsh has the same idea under `$pipestatus`, lowercase;
+not in ksh93/dash) — lets a script tell *which* stage of a pipeline
+failed, not just the last/pipefail-adjusted status `$?` gives. `set -o
+pipefail` (C19) is done, but the underlying per-stage status array isn't
+exposed as a variable at all — `${PIPESTATUS[@]}` always expands empty.
+**Effort: M** — the per-stage `Vec<i32>` already exists internally
+(`exec::pipeline_status`/`job::wait_pgid`, built to implement pipefail
+itself); the work is capturing that same vector into a real indexed-array
+variable after every pipeline runs (indexed arrays are fully supported,
+C22) rather than discarding it.
 
 ---
 
@@ -1653,6 +1889,353 @@ piping inside a substitution, assignment RHS, redirect targets, `$!`,
 non-blocking/concurrent timing, and status independence — all matching
 exactly (aside from the documented fd-number cosmetic difference).
 
+### C55 — `[[ ]]` extended test construct entirely missing (tracked)
+**The single largest gap in this document.** Present in bash/ksh93/zsh
+(not dash — a genuine POSIX-shell/bash-family split, matching rush's own
+model in that specific narrow sense, but rush's own README calls itself
+"bash-compatible," and `[[` is one of the most defining bash-family
+constructs). It isn't merely a stricter-parsing `[ ]`: rush has *no*
+`[[`/`]]` tokens, no parser production, nothing — `[[ foo = foo ]]`
+resolves `[[` as an ordinary external command and fails with `command
+not found` (status 127). Worse, since `[[` is never recognized
+syntactically, `<`/`>` inside it are parsed as ordinary redirections:
+`[[ abc < abd ]]` tries to open a file named `abd` for reading instead of
+comparing the two strings.
+
+This actively breaks common bash-family idioms, not just a missing
+convenience: `[[`'s whole reason to exist is suppressing word-splitting
+and globbing on its own operands and tolerating an empty/multi-word
+variable without quoting. Since rush's `[ ]`/`test` (C6) receives
+already-split, already-glob-expanded argv exactly like real `[ ]` does,
+every idiom `[[` exists to make safe fails the same way real `[ ]` would:
+`x=; [ $x = foo ]` → `too many arguments` (empty `$x` vanishes,
+leaving `[ = foo ]`); `x="a b"; [ $x = "a b" ]` → `too many arguments`
+(unquoted splits into two words); `x=foo.txt; [ $x = *.txt ]` → `too many
+arguments` (unquoted RHS glob-expands). A script author who reaches for
+the idiomatic `[[ $x = foo ]]` form gets a hard, unconditional 127
+instead of bash's own empty-safe, split-safe, glob-safe behavior.
+
+Roughly half of the other new items below are gated on this one existing
+first: `=~` regex matching (C56) and glob-pattern matching on `==`'s RHS
+only exist inside `[[`; POSIX bracket-class support inside `[[`
+specifically (independent of C42's glob/`case` fix) also needs this.
+Extended globbing (C57), `shopt`/glob options (C58), and `test`'s own
+missing operators are all independent of `[[` and separately shippable.
+
+**Effort: L.** A new construct needs: lexer recognition of `[[`/`]]` with
+word-splitting and glob-suppression off for its interior (and `<`/`>`
+must *not* become redirections there); a new, genuinely recursive parser
+production, since `&&`/`||`/`!`/`( )` nest directly inside `[[` (unlike
+`[ ]`'s flat `-a`/`-o` combinators, C6); and a new evaluator. Real head
+start available: `[ ]`'s own `test_unary`/`test_binary`/the `-a`/`-o`
+recursive-descent structure (`builtins.rs`) already covers most of the
+primaries (`-f`, `-eq`, etc.) and closely mirrors the `&&`/`||`/`!`
+grammar `[[` itself needs.
+
+### C56 — `[[ $s =~ $regex ]]` (ERE matching) + `$BASH_REMATCH` (tracked)
+Present in bash (full, including capture groups in `$BASH_REMATCH`);
+ksh93 and zsh both support `=~` matching but populate the captures under
+a *different* name (`.sh.match`, `$MATCH`/`$match` respectively) — a real
+semantic divergence between the "big three," not just a syntax one. Not
+in dash/POSIX. **Depends entirely on C55** — `=~` is `[[`-only in every
+shell that has it. **Effort: M–L** (once `[[` exists) — needs a real ERE
+engine (the `regex` crate is the practical option, though its own syntax
+isn't a byte-for-byte match for POSIX ERE); `$BASH_REMATCH` itself is
+cheap on top, since indexed arrays already exist (C22).
+
+### C57 — Extended globbing: `?(pat)` `*(pat)` `+(pat)` `@(pat)` `!(pat)` (tracked)
+Native in ksh93 and zsh (`setopt kshglob`/`extendedglob`); bash requires
+`shopt -s extglob` first (itself missing — see C58) — not in dash/POSIX.
+Rush's glob matcher (`glob.rs`) has no alternation/grouping at all, and —
+worse — its lexer treats a `(` following one of these prefix characters
+as an ordinary subshell open, so `echo @(a|b)file` doesn't just fail to
+match, it mis-tokenizes into `@`, `(a|b)` (a subshell), and `file`.
+`case afile in @(a|b)file) …` is a hard parse error (`expected ')' in
+case`), not a silent no-match. **Effort: L** — needs real alternation/
+backtracking in the glob matcher, lexer changes so `(` after
+`?`/`*`/`+`/`@`/`!` in a word context isn't read as a subshell, and `case`
+pattern-parsing support for the new pattern shape. Independent of C55.
+
+### C58 — `shopt` builtin, and the glob options it gates: `nullglob`, `failglob`, `dotglob`, `globstar` (tracked)
+`shopt` itself is bash-specific; the *behaviors* it toggles have rough
+equivalents in zsh (`setopt`) and, for `globstar`, native `**` in
+ksh93/zsh. Not in dash. Rush has no `shopt` builtin at all (`command not
+found`), and the glob engine's own behavior is hardcoded rather than
+switchable: an unmatched glob always stays literal (bash/rush's shared
+default — correct as a *default*, but there's no way to opt into
+`nullglob`'s empty-list-instead behavior, or `failglob`'s hard error);
+dotfiles are always skipped by `*` (no `dotglob` toggle to opt in);
+`**` is not recursive at all — `glob.rs` collapses adjacent `*`
+components, so `**/*.txt` behaves like `*/*.txt` (one directory level,
+not arbitrary depth), with no `globstar` toggle to fix it either way,
+unlike bash where it's a real opt-in. **Effort: M** for the `shopt`
+framework itself plus `nullglob`/`failglob`/`dotglob` (each a flag check
+at the existing glob-fallback decision point in `expand.rs`, mirroring
+the thread-local flag pattern `errexit`/`nounset`/`xtrace`/`pipefail`
+already use in `vars.rs`); **globstar specifically is its own M** — real
+recursive-descent directory walking in `glob.rs`'s `walk`, not just a
+flag check.
+
+### C59 — String transformation operators: search/replace `${v/pat/repl}`, substring `${v:offset:length}`, case conversion `${v^^}` (tracked)
+The single most commonly used family of missing `${...}` operators.
+Search/replace (`${v/pat/repl}` first match, `${v//pat/repl}` all,
+`${v/#pat/repl}`/`${v/%pat/repl}` anchored) and substring extraction
+(`${v:offset}`, `${v:offset:length}`, including negative offset/length)
+are both present in bash/ksh93/zsh (not dash/POSIX); case conversion
+(`${v^}`/`${v^^}`/`${v,}`/`${v,,}`, optionally with a pattern argument)
+is bash-only (zsh spells the same idea `${(U)v}`/`${(L)v}`; no ksh93
+equivalent). All three hit the same `expand_braced` dispatch point in
+`expand.rs` and fall through to its final `bad substitution` error —
+a hard, clean parse-time-adjacent rejection, not silent wrongness, but a
+real gap: this exact operator family is close to ubiquitous in real bash
+scripts (stripping a path segment, normalizing case, trimming a known
+prefix length). Also missing: applying any of these across a whole array
+(`${arr[@]/pat/repl}`, `${arr[@]^^}`) — the operators don't exist for
+scalars to begin with, so the array-wide form is a strict superset gap.
+**Effort: M** — search/replace needs a leftmost-glob-match-at-each-
+position primitive (the existing pattern matcher only supports whole-
+string/anchored matching, per C1's prefix/suffix removal); substring
+needs new parser disambiguation from the existing `:-`/`:=`/`:+`/`:?`
+family (a leading `:` is currently always read as one of those); case
+conversion is the cheapest of the three, a straightforward char-map.
+Array-wide application is a small M on top of the scalar case existing.
+
+### C60 — Indirect expansion `${!var}`, name-listing `${!prefix@}`, transformation operators `${v@Q}` (tracked)
+Rarer, more bash-specific siblings of C59, sharing the same
+`expand_braced` dispatch point and the same `bad substitution` failure
+mode. `${!var}` (expand to the value of the variable *named by* `$var`'s
+own value) is bash-specific syntax — ksh93's own `${!var}` means
+something different (the *name*, a nameref-flavored read, not the
+bash-style double dereference), and zsh has no equivalent spelling at
+all (`${(P)var}` instead) — a real semantic fork across shells, not just
+a portability gap. `${!prefix@}`/`${!prefix*}` (list every variable name
+starting with `prefix`) is shared by bash and ksh93. `${v@Q}` (shell-
+requote), `${v@E}` (ANSI-C unescape), `${v@A}` (reconstruct as a
+`declare` statement), `${v@a}` (attribute flags) are bash 4.4+ only.
+**Effort: S** each for indirect expansion and name-listing — the latter
+can reuse `vars::names()` (already built for tab completion, C34)
+directly, just prefix-filtered. **Effort: M** for the `@`-transforms,
+lower priority given how rarely they appear outside debugging/
+serialization helpers, and `@A`/`@a` specifically depend on attribute
+introspection that's cheaper once C43/C45's attribute-flag work exists.
+
+### C61 — `mapfile` / `readarray` (tracked)
+Bash-only (no equivalent spelling in zsh/ksh93, which use `arr=("${(@f)$(...)}")`/`read -A`
+idioms instead; not in dash) — but since rush targets bash compatibility
+specifically, and `mapfile -t lines < file` is the modern, correct
+replacement for a `while read` loop over a whole file, its total absence
+(`command not found`) is a real gap despite only one shell having it.
+**Effort: M** — rush's existing `read` builtin (C7) already reads one
+line at a time off fd 0 without over-consuming; `mapfile` is a loop over
+that same primitive, appending into an indexed array (C22) via
+`array_append`. `-t` (strip trailing newline) is the one flag that
+actually matters for real usage; `-d`/`-n`/`-s`/`-O`/callback flags
+(`-c`/`-C`) can reasonably wait.
+
+### C62 — Nameref variables: `declare -n` / `local -n` / ksh `nameref` (tracked)
+Present in bash 4.3+ (`declare -n`/`local -n`) and ksh93 (its own
+`nameref` keyword, plus `typeset -n`); no equivalent in zsh (`-n` errors
+there too) or dash. Silent wrongness, not an error: `declare -n ref=x`
+assigns the *literal string* `"x"` to `ref` (the `-n` flag is swallowed
+as a bogus bare name — same root cause as C43/C45) rather than making
+`$ref` an alias for `$x`, so `ref=changed` leaves `x` completely
+untouched instead of updating it. This is the standard mechanism bash
+library functions use to "return" a value or array by writing through a
+caller-named variable — a real, if less common than C59's operators,
+gap in reusable-function style bash code. **Effort: L** — needs a new
+`Nameref(String)` attribute on `Var` plus indirection at *every* read and
+write site (`get`/`set`/`assign`/array ops/`unset` all need to check for
+and follow it) — genuinely cross-cutting, unlike the other attribute
+flags in this document, which only affect assignment.
+
+### C63 — `printf %q` (tracked)
+Present in bash/zsh/ksh93 (not dash/POSIX, not fish) — quotes a string so
+it's safe to reuse as shell input, common in codegen and "print a
+copy-pasteable command" tooling. Rush's `printf` (C8) accepts only
+`diouxXcsb`; `%q` is rejected outright (`invalid conversion
+specification`). **Effort: S–M** — self-contained: extend the accepted
+conversion set and add a shell-quoting helper (backslash-escape style,
+matching bash/zsh; ksh93 prefers single-quote style, a cosmetic
+difference not worth chasing). No interaction with the rest of the
+expander.
+
+### C64 — Job-control niceties: `jobs -l`/`-p`, `kill -l` + a fuller signal table, `wait -n`, `disown` (tracked)
+A cluster of small, independently shippable job-control completeness
+gaps, all present in bash and mostly in zsh/ksh93 (`wait -n` is
+bash-only; the doc's own comparison matrix already flags `disown` as the
+one known-missing piece of the `wait`/`disown` row — confirmed still
+accurate, bundled here alongside its close relatives rather than
+re-reported standalone). `jobs_cmd` (`job.rs`) takes no arguments at all
+today, so `-l` (include pids) and `-p` (pids only) are silently ignored
+— the job table already tracks every pid, the flags just aren't parsed.
+`kill -l` (list signal names) fails outright, and the signal-name table
+`kill`/`trap` share (`job.rs`) only knows seven names (TERM/KILL/INT/
+HUP/QUIT/STOP/CONT) — so even `kill -USR1 %1` fails today, not just the
+`-l` listing form. `wait -n` (wait for whichever tracked job finishes
+next, not a specific one — common in bounded-parallelism worker-pool
+loops) isn't recognized as a valid job spec. `disown` (remove a job from
+the table so it survives the shell exiting) isn't registered as a
+builtin at all. **Effort: S** each — `jobs -l`/`-p` and `kill -l` are
+pure formatting over data the job table already has; a fuller signal
+table is a lookup-table expansion; `disown` removes an entry from the
+existing job table using the same `%job`/current-job selection logic
+`fg`/`bg` already have; `wait -n` needs a small extension to the existing
+blocking-wait loop to stop at whichever tracked pid exits first instead
+of a specific one (**S–M**).
+
+### C65 — `trap DEBUG` / `trap RETURN`, and `trap -l`/`trap -p` (tracked)
+Present in bash/ksh93/zsh (not POSIX/dash) — distinct from C44 (a real
+bug: a *registered* numeric/`SIG`-prefixed trap silently never fires) and
+C53 (`trap ERR`, tier III, a scripting-safety idiom): these are two
+rarer pseudo-signals (`DEBUG` fires before every simple command; `RETURN`
+fires when a function or sourced script returns — both niche, mostly
+profiling/step-debugging tools) plus two introspection flags. `trap -l`
+(list signal names — shares C64's signal-table gap) and `trap -p` (print
+every registered trap in a directly re-runnable form, for saving/
+restoring trap state) are both currently misparsed: `trap_cmd`
+(`builtins.rs`) treats any argument except a literal `-` as the trap's
+command string, so `trap -l`/`trap -p` register a bogus, harmless
+no-op trap named `-l`/`-p` instead of listing anything (bare `trap` with
+no arguments does correctly list — only the flagged forms are broken).
+**Effort:** `DEBUG` **M** (a new hook before every simple command in
+`exec::exec_list_impl`'s per-job loop); `RETURN` **S–M** (fire once, in
+`exec::call_function`'s and `source_file`'s own return paths); `-l`/`-p`
+**S** each (`-l` shares C64's table; `-p` reuses the listing logic bare
+`trap` already has).
+
+### C66 — `coproc` (named bidirectional coprocess) (tracked)
+Present in bash (`coproc`) and zsh; ksh93 uses different (`|&`) syntax;
+not in dash/fish. A specialized, powerful tool — a long-lived helper
+process with a shell-visible bidirectional pipe (`${NAME[0]}`/`${NAME[1]}`
+as its read/write fds) — but rare in ordinary scripts compared to
+everything else in this document. Entirely unimplemented: no `coproc`
+keyword, and a realistic hand-rolled equivalent trips the pre-existing
+C38-adjacent limitation that `${arr[N]}`-sourced fd redirects
+(`>&"${mycop[1]}"`) don't resolve either, meaning the fd-array plumbing
+this would need is itself a prerequisite, not just the keyword/parsing.
+**Effort: L** — new parser grammar, a fork with two real pipes, and
+populating a shell array with the resulting two fd numbers, plus
+background-job bookkeeping to track the coprocess itself.
+
+### C67 — Rarer special variables: `$LINENO`, `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$EPOCHSECONDS`/`$EPOCHREALTIME` (tracked)
+A grab-bag of bash-specific special variables (ksh93/zsh have some under
+different names; none in dash/POSIX, which is the reason none of these
+made it into C41's POSIX-mandated set). All currently expand to empty
+via the same `$`-scanner fallthrough C41 describes. Real-world value
+varies widely: `$RANDOM` and `$SECONDS` are genuinely common (ad hoc
+temp-name suffixes, crude timing); `$FUNCNAME`/`${FUNCNAME[@]}` (the call
+stack of function names) and `$BASH_SOURCE`/`${BASH_SOURCE[@]}` (the
+"script's own directory" idiom, `"${BASH_SOURCE[0]}"`) are moderately
+common in reusable library scripts; `$EPOCHSECONDS`/`$EPOCHREALTIME`
+(bash 5+) are genuinely rare. `$LINENO` is the structurally hardest of
+the set — rush's AST carries no source-line information at all today, so
+supporting it means threading line numbers through the lexer, parser,
+and executor, not just adding a scanner arm. **Effort: S** each for
+`$RANDOM` (a seeded PRNG) and `$SECONDS`/`$EPOCHSECONDS`/`$EPOCHREALTIME`
+(all a stored start `Instant`/`SystemTime::now()` away); **M** for
+`$FUNCNAME`/`$BASH_SOURCE` (need a call-stack/source-stack maintained
+through `exec::call_function`/`source_file`); **M–L** for `$LINENO`
+specifically, given the AST-wide plumbing.
+
+### C68 — No syntax highlighting or live validation of the command line (tracked)
+Native in fish (real-time), available in zsh (`zsh-syntax-highlighting`),
+absent from bash/dash/ksh93. Rush's `RushHelper` (`src/completion.rs`)
+implements `Completer`/`Hinter` but its `Highlighter` impl is limited to
+C33's dimmed history-suggestion text — it does nothing to the line the
+user is actually typing (no color for strings/keywords/unknown commands,
+no red flag for unmatched quotes or an unresolvable command name before
+Enter is pressed). Confirmed not blocked on `rustyline` 18's architecture:
+`Highlighter::highlight()`/`highlight_char()` are exactly the hooks fish
+and zsh-syntax-highlighting are built on elsewhere, and rush already
+constructs and installs a custom `Highlighter` for C33, so the wiring
+point already exists — this is additional logic in that same impl, not a
+new mechanism. **Effort: M** — needs a lightweight, error-tolerant
+re-lex of the in-progress line (reusing `lexer.rs`) to classify spans,
+plus a first-word-only PATH/builtin/function/alias lookup for the
+command-not-found case; live validation (unmatched quotes, etc.) rides
+the same re-lex pass, which is why the two are budgeted together rather
+than separately.
+
+### C69 — Tab completion shows one candidate at a time, no columned list (tracked)
+Native list/menu display in fish, zsh, and bash (bash-completion or even
+stock bash's default double-Tab listing). Rush's `Editor` is currently
+constructed with `rustyline`'s default `CompletionType::Circular` — Tab
+blindly cycles through candidates one at a time in place with nothing
+shown on screen listing what the other options are, confirmed directly
+against the compiled binary under a pty. `rustyline` 18 already fully
+implements the columned, paged alternative (`CompletionType::List`,
+backed by its own `page_completions` — the exact mechanism bash's
+default Tab-Tab listing and fish's dropdown are built on); switching is
+a one-line `Config::builder().completion_type(CompletionType::List)`
+change at `Editor` construction, not new completion logic. **Effort: S.**
+
+### C70 — No abbreviations / global-alias live expansion (tracked)
+Native in fish (`abbr`) and zsh (`alias -g`) — a name that expands
+in-place as you type (typically on space or Enter), visible and editable
+before the command runs, distinct from a regular alias which only
+expands at execution time and only in command position. Rush has C34's
+completion-time alias-name awareness and the pre-existing execution-time
+`alias`/`unalias` builtins, but nothing live-expands text on the line
+itself while typing — confirmed directly (typing a defined alias name
+followed by space does not rewrite the line). Feasible without a
+dependency change: `rustyline` exposes `ConditionalEventHandler`/
+`bind_sequence`, which is exactly the mechanism needed to intercept a
+space/Enter keypress, check the just-typed word against a new
+abbreviation table, and rewrite the buffer in place before the key's
+default behavior runs. **Effort: M** — new abbreviation table
+(name → expansion, likely its own builtin `abbr`/`unabbr` rather than
+overloading `alias`, since fish/zsh keep the two concepts separate) plus
+the key-event wiring.
+
+### C71 — No right-side prompt (`$RPS1` / fish right prompt) (tracked)
+Native in zsh (`$RPS1`) and fish (`fish_right_prompt`) — text
+right-justified on the current input line (commonly exit status, git
+branch, or a clock), distinct from and independent of the left prompt
+(`$PS1`). **Confirmed blocked on `rustyline` 18's own architecture**,
+unlike every other item in this tier: the crate has no right-prompt
+concept anywhere — no hook renders anything at a fixed right-hand
+column, and its line-wrapping/cursor-math is written assuming a single
+left-hand prompt only. Supporting this would mean either patching
+`rustyline` itself or replacing it with a different line-editing crate
+(e.g. `reedline`, which does support a right prompt) — a materially
+larger undertaking than the rush-side-only work every other Tier V item
+needs. **Effort: L / dependency-blocked.**
+
+### C72 — `cd` niceties: spelling correction, `pushd`/`popd`/`dirs`, `cd -N`, `$CDPATH` (tracked)
+A bundle of `cd`-adjacent conveniences, none present in rush today
+(confirmed directly: `pushd`/`popd`/`dirs` are all "command not found";
+`cd -N` and a misspelled directory name both just fail). Cross-shell
+picture varies per item: fish natively corrects near-miss spelling
+(`cd /tmp/foo` when only `/tmp/Foo` exists, an interactive-only
+convenience with no POSIX/dash equivalent); `pushd`/`popd`/`dirs` (a
+directory stack) are in bash/ksh93/zsh but not dash/fish (fish uses
+`dirh`/its own history-based equivalent instead); `cd -N` (jump N
+entries back in the stack) rides on the same stack; `$CDPATH` (a
+colon-separated search path for `cd`'s bare-name argument, like `$PATH`
+for directories) is POSIX-mandated and present in all five, notably
+including dash. Rush's `cd` builtin (`src/builtins.rs`) today only
+handles a bare path, `~`, and `-` (previous directory via `$OLDPWD`) —
+no stack, no `$CDPATH` lookup, no fuzzy match. **Effort: S** for
+spelling-correction alone (a simple edit-distance check against sibling
+directory names when the literal path doesn't exist); **M** for the
+`pushd`/`popd`/`dirs`/`cd -N`/`$CDPATH` cluster (a new directory-stack
+data structure plus `$CDPATH` lookup logic, both fairly mechanical
+additions to the existing `cd` builtin).
+
+### C73 — No runtime `set -o vi`/`set -o emacs` line-editing mode switch (tracked)
+POSIX-mandated (`set -o vi`), present in bash/ksh93/zsh (`emacs` is the
+default in all of them; dash and fish don't support the vi keybinding
+switch at all). Confirmed directly: rush's `set_cmd` (C52) has no `vi`/
+`emacs` case, so the option is silently ignored rather than switching
+keybindings. `rustyline` itself already supports vi-style editing via
+`Config::edit_mode(EditMode::Vi)`, so the underlying capability exists —
+but rush's `Editor` is constructed once at startup from a fixed `Config`
+with no plumbing to reconfigure it mid-session in response to a builtin
+command run after the fact. **Effort: M–L** — needs either rebuilding
+the `Editor` in place (losing in-memory history unless explicitly
+carried over) or a `rustyline` version/API that supports swapping
+`edit_mode` on a live `Editor`, whichever proves cleaner in practice.
+
 ---
 
 ## Tier V — Interactive UX
@@ -1827,3 +2410,14 @@ some natural orderings:
   flag-storage pattern.
 - **C33 (autosuggestions)** is the standout cheap win in Tier V given
   `completion.rs` already has the `Hinter` trait wired up as a no-op.
+- **C41 (`$`/`$PPID`/`$-`) and C45 (`readonly`) are the two highest-leverage
+  items in the fresh C41–C73 pass** — both are POSIX-mandated, present in
+  all five comparison shells including dash, and currently fail silently
+  or wrongly rather than just being unsupported.
+- **C55 (`[[ ]]`) is the single largest undertaking in the whole document**
+  — new lexer tokens, a new recursive parser production, and a new
+  evaluator — but it's also a prerequisite for C56 (`=~` regex), so it's
+  worth sequencing before rather than after that one.
+- **C42 (POSIX character classes) and C49 (`typeset`)** are both
+  small, self-contained wins with no dependencies on anything else in the
+  new batch — good candidates to knock out first.

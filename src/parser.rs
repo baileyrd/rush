@@ -135,6 +135,18 @@ pub enum Compound {
         has_in: bool,
         body: CommandList,
     },
+    /// `for (( init ; cond ; update )); do BODY; done` (bash/ksh93/zsh —
+    /// not POSIX sh/dash). Each clause is raw, unexpanded arithmetic text
+    /// (still carrying any `$`-references), `None` when that clause was
+    /// left empty — bash treats an empty `cond` as always-true (`for
+    /// ((;;))` is a real infinite loop), and an empty `init`/`update` as a
+    /// no-op, all verified directly.
+    CFor {
+        init: Option<String>,
+        cond: Option<String>,
+        update: Option<String>,
+        body: CommandList,
+    },
     /// `case WORD in PATTERN|… ) BODY ;; … esac`. Each item's own terminator
     /// (`;;`/`;&`/`;;&`, defaulting to `;;` if omitted on the last item
     /// before `esac`) decides what happens after its body runs — see
@@ -143,6 +155,15 @@ pub enum Compound {
         word: Word,
         items: Vec<(Vec<Word>, CommandList, CaseTerm)>,
     },
+    /// `((expr))` (bash/ksh93/zsh — not POSIX sh/dash): a standalone
+    /// arithmetic command, evaluating `expr` for its side effects
+    /// (assignment, `++`/`--`) rather than substituting its value. Exit
+    /// status is `0` if the result is nonzero, `1` if zero — the
+    /// arithmetic analogue of `test`. An empty `expr` (`(( ))`) evaluates
+    /// as `0`/status `1` rather than erroring, matching real bash's own
+    /// asymmetry with `$(( ))` (which does error on empty), verified
+    /// directly.
+    Arith(String),
     /// A brace group `{ list; }` — runs the list in the current shell.
     Group(CommandList),
     /// A subshell `( list )` — runs the list with isolated cwd and variables.
@@ -305,6 +326,11 @@ impl Parser {
         // `name ( )` in command position is a function definition.
         let compound = if self.is_funcdef_ahead() {
             self.parse_funcdef()?
+        // `((expr))` — an arithmetic command, always (see `Token::DblParen`'s
+        // own doc comment on why this never falls back to nested subshells).
+        } else if let Some(Token::DblParen(_)) = self.peek() {
+            let Some(Token::DblParen(expr)) = self.advance() else { unreachable!() };
+            Compound::Arith(expr)
         // A bare `(` starts a subshell.
         } else if matches!(self.peek(), Some(Token::LParen)) {
             self.parse_subshell()?
@@ -468,6 +494,33 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Compound, ParseError> {
         self.expect_keyword("for")?;
+        // `for ((init; cond; update))` — the C-style form. A `NAME` can
+        // never itself start with `(`, so seeing `Token::DblParen` here is
+        // unambiguous (no space is needed between `for` and `((`, verified
+        // directly — `for((i=0;...` parses the same as `for ((i=0;...`).
+        if let Some(Token::DblParen(_)) = self.peek() {
+            let Some(Token::DblParen(header)) = self.advance() else { unreachable!() };
+            let clauses: Vec<&str> = header.split(';').collect();
+            let [init, cond, update] = clauses.as_slice() else {
+                return Err(ParseError::Syntax(
+                    "for ((...)) requires exactly two `;`-separated clauses".into(),
+                ));
+            };
+            let non_empty = |s: &str| {
+                let s = s.trim();
+                (!s.is_empty()).then(|| s.to_string())
+            };
+            self.skip_separators();
+            self.expect_keyword("do")?;
+            let body = self.parse_list()?;
+            self.expect_keyword("done")?;
+            return Ok(Compound::CFor {
+                init: non_empty(init),
+                cond: non_empty(cond),
+                update: non_empty(update),
+                body,
+            });
+        }
         let var = self.expect_name()?;
 
         let mut words = Vec::new();
@@ -665,6 +718,7 @@ fn describe(tok: &Token) -> String {
         Token::DSemiAmp => ";;&".into(),
         Token::LParen => "(".into(),
         Token::RParen => ")".into(),
+        Token::DblParen(_) => "((...))".into(),
         Token::Redirect(_) => "redirection".into(),
         Token::Newline => "newline".into(),
     }
@@ -880,6 +934,52 @@ mod tests {
             },
             _ => panic!("expected compound"),
         }
+    }
+
+    #[test]
+    fn c_style_for_clause() {
+        let p = parse_ok("for ((i=0;i<3;i++)); do echo $i; done");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.compound.as_ref() {
+                Compound::CFor { init, cond, update, .. } => {
+                    assert_eq!(init.as_deref(), Some("i=0"));
+                    assert_eq!(cond.as_deref(), Some("i<3"));
+                    assert_eq!(update.as_deref(), Some("i++"));
+                }
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
+        }
+        // All three clauses empty.
+        let p = parse_ok("for ((;;)); do echo x; done");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.compound.as_ref() {
+                Compound::CFor { init, cond, update, .. } => {
+                    assert!(init.is_none());
+                    assert!(cond.is_none());
+                    assert!(update.is_none());
+                }
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
+        }
+    }
+
+    #[test]
+    fn arith_command_clause() {
+        let p = parse_ok("((i = i + 1))");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.compound.as_ref() {
+                Compound::Arith(expr) => assert_eq!(expr, "i = i + 1"),
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
+        }
+        // No space between the two `(`: a nested subshell, not arithmetic.
+        assert!(matches!(
+            first_cmd(&parse_ok("( (echo hi) )")),
+            RawCommand::Compound(c) if matches!(c.compound.as_ref(), Compound::Subshell(_))
+        ));
     }
 
     #[test]

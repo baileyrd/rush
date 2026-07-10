@@ -51,6 +51,15 @@ pub enum Token {
     Amp,              // & (single — background)
     LParen,           // (
     RParen,           // )
+    /// `((...))` with no space between the two `(` — an arithmetic
+    /// command or a C-style `for ((init; cond; update))` header, always
+    /// (unconditionally, matching real bash exactly, verified directly)
+    /// taking priority over the alternative reading as two nested
+    /// subshells, which needs an explicit space (`( (cmd) )`) to get that
+    /// reading instead. Holds the raw text between the matching `((`/`))`,
+    /// unsplit — the parser decides whether it's one expression or three
+    /// `;`-separated clauses depending on where it appears.
+    DblParen(String),
     Newline,          // a line break (also lets `&&`/`|` continue)
 }
 
@@ -166,10 +175,18 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
             }
             // Bare parens are operators (used by `case`); literal parens in a
             // command must be quoted. `$(...)`/`$((...))` are consumed in
-            // `lex_word` before reaching here.
+            // `lex_word` before reaching here. A *second* `(` with no space
+            // — `((` — is always an arithmetic command/`for` header instead
+            // (see `Token::DblParen`'s own doc comment).
             '(' => {
                 chars.next();
-                tokens.push(Token::LParen);
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let expr = take_double_paren(&mut chars)?;
+                    tokens.push(Token::DblParen(expr));
+                } else {
+                    tokens.push(Token::LParen);
+                }
             }
             ')' => {
                 chars.next();
@@ -502,6 +519,36 @@ fn lex_array_literal(chars: &mut Peekable<Chars>) -> Result<Vec<Word>, LexError>
                 }
                 elements.push(word);
             }
+        }
+    }
+}
+
+/// Read an arithmetic expression up to the closing `))`, after `((` has
+/// already been consumed — mirrors `expand::take_arith`'s identical
+/// algorithm for `$((...))`, just returning `LexError` instead of a plain
+/// `String` error. A single `)` at depth 0 isn't the terminator by itself —
+/// only when immediately followed by a second one.
+fn take_double_paren(chars: &mut Peekable<Chars>) -> Result<String, LexError> {
+    let mut expr = String::new();
+    let mut depth = 0usize;
+    loop {
+        match chars.next() {
+            None => return Err(LexError::Incomplete),
+            Some('(') => {
+                depth += 1;
+                expr.push('(');
+            }
+            Some(')') if depth > 0 => {
+                depth -= 1;
+                expr.push(')');
+            }
+            Some(')') => {
+                return match chars.next() {
+                    Some(')') => Ok(expr),
+                    _ => Err(LexError::Incomplete),
+                };
+            }
+            Some(c) => expr.push(c),
         }
     }
 }

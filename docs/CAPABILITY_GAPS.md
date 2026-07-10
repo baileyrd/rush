@@ -321,13 +321,13 @@ syntax directly.
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
-- **Tier V — interactive UX:** 9 (6 done, 3 open — C71–C73)
+- **Tier V — interactive UX:** 9 (7 done, 2 open — C71 [dependency-blocked], C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C70 are
-now done (re-closing Tiers I through IV completely) and the remaining
-3 (all Tier V, interactive UX) are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C70 and C72 are
+now done (re-closing Tiers I through IV completely); C73 is open and
+C71 remains dependency-blocked on rustyline's architecture.
 
 ---
 
@@ -2897,7 +2897,7 @@ left-hand prompt only. Supporting this would mean either patching
 larger undertaking than the rush-side-only work every other Tier V item
 needs. **Effort: L / dependency-blocked.**
 
-### C72 — `cd` niceties: spelling correction, `pushd`/`popd`/`dirs`, `cd -N`, `$CDPATH` (tracked)
+### C72 — `cd` niceties: spelling correction, `pushd`/`popd`/`dirs`, `cd -N`, `$CDPATH` ✅ done
 A bundle of `cd`-adjacent conveniences, none present in rush today
 (confirmed directly: `pushd`/`popd`/`dirs` are all "command not found";
 `cd -N` and a misspelled directory name both just fail). Cross-shell
@@ -2917,6 +2917,23 @@ directory names when the literal path doesn't exist); **M** for the
 `pushd`/`popd`/`dirs`/`cd -N`/`$CDPATH` cluster (a new directory-stack
 data structure plus `$CDPATH` lookup logic, both fairly mechanical
 additions to the existing `cd` builtin).
+
+Implemented, the whole bundle. The directory stack: `pushd dir` (cd +
+push, printing the stack in bash's exact current-dir-first,
+`~`-abbreviated format — verified byte-identical), bare `pushd` (swap
+top two), `popd`, `dirs`/`dirs -c`, and `cd -N` (1-based jump into the
+stack, zsh's spelling — bash has no `cd -N`). `$CDPATH`: a bare
+relative name that doesn't resolve locally is searched through the
+colon-separated path, and the resulting directory is printed, as POSIX
+requires (verified against bash). Spelling correction is
+**interactive-only**, like fish's: when the literal path doesn't exist
+(and `$CDPATH` didn't resolve it either), a *unique* sibling within
+edit distance 2 (or a case-insensitive match) is taken, with a
+`cd: corrected to …` notice on stderr — a script's typo still fails
+exactly as before, verified. Unit tests cover the distance helper and
+both interactive/non-interactive correction paths; an integration test
+covers the stack (bash-identical output), `$CDPATH`, `cd -N`, and the
+empty-stack errors.
 
 ### C73 — No runtime `set -o vi`/`set -o emacs` line-editing mode switch (tracked)
 POSIX-mandated (`set -o vi`), present in bash/ksh93/zsh (`emacs` is the

@@ -2841,3 +2841,29 @@ fn abbr_builtin_manages_the_table() {
     let (out, _) = rush("abbr gs='git status'; abbr; abbr gs; unabbr gs; abbr gs 2>/dev/null; echo st=$?");
     assert_eq!(out, "abbr gs='git status'\nabbr gs='git status'\nst=1\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn cd_niceties() {
+    // C72: pushd/popd/dirs (byte-identical to bash), cd -N, and $CDPATH.
+    let (out, _) = rush("cd /tmp; pushd /usr > /dev/null; pushd /etc >/dev/null; dirs; popd >/dev/null; dirs; pushd >/dev/null; dirs");
+    assert_eq!(out, "/etc /usr /tmp\n/usr /tmp\n/tmp /usr\n");
+
+    // $CDPATH search prints the resulting directory (POSIX).
+    let (out, _) = rush("CDPATH=/usr; cd share && pwd");
+    assert_eq!(out, "/usr/share\n/usr/share\n");
+
+    // cd -N jumps into the stack (1-based, dirs order).
+    let (out, _) = rush("cd /tmp; pushd /usr >/dev/null; pushd /etc >/dev/null; cd -2; pwd");
+    assert_eq!(out, "/tmp\n");
+
+    // Empty-stack errors.
+    let (err, status) = rush_stderr("popd");
+    assert!(err.contains("directory stack empty"), "got: {err:?}");
+    assert_eq!(status, 1);
+
+    // Spelling correction is interactive-only: a script's typo still
+    // fails (unit-tested directly for the interactive path).
+    let (_, status) = rush("cd /nonexistent-c72-typo 2>/dev/null");
+    assert_eq!(status, 1);
+}

@@ -1667,3 +1667,11 @@ position — visible and editable before Enter, fish's behavior.
 Expansion decision is a pure, unit-tested function; expansion triggers
 on space (Enter is a documented narrowing). Adds unit + integration
 tests.
+
+### New: `cd` niceties — `pushd`/`popd`/`dirs`, `cd -N`, `$CDPATH`, spelling correction (C72)
+The directory stack matches bash's output byte-for-byte (current dir
+first, `~`-abbreviated); `cd -N` jumps into it (zsh's spelling);
+`$CDPATH` searches a bare relative name and prints the result (POSIX);
+spelling correction is interactive-only like fish's — a unique sibling
+within edit distance 2 is taken with a stderr notice, while script
+typos still fail. Adds unit + integration tests.

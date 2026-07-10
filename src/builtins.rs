@@ -46,6 +46,9 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "shopt" => Some(shopt_cmd(argv)),
         "mapfile" | "readarray" => Some(mapfile_cmd(argv)),
         "abbr" => Some(abbr_cmd(argv)),
+        "pushd" => Some(pushd_cmd(argv)),
+        "popd" => Some(popd_cmd(argv)),
+        "dirs" => Some(dirs_cmd(argv)),
         "unabbr" => Some(unabbr_cmd(argv)),
         _ => other_builtin(argv),
     }
@@ -57,7 +60,8 @@ pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
-    "mapfile", "readarray", "abbr", "unabbr", "declare", "typeset", "readonly",
+    "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
+    "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -456,9 +460,167 @@ fn other_builtin(_argv: &[String]) -> Option<i32> {
     None
 }
 
+thread_local! {
+    // The directory stack (`pushd`/`popd`/`dirs`, C72) — entries *below*
+    // the current directory (which bash treats as the implicit top).
+    static DIR_STACK: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The stack as bash's `dirs` shows it: the current directory first, then
+/// the pushed entries, `$HOME` abbreviated to `~`.
+fn dirs_display() -> String {
+    let mut entries = vec![std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default()];
+    DIR_STACK.with(|s| entries.extend(s.borrow().iter().rev().cloned()));
+    let home = crate::vars::get("HOME").unwrap_or_default();
+    entries
+        .iter()
+        .map(|e| {
+            if !home.is_empty() && e.starts_with(&home) {
+                format!("~{}", &e[home.len()..])
+            } else {
+                e.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn current_dir_string() -> Option<String> {
+    std::env::current_dir().ok().map(|p| p.display().to_string())
+}
+
+/// `pushd [dir]` (C72): with a dir, cd there and push the old cwd; with
+/// none, swap the top two entries — printing the stack either way, like
+/// bash.
+fn pushd_cmd(argv: &[String]) -> i32 {
+    let prev = current_dir_string();
+    match argv.get(1) {
+        Some(dir) => {
+            if cd(&["cd".to_string(), dir.clone()]) != 0 {
+                return 1;
+            }
+            if let Some(p) = prev {
+                DIR_STACK.with(|s| s.borrow_mut().push(p));
+            }
+        }
+        None => {
+            let Some(top) = DIR_STACK.with(|s| s.borrow_mut().pop()) else {
+                eprintln!("pushd: no other directory");
+                return 1;
+            };
+            if cd(&["cd".to_string(), top]) != 0 {
+                return 1;
+            }
+            if let Some(p) = prev {
+                DIR_STACK.with(|s| s.borrow_mut().push(p));
+            }
+        }
+    }
+    println!("{}", dirs_display());
+    0
+}
+
+/// `popd` (C72): drop the current directory, cd to the next stack entry.
+fn popd_cmd(_argv: &[String]) -> i32 {
+    let Some(next) = DIR_STACK.with(|s| s.borrow_mut().pop()) else {
+        eprintln!("popd: directory stack empty");
+        return 1;
+    };
+    if cd(&["cd".to_string(), next]) != 0 {
+        return 1;
+    }
+    println!("{}", dirs_display());
+    0
+}
+
+/// `dirs [-c]` (C72): print the stack (`-c` clears it).
+fn dirs_cmd(argv: &[String]) -> i32 {
+    if argv.get(1).map(String::as_str) == Some("-c") {
+        DIR_STACK.with(|s| s.borrow_mut().clear());
+        return 0;
+    }
+    println!("{}", dirs_display());
+    0
+}
+
+/// Levenshtein distance, for `cd`'s interactive spelling correction (C72).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// `cd`'s not-found fallbacks (C72): `$CDPATH` for a bare relative name
+/// (POSIX — the resulting directory is printed, as POSIX requires), then
+/// — interactively only, like fish — a unique close-spelling sibling
+/// (edit distance ≤ 2 with at most one candidate).
+fn cd_fallback_target(target: &str) -> Option<String> {
+    let relative_bare = !target.starts_with(['/', '.']);
+    if relative_bare && let Some(cdpath) = crate::vars::get("CDPATH") {
+        for dir in cdpath.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = format!("{dir}/{target}");
+            if Path::new(&candidate).is_dir() {
+                println!("{candidate}");
+                return Some(candidate);
+            }
+        }
+    }
+    if crate::vars::interactive() {
+        let path = Path::new(target);
+        let (parent, name) = (path.parent().filter(|p| !p.as_os_str().is_empty()), path.file_name()?);
+        let parent = parent.unwrap_or(Path::new("."));
+        let name = name.to_string_lossy();
+        let mut candidates = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let entry_name = entry.file_name().to_string_lossy().into_owned();
+                if entry.path().is_dir()
+                    && (entry_name.eq_ignore_ascii_case(&name) || edit_distance(&entry_name, &name) <= 2)
+                {
+                    candidates.push(entry.path().display().to_string());
+                }
+            }
+        }
+        if let [only] = candidates.as_slice() {
+            eprintln!("cd: corrected to {only}");
+            return Some(only.clone());
+        }
+    }
+    None
+}
+
 fn cd(argv: &[String]) -> i32 {
-    // `cd -` goes to $OLDPWD and echoes it, like POSIX `cd`.
+    // `cd -` goes to $OLDPWD and echoes it, like POSIX `cd`. `cd -N`
+    // (C72) jumps to the Nth directory-stack entry (1-based, `dirs`'
+    // order), like zsh.
     let going_back = argv.get(1).map(String::as_str) == Some("-");
+    if let Some(n) = argv
+        .get(1)
+        .and_then(|a| a.strip_prefix('-'))
+        .filter(|r| !r.is_empty())
+        .and_then(|r| r.parse::<usize>().ok())
+    {
+        let Some(target) = DIR_STACK.with(|s| {
+            let s = s.borrow();
+            s.iter().rev().nth(n.saturating_sub(1)).cloned()
+        }) else {
+            eprintln!("cd: -{n}: directory stack index out of range");
+            return 1;
+        };
+        return cd(&["cd".to_string(), target]);
+    }
     let target = match argv.get(1) {
         Some(_) if going_back => match crate::vars::get("OLDPWD") {
             Some(dir) => dir,
@@ -485,8 +647,15 @@ fn cd(argv: &[String]) -> i32 {
     let previous = std::env::current_dir().ok();
 
     if let Err(e) = std::env::set_current_dir(Path::new(&target)) {
-        eprintln!("cd: {target}: {e}");
-        return 1;
+        // Not found: try `$CDPATH`, then (interactively) spelling
+        // correction (C72), before giving up.
+        match cd_fallback_target(&target) {
+            Some(fallback) if std::env::set_current_dir(Path::new(&fallback)).is_ok() => {}
+            _ => {
+                eprintln!("cd: {target}: {e}");
+                return 1;
+            }
+        }
     }
 
     if let Some(dir) = previous {
@@ -2238,6 +2407,30 @@ mod tests {
     fn ev(args: &[&str]) -> Result<bool, String> {
         let v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         test_eval(&v)
+    }
+
+    // C72: interactive-only spelling correction and the distance helper.
+    #[test]
+    fn cd_spelling_correction() {
+        assert_eq!(edit_distance("correctme", "CorrectMe".to_lowercase().as_str()), 0);
+        assert_eq!(edit_distance("shre", "share"), 1);
+        assert_eq!(edit_distance("abc", "xyz"), 3);
+
+        let dir = std::env::temp_dir().join(format!("rush_c72_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("CorrectMe")).unwrap();
+        let typo = dir.join("correctme");
+
+        // Non-interactive: no correction.
+        crate::vars::set_interactive(false);
+        assert_eq!(cd_fallback_target(typo.to_str().unwrap()), None);
+
+        // Interactive: the unique close-spelled sibling is offered.
+        crate::vars::set_interactive(true);
+        let corrected = cd_fallback_target(typo.to_str().unwrap());
+        assert_eq!(corrected.as_deref(), Some(dir.join("CorrectMe").to_str().unwrap()));
+        crate::vars::set_interactive(false);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

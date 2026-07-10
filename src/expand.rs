@@ -163,7 +163,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // inside a function — an accepted, documented simplification; use
     // `local` explicitly for function-scoped declarations.)
     let decl_word = if idx < rc.argv.len() { expand_argv_word(&rc.argv[idx])?.into_iter().next() } else { None };
-    let (argv, local_decls, decl_attrs) = if matches!(decl_word.as_deref(), Some("local") | Some("declare")) {
+    let (argv, local_decls, decl_attrs) = if matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("readonly")) {
         let cmd_name = decl_word.unwrap();
         let mut rest = &rc.argv[idx + 1..];
         // Leading flags apply to every name that follows in this same
@@ -183,7 +183,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 [WordPart::Unquoted(s)]
                     if s.len() > 1
                         && s.starts_with('-')
-                        && s[1..].chars().all(|c| matches!(c, 'a' | 'A' | 'u' | 'l' | 'i')) =>
+                        && s[1..].chars().all(|c| matches!(c, 'a' | 'A' | 'u' | 'l' | 'i' | 'r')) =>
                 {
                     for c in s[1..].chars() {
                         match c {
@@ -192,6 +192,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                             'u' => attrs.upper = true,
                             'l' => attrs.lower = true,
                             'i' => attrs.integer = true,
+                            'r' => attrs.readonly = true,
                             _ => unreachable!(),
                         }
                     }

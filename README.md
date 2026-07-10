@@ -47,14 +47,14 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files, any fd (`3>file`, `4<&5`); fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) / here-strings (`<<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion); `cmd <<< "$var"` |
 | Process substitution | ✅ | `<(cmd)`/`>(cmd)` via a real pipe + `/dev/fd/N`, non-blocking and concurrent (Unix only) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`, `readonly`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask` on Unix) |
 | Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
 | `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions; clustered flags (`set -euo pipefail`) parse as in bash |
 | `set -u` (nounset) | ✅ | referencing an unset variable is an error; `:-`/`:=`/`:+`/`:?` and `$@`/`$*`/`$#`/`$?`/`$$` are exempt |
 | `set -o pipefail` | ✅ | a pipeline's status is the rightmost non-zero stage, not just its last; applies inside `$(...)` too |
 | `set -x` (xtrace) | ✅ | echoes each command (`$PS4`-prefixed) before running it; nesting in `$(...)` repeats `$PS4`'s first character |
 | `trap` | ✅ | `EXIT` (every exit path), `INT` (Ctrl-C at an idle prompt), and (Unix) `TERM`/`HUP` — real signals, interrupting a blocking wait immediately; numeric/`SIG`-prefixed/lowercase specs all accepted (`trap 'cmd' 15`) |
-| Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment; `declare`/`local` `-u`/`-l`/`-i` attribute transforms |
+| Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment; `declare`/`local` `-u`/`-l`/`-i` attribute transforms; `readonly`/`declare -r` read-only variables |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding); `set -- args…`/`set args…` reassigns them |
 | Indexed arrays | ✅ | `arr=(a b c)`, `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, `${#arr[@]}`, `${!arr[@]}`, sparse arrays, `arr[i]=`/`arr[i]+=`, `unset 'arr[i]'`, `local arr=(...)` |
 | Associative arrays | ✅ | `declare -A arr`, `arr[key]=val`, `${arr[key]}`/`${arr[@]}`/`${arr[*]}`, `${!arr[@]}` (keys), `${#arr[@]}`, `arr+=([k]=v ...)` merge-by-key, `unset 'arr[key]'`, `local`/`declare -A arr=(...)` |

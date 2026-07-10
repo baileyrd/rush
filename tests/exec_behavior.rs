@@ -2056,3 +2056,84 @@ fn trap_listing_prints_sig_prefixed_names() {
     let (out, _) = rush("trap 'echo E' EXIT; trap; trap - EXIT");
     assert_eq!(out, "trap -- 'echo E' EXIT\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn readonly_builtin_assigns_and_locks() {
+    // C45: `readonly` wasn't a builtin at all — `readonly x=1` was
+    // "command not found" and the assignment itself was silently lost.
+    let (out, _) = rush("readonly x=1; echo $x");
+    assert_eq!(out, "1\n");
+
+    // A later assignment is FATAL in a non-interactive shell (verified:
+    // bash aborts the whole script there), status 1.
+    let (out, status) = rush("readonly x=1; x=2; echo should_not_print");
+    assert_eq!(out, "");
+    assert_eq!(status, 1);
+    let (err, _) = rush_stderr("readonly x=1; x=2");
+    assert!(err.contains("x: readonly variable"), "got: {err:?}");
+
+    // `+=`, element writes, and a readonly `for` variable are fatal too.
+    let (out, status) = rush("readonly x=1; x+=2; echo nope");
+    assert_eq!((out.as_str(), status), ("", 1));
+    let (out, status) = rush("readonly arr=(a b); arr[0]=c; echo nope");
+    assert_eq!((out.as_str(), status), ("", 1));
+    let (out, status) = rush("readonly x=1; for x in a b; do echo loop; done");
+    assert_eq!((out.as_str(), status), ("", 1));
+
+    // `readonly z` (no value) leaves z genuinely unset but locked.
+    let (out, _) = rush("readonly z; echo ${z+set}notset");
+    assert_eq!(out, "notset\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_builtin_mediated_attempts_fail_without_aborting() {
+    // Unlike a bare assignment, `unset`/`export`/`local`/`readonly`
+    // attempts fail with status 1 and the script continues — verified
+    // against real bash for each.
+    let (out, _) = rush("readonly x=1; unset x 2>/dev/null; echo \"st=$? x=$x\"");
+    assert_eq!(out, "st=1 x=1\n");
+
+    let (out, _) = rush("readonly x=1; export x=2 2>/dev/null; echo st=$?");
+    assert_eq!(out, "st=1\n");
+
+    let (out, _) = rush("readonly x=1; f(){ local x; }; f 2>/dev/null; echo st=$?");
+    assert_eq!(out, "st=1\n");
+
+    let (out, _) = rush("readonly x=1; readonly x=9 2>/dev/null; echo \"st=$? x=$x\"");
+    assert_eq!(out, "st=1 x=1\n");
+
+    // A bare `export x` on a readonly name is fine — it only adds the
+    // export flag.
+    let (out, _) = rush("readonly x=1; export x; echo st=$?");
+    assert_eq!(out, "st=0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_listing_and_declare_r() {
+    // `readonly`/`readonly -p` list in bash's own format. (Not piped:
+    // like `declare`/`local`, the decl-path builtins aren't dispatched
+    // as one stage of a multi-stage pipeline — a pre-existing, shared
+    // limitation, not part of C45.)
+    let (out, _) = rush("readonly x=1; readonly -p");
+    assert!(out.lines().any(|l| l == "declare -r x=\"1\""), "got: {out:?}");
+    let (out, _) = rush("readonly arr=(a b); readonly");
+    assert!(out.lines().any(|l| l == "declare -ar arr=([0]=\"a\" [1]=\"b\")"), "got: {out:?}");
+
+    // `declare -r` and `local -r` reach the same flag.
+    let (out, status) = rush("declare -r y=5; y=6; echo nope");
+    assert_eq!((out.as_str(), status), ("", 1));
+    let (out, _) = rush("f(){ local -r v=5; echo v=$v; }; f; v=7; echo after=$v");
+    assert_eq!(out, "v=5\nafter=7\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn readonly_prefix_assignment_errors_but_still_runs() {
+    // Verified against real bash: the diagnostic prints, the command
+    // still runs, and the child does NOT see the refused new value.
+    let (out, _) = rush("readonly x=1; x=2 /bin/sh -c 'echo child_x=$x' 2>/dev/null; echo after");
+    assert_eq!(out, "child_x=\nafter\n");
+}

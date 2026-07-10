@@ -255,6 +255,11 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             // as if `in "$@"` had been written; an explicit `in` with no
             // words (`for x in; do ...`) is a real empty list instead.
             let values = if *has_in { crate::expand::expand_words(words)? } else { crate::vars::args() };
+            // A readonly loop variable is fatal, same as a bare assignment
+            // (verified: bash aborts before the first iteration).
+            if !values.is_empty() && crate::vars::is_readonly(var) {
+                return Err(format!("{var}: readonly variable"));
+            }
             let mut status = 0;
             for value in values {
                 crate::vars::set(var, &value);
@@ -791,12 +796,23 @@ fn assignment_only(pipeline: &Pipeline) -> bool {
     )
 }
 
-fn apply_assignments(pipeline: &Pipeline) {
+/// A bare-assignment statement targeting a readonly name is *fatal* in a
+/// non-interactive shell — real bash aborts the whole script there
+/// (verified: `readonly x=1; x=2; echo after` prints nothing after the
+/// error), unlike the builtin-mediated attempts (`unset`/`export`/
+/// `local`), which just fail with status 1 and continue. The `Err` here
+/// rides the same channel as an expansion error, which has exactly that
+/// abort behavior.
+fn apply_assignments(pipeline: &Pipeline) -> Result<(), String> {
     if let [Stage::Simple(cmd)] = pipeline.commands.as_slice() {
         for (name, op) in &cmd.assignments {
+            if crate::vars::is_readonly(name) {
+                return Err(format!("{name}: readonly variable"));
+            }
             crate::vars::assign(name, op);
         }
     }
+    Ok(())
 }
 
 /// If `cmd` is `command name [args...]` — the *execution* form, not
@@ -836,7 +852,7 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
     trace_pipeline(&pipeline);
 
     if assignment_only(&pipeline) {
-        apply_assignments(&pipeline);
+        apply_assignments(&pipeline)?;
         // POSIX: a variable-assignment-only command takes the exit status of
         // the last command substitution performed while expanding it, rather
         // than always 0 (`run_andor` sets `$?` from whatever we return here).
@@ -922,6 +938,7 @@ fn dispatch_builtin(cmd: &Command) -> i32 {
     match cmd.argv.first().map(String::as_str) {
         Some("local") => builtins::local_from_decls(&cmd.local_decls, cmd.decl_attrs),
         Some("declare") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
+        Some("readonly") => builtins::readonly_from_decls(&cmd.local_decls, cmd.decl_attrs),
         _ => builtins::try_run(&cmd.argv).unwrap_or(1),
     }
 }
@@ -1149,7 +1166,7 @@ fn capture_pipeline_expanded(raw: &RawPipeline, out: &mut String) -> Result<i32,
     let pipeline = crate::expand::expand(raw)?;
     trace_pipeline(&pipeline);
     if assignment_only(&pipeline) {
-        apply_assignments(&pipeline);
+        apply_assignments(&pipeline)?;
         let status = crate::vars::take_last_subst_status().unwrap_or(0);
         crate::vars::set_last_status(status);
         return Ok(status);
@@ -1532,6 +1549,14 @@ pub(crate) fn build_stage(
     command.env_clear();
     command.envs(crate::vars::exported());
     for (name, op) in &cmd.assignments {
+        // A prefix assignment naming a readonly variable errors but still
+        // runs the command, with the assignment dropped (the child sees
+        // the readonly's exported value, if any — not the new one) —
+        // verified directly against real bash (C45).
+        if crate::vars::is_readonly(name) {
+            eprintln!("rush: {name}: readonly variable");
+            continue;
+        }
         if let Some(value) = prefix_env_value(name, op) {
             command.env(name, value);
         }

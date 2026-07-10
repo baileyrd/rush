@@ -1357,3 +1357,29 @@ disposition, and no error appeared at registration time either.
 - Verified against real bash across every spelling, `trap - 15` removal
   (shell dies 143), both invalid-spec cases, and listing. Adds 1 unit
   test and 3 integration tests; full suite and clippy stay clean.
+
+### New: `readonly` / `declare -r` / `local -r` — read-only variables (C45)
+POSIX-mandated special builtin, present in every comparison shell
+including dash — and it wasn't just missing: `readonly x=1` was "command
+not found" *and* silently lost the assignment (parsed as an argument to
+the missing command).
+
+- **Built on C43's attribute machinery**: `readonly` is a new `Attrs`
+  field (so it can mark a still-unset name), enforced by a shared guard
+  on every mutation path in `vars.rs` plus a refusal in `unset`. The
+  builtin routes through the `local`/`declare` decl path, so array
+  literals (`readonly arr=(a b)`) and `-a`/`-A` compose; `declare -r`/
+  `local -r` reach the same flag, installing *after* the initializer so
+  the declaring assignment itself still works.
+- **Fatality split matches bash exactly** (probed case-by-case): a bare
+  assignment to a readonly (`x=2`, `x+=2`, `arr[0]=c`, a readonly `for`
+  variable) aborts the whole non-interactive script with status 1;
+  builtin-mediated attempts (`unset`/`export x=2`/`local`/`readonly
+  x=9`) fail with status 1 and continue. Bare `export x` succeeds (flag
+  only); a prefix assignment (`x=2 cmd`) errors but still runs the
+  command with the refused value dropped from the child env.
+- **`readonly`/`readonly -p`** list in bash's own `declare -r x="1"`
+  format (`-ar`/`-Ar` for arrays, bare `declare -r name` for unset).
+- Verified against real bash across fourteen probe scenarios (dash for
+  the POSIX abort). Adds 2 unit tests and 4 integration tests; full
+  suite and clippy stay clean.

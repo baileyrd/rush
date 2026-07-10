@@ -199,6 +199,7 @@ fn main() -> rustyline::Result<()> {
         }
         Some(file) => {
             vars::set_args(file.to_string(), args.get(2..).unwrap_or(&[]).to_vec());
+            vars::push_source(file); // `${BASH_SOURCE[0]}` (C67); empty under `-c`, same as bash
             match std::fs::read_to_string(file) {
                 Ok(src) => trap::exit_shell(run_source(&src)),
                 Err(e) => {

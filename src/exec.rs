@@ -179,6 +179,8 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     if crate::vars::noexec() {
         return Ok((0, false));
     }
+    // `$LINENO` (C67): the source line this pipeline started on.
+    crate::vars::set_current_line(list.first.line);
     // `trap 'cmd' DEBUG` (C65) fires before each pipeline here — bash
     // fires per *simple command*, so one `a | b` stage-pair is a single
     // firing in rush where bash may fire per stage; a documented
@@ -200,6 +202,7 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     let final_idx = list.rest.len().wrapping_sub(1);
     for (i, (connector, raw)) in list.rest.iter().enumerate() {
         if should_run(*connector, status) {
+            crate::vars::set_current_line(raw.line);
             crate::trap::fire_preserving("DEBUG");
             status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
@@ -592,9 +595,11 @@ fn call_function(argv: &[String]) -> Result<i32, String> {
     let saved = crate::vars::args();
     crate::vars::set_args(name0.clone(), argv[1..].to_vec());
     crate::vars::push_local_frame();
+    crate::vars::push_function(&argv[0]); // `${FUNCNAME[@]}` (C67)
 
     let result = exec_list(&body);
 
+    crate::vars::pop_function();
     let returned = crate::vars::returning();
     crate::vars::set_returning(None);
     crate::vars::set_args(name0, saved);
@@ -633,7 +638,9 @@ pub fn source_file(name: &str, args: &[String]) -> Result<i32, String> {
         crate::vars::set_args(name0.clone(), args.to_vec());
     }
 
+    crate::vars::push_source(&path.to_string_lossy()); // `${BASH_SOURCE[@]}` (C67)
     let result = exec_list(&list);
+    crate::vars::pop_source();
 
     let returned = crate::vars::returning();
     crate::vars::set_returning(None);
@@ -892,7 +899,7 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             drop(to_child_write);
             drop(from_child_read);
             drop(from_child_write);
-            let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false };
+            let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false, line: 0 };
             let status = run_foreground(&pipeline).unwrap_or(1);
             crate::trap::exit_shell(status);
         }

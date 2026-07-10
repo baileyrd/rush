@@ -55,6 +55,11 @@ pub enum Connector {
 #[derive(Debug, Clone)]
 pub struct RawPipeline {
     pub commands: Vec<RawCommand>,
+    /// 1-based source line the pipeline starts on (`$LINENO`, C67) —
+    /// computed from newline-token counts, so a here-doc body's own
+    /// newlines (swallowed by the lexer) don't advance it: a documented
+    /// approximation.
+    pub line: u32,
     /// A leading `!` — the pipeline's exit status is logically negated
     /// (0 ↔ 1), and the pipeline is exempt from `set -e` and the `ERR`
     /// trap even when the negated status is 1 (C53; matches bash).
@@ -446,7 +451,17 @@ impl Parser {
         Ok(AndOrList { first, rest })
     }
 
+    /// 1 + the number of newline tokens before `pos` — `$LINENO`'s value
+    /// for a pipeline starting at `pos`.
+    fn line_at(&self, pos: usize) -> u32 {
+        1 + self.toks[..pos.min(self.toks.len())]
+            .iter()
+            .filter(|t| matches!(t, Token::Newline))
+            .count() as u32
+    }
+
     fn parse_pipeline(&mut self) -> Result<RawPipeline, ParseError> {
+        let line = self.line_at(self.pos);
         // A leading `!` (possibly repeated — `! ! cmd` toggles, same as
         // bash) negates the whole pipeline's exit status.
         let mut negated = false;
@@ -462,7 +477,7 @@ impl Parser {
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
-        Ok(RawPipeline { commands, negated })
+        Ok(RawPipeline { commands, negated, line })
     }
 
     fn parse_command(&mut self) -> Result<RawCommand, ParseError> {

@@ -320,14 +320,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (22 done, 1 open — C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C66 are
-now done (re-closing Tiers I, II, and III completely) and the remaining
-7 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C67 are
+now done (re-closing Tiers I through IV completely) and the remaining
+6 (all Tier V, interactive UX) are open.
 
 ---
 
@@ -2753,7 +2753,7 @@ directly), and it isn't listed in the interactive `jobs` table, though
 against bash for the full echo→read round-trip, the named-group form,
 `$!`, and the kill/wait status. One integration test.
 
-### C67 — Rarer special variables: `$LINENO`, `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$EPOCHSECONDS`/`$EPOCHREALTIME` (tracked)
+### C67 — Rarer special variables: `$LINENO`, `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$EPOCHSECONDS`/`$EPOCHREALTIME` ✅ done
 A grab-bag of bash-specific special variables (ksh93/zsh have some under
 different names; none in dash/POSIX, which is the reason none of these
 made it into C41's POSIX-mandated set). All currently expand to empty
@@ -2772,6 +2772,27 @@ and executor, not just adding a scanner arm. **Effort: S** each for
 `$FUNCNAME`/`$BASH_SOURCE` (need a call-stack/source-stack maintained
 through `exec::call_function`/`source_file`); **M–L** for `$LINENO`
 specifically, given the AST-wide plumbing.
+
+Implemented, the whole bag — closing Tier IV completely. The clock/PRNG
+set are *dynamic* variables computed at read time in `vars::get`:
+`$RANDOM` is a seedable LCG in bash's 0..=32767 range (`RANDOM=42`
+makes the stream reproducible, matching bash — assignment re-seeds
+rather than stores); `$SECONDS` counts from shell start with
+`SECONDS=100` re-basing it; `$EPOCHSECONDS`/`$EPOCHREALTIME` read the
+system clock (the microsecond form agreeing with the second form,
+verified). `${FUNCNAME[@]}` is a real array mirrored from a call stack
+pushed/popped by `call_function` (innermost first; unset outside any
+function, like bash), and `${BASH_SOURCE[@]}` likewise from a
+source-file stack (the script at the bottom, `source`d files pushed;
+empty under `-c`, same as bash). `$LINENO` turned out cheaper than the
+M–L estimate: rather than threading line numbers through the whole AST,
+`RawPipeline` carries one `line` computed from newline-token counts at
+parse time, and `run_andor` publishes it before each pipeline — values
+byte-identical to bash for the same script file. Documented
+approximations: a here-doc body's own newlines don't advance `$LINENO`
+(the lexer swallows them), and `BASH_SOURCE` inside a function reflects
+the current source stack rather than the function's definition site.
+One integration test covers the bag.
 
 ### C68 — No syntax highlighting or live validation of the command line (tracked)
 Native in fish (real-time), available in zsh (`zsh-syntax-highlighting`),

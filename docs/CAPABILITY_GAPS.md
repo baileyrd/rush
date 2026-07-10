@@ -319,14 +319,14 @@ syntax directly.
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
-- **Tier III — scripting-safety idioms:** 10 (6 done, 4 open — C51–C54)
+- **Tier III — scripting-safety idioms:** 10 (7 done, 3 open — C52–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C50 are
-now done (re-closing Tiers I and II completely) and the remaining 23
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C51 are
+now done (re-closing Tiers I and II completely) and the remaining 22
 are open.
 
 ---
@@ -1590,7 +1590,7 @@ Verified against real bash: fresh-file create, refuse-and-preserve,
 `>|` override, `/dev/null`, `>>`, `&>`, `set +C`, and `$-` gaining and
 losing `C`. One integration test covers all of it.
 
-### C51 — `set -n` (noexec / syntax-check only) not supported (tracked)
+### C51 — `set -n` (noexec / syntax-check only) not supported ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh — the standard `sh -n
 script.sh` linting idiom (parse the whole script, report syntax errors,
 run nothing). Rush's `set_cmd` rejects `-n` outright, and there's no
@@ -1599,6 +1599,20 @@ parse-only mode at any entry point (`-c`, a script file, or interactive)
 the top-level exec loop parse and skip instead of run, touching all
 three invocation modes; rush's existing clean parse/exec separation
 makes this a natural, if not entirely trivial, fit.
+
+Implemented, and the clean parse/exec separation did make it small: a
+`NOEXEC` thread-local (surfacing as `n` in `$-`), checked at
+`exec::run_andor` — the one choke point every top-level and
+compound-body command funnels through — so everything still parses and
+nothing runs. `rush -n` (before `-c` or a script file) pre-sets the same
+flag, giving the standard `sh -n script.sh` lint: status 0 on clean
+syntax with zero execution, status 2 on a syntax error (matching bash's
+own 2). Two bash subtleties matched: mid-script `set -n` is one-way (the
+`set +n` that would undo it never executes — verified against bash), and
+an *interactive* shell ignores `set -n` entirely (bash does the same, to
+avoid locking the session out). Verified against bash for all of:
+mid-script skip, one-way behavior, `-n -c`, `-n file`, and both exit
+statuses. Two integration tests cover it.
 
 ### C52 — `set -o` long option names, and bare `set -o`/`set +o` listing (tracked)
 POSIX-mandated (the long names themselves); present in dash/bash/ksh/zsh.

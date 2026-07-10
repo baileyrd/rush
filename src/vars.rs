@@ -167,6 +167,10 @@ thread_local! {
     // `set -C` (noclobber, C50): a plain `>` redirect refuses to truncate
     // an existing regular file (see `exec::open_write`); `>|` overrides.
     static NOCLOBBER: RefCell<bool> = const { RefCell::new(false) };
+    // `set -n` (noexec, C51): parse but run nothing — see `exec::run_andor`.
+    // One-way in practice: once on, the `set +n` that would clear it never
+    // executes either (matching bash).
+    static NOEXEC: RefCell<bool> = const { RefCell::new(false) };
     // Declared variable attributes (`declare -u/-l/-i`, C43) — see `Attrs`'s
     // own doc comment for why this is a separate map rather than a `Var`
     // field.
@@ -213,6 +217,14 @@ pub fn xtrace() -> bool {
     XTRACE.with(|e| *e.borrow())
 }
 
+pub fn set_noexec(on: bool) {
+    NOEXEC.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn noexec() -> bool {
+    NOEXEC.with(|e| *e.borrow())
+}
+
 pub fn set_noclobber(on: bool) {
     NOCLOBBER.with(|e| *e.borrow_mut() = on);
 }
@@ -245,6 +257,9 @@ pub fn option_flags() -> String {
     }
     if interactive() {
         flags.push('i');
+    }
+    if noexec() {
+        flags.push('n');
     }
     if nounset() {
         flags.push('u');

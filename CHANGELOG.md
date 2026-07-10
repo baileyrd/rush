@@ -1446,3 +1446,13 @@ the explicit-fd form (`2>| file`) rides along free. Inherited (not new)
 divergence, documented: rush treats a failed redirect open as fatal
 where bash fails the one command and continues. Adds 1 integration
 test.
+
+### New: `set -n` (noexec) and `rush -n` syntax-check mode (C51)
+The standard `sh -n script.sh` linting idiom: parse everything, report
+syntax errors (status 2, same as bash), run nothing (status 0 when
+clean). A `NOEXEC` flag checked at `exec::run_andor` — the choke point
+every command funnels through — with `rush -n` pre-setting the same
+flag `set -n` uses. Matches bash's subtleties: mid-script `set -n` is
+one-way (the `set +n` after it never executes), and an interactive
+shell ignores it entirely. `n` appears in `$-`. Adds 2 integration
+tests.

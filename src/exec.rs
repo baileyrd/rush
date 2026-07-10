@@ -1319,24 +1319,36 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
     // clears `CLOEXEC` on the *new* descriptor regardless, so this doesn't
     // stop the child from reading its inherited fd 0 normally.
     if let Some(body) = heredoc {
-        let (read, write) = make_pipe()?;
-        set_cloexec(&read)?;
-        set_cloexec(&write)?;
-        let body = body.to_string();
-        std::thread::spawn(move || {
-            use std::io::Write;
-            let mut write = write;
-            let _ = write.write_all(body.as_bytes());
-        });
-        redirect_to(&mut guard, 0, read)?;
+        // Linux: back the here-doc with an in-memory file (no writer thread),
+        // so the rusty-libc backend's raw fork can't race a thread holding a
+        // lock. Other Unix: the background-thread pipe feeder (below).
+        #[cfg(target_os = "linux")]
+        {
+            let f = crate::sys::memfd_heredoc(body.as_bytes()).map_err(|e| e.to_string())?;
+            redirect_to(&mut guard, 0, f)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let (read, write) = make_pipe()?;
+            set_cloexec(&read)?;
+            set_cloexec(&write)?;
+            let body = body.to_string();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut write = write;
+                let _ = write.write_all(body.as_bytes());
+            });
+            redirect_to(&mut guard, 0, read)?;
+        }
     }
 
     Ok(guard)
 }
 
 /// Mark a descriptor close-on-exec, so a forked child that goes on to `exec`
-/// doesn't inherit it.
-#[cfg(unix)]
+/// doesn't inherit it. Only the non-Linux (thread-fed) here-doc path needs it;
+/// Linux backs here-docs with a memfd (already `MFD_CLOEXEC`).
+#[cfg(all(unix, not(target_os = "linux")))]
 fn set_cloexec(f: &File) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
     let fd = f.as_raw_fd();
@@ -1971,9 +1983,20 @@ pub(crate) fn build_stage(
         }
     }
 
-    // A here-document feeds stdin from a pipe we write after spawn.
-    if cmd.heredoc.is_some() {
-        stdin_sink = Some(Stdio::piped());
+    // A here-document feeds the child's stdin. Linux: an in-memory file, set
+    // as stdin directly (no writer thread — see `feed_heredoc`). Other Unix: a
+    // pipe we write after spawn.
+    if let Some(body) = cmd.heredoc.as_deref() {
+        #[cfg(target_os = "linux")]
+        {
+            let f = crate::sys::memfd_heredoc(body.as_bytes()).map_err(|e| e.to_string())?;
+            stdin_sink = Some(Stdio::from(f));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = body;
+            stdin_sink = Some(Stdio::piped());
+        }
     }
 
     if let Some(s) = stdin_sink {
@@ -2144,6 +2167,13 @@ fn open_write(file: &str, mode: crate::parser::RedirMode) -> Result<File, String
 
 /// Write a command's here-document body to its stdin on a background thread, so
 /// a large body can't deadlock against a child that hasn't started reading.
+///
+/// Non-Linux only: on Linux the here-doc is a memfd set as the child's stdin at
+/// spawn (`build_stage`), so there is no pipe to feed and — crucially — no
+/// background thread that a raw fork could race. There the child's `stdin` is
+/// `None` and this would be a no-op regardless; making it a compile-time no-op
+/// keeps the thread out of the Linux build entirely.
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
     if let Some(body) = &cmd.heredoc {
         if let Some(mut stdin) = child.stdin.take() {
@@ -2155,6 +2185,11 @@ pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
         }
     }
 }
+
+/// Linux no-op: the here-doc is already the child's stdin (a memfd), so there
+/// is nothing to feed and no thread to spawn. See the non-Linux variant.
+#[cfg(target_os = "linux")]
+pub(crate) fn feed_heredoc(_child: &mut Child, _cmd: &Command) {}
 
 /// A human-readable rendering of a pipeline, for the `jobs` listing. Only the
 /// Unix job runner uses it. A compound stage isn't reconstructed back to

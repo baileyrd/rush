@@ -9,12 +9,16 @@
 //! and types (`c_int`, `pid_t`, `rlimit`, …) are backend-independent and stay
 //! referenced as `libc::…`.
 //!
-//! ## fork stays on glibc
+//! ## fork
 //!
-//! Per `docs/LIBC_DEPENDENCY_ANALYSIS.md` §4.2, [`fork`] is **always** glibc's,
-//! in both backends: rush's forked children keep running the Rust interpreter
-//! without `exec`, and a raw `SYS_clone` would inherit glibc's malloc/stdio
-//! locks and risk a deadlock. `std::process::Command` likewise stays on std.
+//! The default backend uses glibc's `fork` (which resets glibc's internal
+//! malloc/stdio locks in the child). The `rusty-libc` backend uses a **raw**
+//! `clone(SIGCHLD)` fork, which does not — so it is only sound because rush is
+//! single-threaded at every fork point: on Linux the here-document feeders are
+//! backed by [`memfd_heredoc`] (an in-memory file) rather than background
+//! threads, so no other thread can be holding a lock across a fork. See
+//! `docs/LIBC_DEPENDENCY_ANALYSIS.md` §4.2. `std::process::Command` still uses
+//! std's own spawn path in both backends.
 //!
 //! ## errno
 //!
@@ -30,6 +34,24 @@
 
 pub use imp::*;
 
+/// Build a rewound, memory-backed file containing `body` — the thread-free
+/// here-document backing (Linux only). The caller either `dup2`s it onto a
+/// target fd (in-process compound) or hands it to a child as stdin. Replacing
+/// the old background writer thread with this is what lets the `rusty-libc`
+/// backend fork safely (no thread can hold a lock across the fork).
+#[cfg(target_os = "linux")]
+pub fn memfd_heredoc(body: &[u8]) -> std::io::Result<std::fs::File> {
+    use std::io::{Seek, Write};
+    use std::os::fd::FromRawFd;
+
+    let fd = imp::memfd_create_raw()?;
+    // SAFETY: `fd` is a fresh, exclusively-owned memfd descriptor.
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+    f.write_all(body)?;
+    f.rewind()?; // leave the offset at the start for the reader
+    Ok(f)
+}
+
 // ---- default backend: the libc crate -------------------------------------
 #[cfg(not(feature = "rusty-libc"))]
 mod imp {
@@ -43,6 +65,19 @@ mod imp {
     /// glibc `fork` (see the module note).
     pub unsafe fn fork() -> pid_t {
         unsafe { libc::fork() }
+    }
+
+    /// Create an anonymous in-memory file, returning its descriptor (Linux
+    /// only; backs [`super::memfd_heredoc`]).
+    #[cfg(target_os = "linux")]
+    pub fn memfd_create_raw() -> std::io::Result<std::os::fd::RawFd> {
+        // SAFETY: valid nul-terminated name; flags is a plain bitmask.
+        let fd = unsafe { libc::memfd_create(c"rush_heredoc".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(fd)
+        }
     }
 
     pub unsafe fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t {
@@ -158,14 +193,25 @@ mod imp {
         std::io::Error::from_raw_os_error(LAST_ERRNO.with(|c| c.get()))
     }
 
-    /// glibc `fork` (see the module note): stays on glibc even here. Reads
-    /// glibc's errno on failure into the facade's store.
+    /// Raw `clone(SIGCHLD)` fork (see the module note): sound because rush is
+    /// single-threaded at every fork point in this backend (Linux here-docs
+    /// are memfd-backed, not thread-fed).
     pub unsafe fn fork() -> pid_t {
-        let r = unsafe { libc::fork() };
-        if r == -1 {
-            LAST_ERRNO.with(|c| c.set(std::io::Error::last_os_error().raw_os_error().unwrap_or(0)));
+        match unsafe { process::fork() } {
+            Ok(pid) => pid,
+            Err(e) => {
+                stash(e);
+                -1
+            }
         }
-        r
+    }
+
+    /// Create an anonymous in-memory file, returning its descriptor (Linux
+    /// only; backs [`super::memfd_heredoc`]).
+    #[cfg(target_os = "linux")]
+    pub fn memfd_create_raw() -> std::io::Result<std::os::fd::RawFd> {
+        fd::memfd_create(c"rush_heredoc", fd::MFD_CLOEXEC)
+            .map_err(|e| std::io::Error::from_raw_os_error(e.code()))
     }
 
     pub unsafe fn waitpid(pid: pid_t, status: *mut c_int, options: c_int) -> pid_t {

@@ -1588,3 +1588,9 @@ caller-named variable" mechanism) is frame-scoped, local frames now
 capturing prior nameref mappings; circular refs stop following instead
 of hanging. Scalars and whole arrays work in both directions. Adds 1
 integration test.
+
+### New: `printf %q` (C63)
+Quotes an argument for reuse as shell input — bash/zsh's backslash
+style, `''` for empty, `$'...'` for control characters. Byte-identical
+to bash across the probe set; round-trips through `eval`. Adds 1
+integration test.

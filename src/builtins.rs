@@ -302,10 +302,44 @@ mod printf {
         }
 
         conv.spec = chars.next().ok_or("missing conversion specifier")?;
-        if !"diouxXcsb".contains(conv.spec) {
+        if !"diouxXcsbq".contains(conv.spec) {
             return Err(format!("`%{}': invalid conversion specification", conv.spec));
         }
         Ok(conv)
+    }
+
+    /// `%q`'s quoting: backslash-escape shell-special characters
+    /// (bash/zsh's own style; ksh93 prefers single quotes — a cosmetic,
+    /// documented difference), except control characters, which force the
+    /// `$'...'` form.
+    fn shell_quote_q(raw: &str) -> String {
+        if raw.is_empty() {
+            return "''".to_string();
+        }
+        if raw.chars().any(|c| c.is_control()) {
+            let mut out = String::from("$'");
+            for c in raw.chars() {
+                match c {
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    '\\' => out.push_str("\\\\"),
+                    '\'' => out.push_str("\\'"),
+                    c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('\'');
+            return out;
+        }
+        let mut out = String::new();
+        for c in raw.chars() {
+            if "|&;<>()$`\\\"' *?[]#~=%!{}".contains(c) || c == ' ' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
     }
 
     fn take_digits(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<usize> {
@@ -336,6 +370,11 @@ mod printf {
 
         let (body, is_numeric) = match conv.spec {
             's' => (truncate(raw, conv.precision), false),
+            // `%q` (C63): quote for reuse as shell input — bash/zsh's
+            // backslash style for special characters, `''` for an empty
+            // argument, `$'...'` when control characters are present
+            // (each verified against bash).
+            'q' => (shell_quote_q(raw), false),
             'b' => {
                 let mut expanded = String::new();
                 let mut chars = raw.chars().peekable();

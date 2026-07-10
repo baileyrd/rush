@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (18 done, 5 open — C63–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (19 done, 4 open — C64–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C62 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C63 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-11 are open.
+10 are open.
 
 ---
 
@@ -2610,7 +2610,7 @@ alongside prior values and attributes. Works for scalars and whole
 arrays in both directions (`ref[0]=Z` writes through; `out=(a b c)`
 returns an array). One integration test covers the matrix.
 
-### C63 — `printf %q` (tracked)
+### C63 — `printf %q` ✅ done
 Present in bash/zsh/ksh93 (not dash/POSIX, not fish) — quotes a string so
 it's safe to reuse as shell input, common in codegen and "print a
 copy-pasteable command" tooling. Rush's `printf` (C8) accepts only
@@ -2620,6 +2620,14 @@ conversion set and add a shell-quoting helper (backslash-escape style,
 matching bash/zsh; ksh93 prefers single-quote style, a cosmetic
 difference not worth chasing). No interaction with the rest of the
 expander.
+
+Implemented exactly per the sketch: `q` joins the accepted conversion
+set, backed by a quoting helper in bash/zsh's backslash style —
+shell-special characters escaped, `''` for an empty argument, and the
+`$'...'` form when control characters are present. Output verified
+byte-identical to bash across the probe set (quotes, spaces, `$`, `;`,
+empty, control characters), and the control-character form round-trips
+through `eval`. One integration test.
 
 ### C64 — Job-control niceties: `jobs -l`/`-p`, `kill -l` + a fuller signal table, `wait -n`, `disown` (tracked)
 A cluster of small, independently shippable job-control completeness

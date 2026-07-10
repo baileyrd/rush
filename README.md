@@ -38,6 +38,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Tab completion | ✅ | builtins and `$PATH` executables in command position; files elsewhere |
 | Persistent history | ✅ | stored in `~/.rush_history` |
 | History expansion (`!!`, `!n`, `!$`, `!*`, `!:n`) | ✅ | bash-style bang-history recall; interactive only, quoting/escaping matches bash |
+| History-based autosuggestions | ✅ | dimmed inline completion from history as you type (fish-style); accept with the right arrow |
 | Startup file | ✅ | sources `~/.rushrc` (if present) at interactive startup |
 | Prompt customization | ✅ | `PS1` (var or env), with `\w`/`\W`/`\u`/`\h`/`\$`/`\?`/`\n`/`\\`; falls back to `cwd $ ` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |

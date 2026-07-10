@@ -73,7 +73,12 @@ underway too: bang-history recall (C32) — `!!`, `!n`/`!-n`,
 `!:n` word designators, interactive-only exactly like real bash's own
 `histexpand` default — reuses the persistent history `rustyline` already
 provided, needing only a new textual preprocessing pass ahead of the
-parser.
+parser. History-based autosuggestions (C33) — a dimmed, greyed-out
+completion of the current line from history, fish's own signature
+feature — followed right behind it, turning out to be almost entirely
+`rustyline`'s own ready-made `HistoryHinter` and key bindings once
+`RushHelper` actually delegated to it instead of its previous no-op
+`Hinter` impl.
 
 ---
 
@@ -108,7 +113,7 @@ applicable to that shell's own model.
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Bang-history recall (`!!`/`!n`/`!$`/etc.) | ✅‖‖ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
-| History autosuggestion | ❌ | — | ❌ | ❌ | 🟡 | ✅ |
+| History autosuggestion | ✅*** | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
 
 \* Done for the interactive/script job-control path; a compound as one stage
@@ -191,6 +196,15 @@ word splitting for the designators (`echo "a b" c` then `!:1` gives
 rush's plain-`split_whitespace` `"a` rather than real bash's quote-aware
 `"a b"`).
 
+*** A dimmed, greyed-out inline suggestion of the rest of the most recent
+matching history entry, accepted with the right arrow at end of line —
+built almost entirely on `rustyline`'s own ready-made `HistoryHinter` and
+key bindings; rush adds the dimming and the wiring. A live-terminal
+rendering feature (bypassed entirely when stdin isn't a real TTY, same as
+every other rustyline editing feature), verified directly under a real
+pseudo-terminal rather than the piped-stdin pattern used elsewhere in
+this document.
+
 ---
 
 ## Summary counts
@@ -199,7 +213,7 @@ rush's plain-`split_whitespace` `"a` rather than real bash's quote-aware
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
-- **Tier V — interactive UX:** 3 (1 done)
+- **Tier V — interactive UX:** 3 (2 done)
 
 ---
 
@@ -1366,12 +1380,36 @@ across more than a dozen scenarios, and covered by integration tests
 running the actual compiled binary in piped/interactive mode. **Effort:
 S–M.**
 
-### C33 — History-based autosuggestions
+### C33 — History-based autosuggestions ✅ done
 Native in fish; common via plugin in zsh. Shows a greyed-out completion of
-the current line based on history as you type. A strong, well-scoped
-differentiator for rush: its custom `RushHelper` already implements
-rustyline's `Hinter` trait as a no-op — this is exactly the extension point
-that trait exists for. **Effort: M.**
+the current line based on history as you type.
+
+**Turned out much smaller than the M-effort estimate**: `rustyline` itself
+already ships a ready-made `hint::HistoryHinter` — searches history
+backward from the current entry for the most recent one that starts with
+what's typed so far, offering the remainder as the hint, with no
+suggestion when the line is empty or already an exact match. `RushHelper`
+(`src/completion.rs`) now holds one and delegates its own `Hinter::hint`
+straight to it, rather than the previous no-op impl. The only genuinely
+new code is `Highlighter::highlight_hint`, dimming the suggestion (ANSI
+`\x1b[2m...\x1b[0m`) so it visually reads as a suggestion rather than
+text already on the line — the same visual language fish and
+zsh-autosuggestions use. Accepting it (right arrow at end of line) and
+the underlying search are both rustyline's own key-binding/history
+machinery, unmodified.
+
+Verified end-to-end against the actual compiled binary under a real
+pseudo-terminal (`pty.fork()`): typing `echo he` after `echo hello world`
+is in history renders the typed prefix followed by the dimmed suggestion
+`llo world`; accepting it with the right arrow and pressing Enter runs
+the full `echo hello world` and prints `hello world`. This is inherently
+a live-terminal rendering feature — `Editor::readline` itself falls back
+to plain file-style line reading (no raw mode, no hint rendering at all)
+whenever stdin isn't a real TTY, which is also why it can't be covered by
+the piped-stdin integration-test pattern used for C32; covered instead by
+unit tests exercising `RushHelper`'s `Hinter`/`Highlighter` impls directly
+against a `rustyline::history::DefaultHistory` and a `Context::new`
+(rustyline's own testing constructor for exactly this).
 
 ### C34 — Argument- and context-aware completion
 Native and rich in fish; rich in zsh via compsys; bash gets it only via the

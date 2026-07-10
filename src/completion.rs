@@ -1,24 +1,30 @@
-//! Tab completion for the interactive REPL.
+//! Tab completion, and history-based hinting, for the interactive REPL.
 //!
-//! In command position (the first word of a pipeline/segment) this completes
-//! builtin names and executables found on `$PATH`; everywhere else it defers
-//! to rustyline's own `FilenameCompleter`.
+//! In command position (the first word of a pipeline/segment) completion
+//! completes builtin names and executables found on `$PATH`; everywhere else
+//! it defers to rustyline's own `FilenameCompleter`. Separately, as you type,
+//! a greyed-out inline suggestion (fish's/zsh-autosuggestions' "history
+//! autosuggestion") shows the rest of the most recent history entry that
+//! starts with what's typed so far — accept it with the right arrow at the
+//! end of the line, or just keep typing to ignore it.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
+use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 pub struct RushHelper {
     files: FilenameCompleter,
+    hints: HistoryHinter,
 }
 
 impl RushHelper {
     pub fn new() -> Self {
-        Self { files: FilenameCompleter::new() }
+        Self { files: FilenameCompleter::new(), hints: HistoryHinter::new() }
     }
 }
 
@@ -41,8 +47,19 @@ impl Completer for RushHelper {
 
 impl Hinter for RushHelper {
     type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
+        self.hints.hint(line, pos, ctx)
+    }
 }
-impl Highlighter for RushHelper {}
+impl Highlighter for RushHelper {
+    // Dims the suggestion (ANSI SGR 2) so it reads as a suggestion rather
+    // than text already on the line — the same visual language fish and
+    // zsh-autosuggestions use for this.
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Owned(format!("\x1b[2m{hint}\x1b[0m"))
+    }
+}
 impl Validator for RushHelper {}
 impl Helper for RushHelper {}
 
@@ -157,5 +174,40 @@ mod tests {
     fn matching_names_filters_by_prefix() {
         let names = ["cd", "cat", "echo", "export"];
         assert_eq!(matching_names(names, "e"), vec!["echo".to_string(), "export".to_string()]);
+    }
+
+    /// `rustyline::hint::HistoryHinter` only offers a hint with the cursor at
+    /// the end of the line (`pos == line.len()`) — matching fish/
+    /// zsh-autosuggestions' own behavior of only suggesting while typing at
+    /// the end, not mid-line editing.
+    #[test]
+    fn hints_the_rest_of_the_most_recent_matching_history_entry() {
+        use rustyline::history::{DefaultHistory, History};
+
+        let helper = RushHelper::new();
+        let mut history = DefaultHistory::new();
+        history.add("echo hello world").unwrap();
+        let ctx = Context::new(&history);
+
+        assert_eq!(helper.hint("echo he", 7, &ctx).as_deref(), Some("llo world"));
+    }
+
+    #[test]
+    fn no_hint_on_an_empty_line_or_an_exact_history_match() {
+        use rustyline::history::{DefaultHistory, History};
+
+        let helper = RushHelper::new();
+        let mut history = DefaultHistory::new();
+        history.add("echo hi").unwrap();
+        let ctx = Context::new(&history);
+
+        assert_eq!(helper.hint("", 0, &ctx), None);
+        assert_eq!(helper.hint("echo hi", 7, &ctx), None);
+    }
+
+    #[test]
+    fn highlight_hint_dims_the_suggestion() {
+        let helper = RushHelper::new();
+        assert_eq!(helper.highlight_hint("llo world"), "\x1b[2mllo world\x1b[0m");
     }
 }

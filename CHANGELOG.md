@@ -955,3 +955,32 @@ already provided.
   across more than a dozen scenarios. Adds 10 unit tests plus 9
   integration tests exercising the compiled binary in piped/interactive
   mode; full suite and clippy stay clean.
+
+### History-based autosuggestions (C33)
+A dimmed, greyed-out inline suggestion of the current line, completed
+from history as you type — fish's signature feature, common via plugin
+in zsh.
+
+- **`RushHelper` (`src/completion.rs`)** now holds a
+  `rustyline::hint::HistoryHinter` and delegates its own `Hinter::hint`
+  straight to it, replacing the previous no-op impl. `HistoryHinter` is
+  `rustyline`'s own ready-made hinter: searches history backward from the
+  current entry for the most recent one starting with what's typed so
+  far, offering the remainder as the hint (no suggestion on an empty line
+  or an exact match).
+- **`Highlighter::highlight_hint`** dims the suggestion (ANSI
+  `\x1b[2m...\x1b[0m`) so it reads as a suggestion rather than text
+  already on the line — the only genuinely new code this item needed;
+  accepting it (right arrow at end of line) is rustyline's own
+  pre-existing key binding, unmodified.
+- Verified end-to-end against the compiled binary under a real
+  pseudo-terminal (`pty.fork()`): typing `echo he` after `echo hello
+  world` is in history renders the dimmed suggestion `llo world`;
+  accepting it and pressing Enter runs the full command. Inherently a
+  live-terminal feature — `Editor::readline` falls back to plain
+  file-style reading (no hints at all) when stdin isn't a real TTY, so
+  it's covered by unit tests exercising `RushHelper`'s `Hinter`/
+  `Highlighter` impls directly against a `DefaultHistory` and
+  rustyline's own `Context::new` testing constructor, rather than the
+  piped-stdin integration pattern used elsewhere. Adds 3 unit tests; full
+  suite and clippy stay clean.

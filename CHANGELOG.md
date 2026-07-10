@@ -1048,3 +1048,51 @@ instead of the literal text `$FOO`.
   plus 2 integration tests; full suite and clippy stay clean (down to 9
   pre-existing warnings from 10 — an incidental improvement from
   restructuring the affected code, not a new fix).
+
+### Fix: `command -v`/`type`/`hash` (and spawning) not seeing an in-shell `PATH` change (C36)
+Closes out Tier II completely. `builtins::resolve_in_path` and
+`completion.rs`'s `$PATH`-scanner called `std::env::var_os("PATH")`
+directly — the real OS process environment — instead of the shell's own
+`PATH` variable, so a plain `PATH=$PATH:dir` was invisible to `command
+-v`/`type`/`hash`. Fixed with the same fallback `expand.rs` and `source`
+(C14) already use: `vars::get("PATH").or_else(|| std::env::var("PATH").ok())`.
+
+- **A deeper root cause turned up while re-verifying this doc's own
+  original claim that actually *running* the command already worked** —
+  it didn't, for the case that matters most: a bare `PATH=$PATH:dir` (no
+  `export`). Rush never seeded its own variable table from the inherited
+  process environment at startup, so the first assignment to `PATH` (or
+  any other already-exported, OS-inherited name) created a brand-new
+  internal entry marked `exported: false` — nothing to preserve, since
+  `PATH` had never been recorded as exported to begin with. Internal
+  lookups saw the update; `exec::build_stage`'s `command.envs(vars::exported())`
+  (which only adds/overrides on top of `Command`'s default full-
+  environment inheritance, never removes) fed the spawned child the
+  *original*, unextended `PATH` instead.
+- **Fix (`main.rs`)**: at startup, before any rc file or script runs,
+  every inherited environment variable is registered via
+  `vars::set_exported` — matching real bash's own rule that an
+  environment-inherited variable stays exported through a later plain
+  reassignment (`vars::set`'s existing-entry path already correctly
+  preserves whatever `exported` flag is there; there was just nothing to
+  preserve).
+- Verified directly against real bash: `PATH=$PATH:dir; command -v tool;
+  type tool; hash tool; tool` now matches bash's output and exit status
+  exactly, including the actual spawn. Adds 1 new integration test
+  (real temp directory + executable script + plain PATH extension across
+  all four); full suite and clippy stay clean.
+- Chasing this down turned up one further, narrower bug, deliberately
+  left for its own item: `unset` of an inherited/exported variable
+  doesn't stop a spawned child from still seeing it either — see C40
+  below.
+
+### Tracked: `unset` of an inherited/exported variable still reaches a spawned child (C40)
+Newly discovered while fixing C36, not yet fixed: `command.envs(vars::exported())`
+only adds/overrides entries on top of `Command`'s default full-
+environment inheritance — it never removes a key. So `unset PATH` (or any
+other exported name) only deletes rush's own internal record; a spawned
+child still inherits the original OS-level value regardless, since
+nothing calls `std::env::remove_var` or blocks default inheritance. Real
+bash's child genuinely no longer has the variable at all. See
+`docs/CAPABILITY_GAPS.md`'s C40 entry for the full writeup and fix
+options under consideration.

@@ -25,13 +25,18 @@ separate, never-re-expanded `WordPart::Literal("$")` for it instead of
 just stripping the backslash and leaving a bare `$` indistinguishable
 from a real, unescaped one); two more (C37, an unknown-command-aborts-
 the-script bug; C38, redirects to fd 3+ silently landing on fd 1) turned
-up while closing out Tier II, which is now down to a single open item
-(C36) — `local`, `getopts`,
-`command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
-`source`/`.`, `eval`, `exec`, and `umask` all landed alongside
-`read`/`printf`/`shift`. C36 (a PATH-visibility bug in
-`command`/`type`/`hash`) turned up while closing out `source`; C37
-while closing out `eval`; C38 while closing out `exec`. `set -euo
+up while closing out Tier II, which is now fully closed out too —
+`local`, `getopts`, `command`/`type`/`hash`, `wait` (with its own
+prerequisite, `$!`), `source`/`.`, `eval`, `exec`, and `umask` all landed
+alongside `read`/`printf`/`shift`. C36 (a PATH-visibility bug in
+`command`/`type`/`hash`, plus a deeper root cause — the shell never
+seeded its own variable table from the inherited environment at startup,
+so a *bare* `PATH=$PATH:dir` silently failed to reach a spawned child's
+own environment even though internal lookups saw it) turned up while
+closing out `source`; C37 while closing out `eval`; C38 while closing out
+`exec`. Chasing C36 down turned up one further, narrower item of its own
+— `unset` of an inherited/exported variable doesn't stop a spawned child
+from still seeing it, tracked as C40, still open. `set -euo
 pipefail` — the header nearly every production shell script opens with —
 now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
 and `-x` (C20, xtrace) alongside them. `TERM`/`HUP` traps (C21) now fire
@@ -227,8 +232,8 @@ completion *system* (as opposed to this fixed case list) provides.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 9 (7 done)
-- **Tier II — missing standard builtins:** 12 (11 done)
+- **Tier I — correctness/POSIX risk:** 10 (7 done)
+- **Tier II — missing standard builtins:** 12 (12 done — complete)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
 - **Tier V — interactive UX:** 3 (3 done — complete)
@@ -392,6 +397,27 @@ command, builtin or external. **Effort: M** — needs real per-fd tracking
 (open the target, `dup2` onto the actual requested fd) in both code paths,
 plus, for `exec`'s permanent form specifically, a way to keep an arbitrary
 fd open across the rest of the script rather than just 0/1/2.
+
+### C40 — `unset` of an inherited/exported variable doesn't stop a spawned child from still seeing it (tracked)
+Found while fixing C36: `exec::build_stage`/`run_foreground`'s
+`command.envs(vars::exported())` only *adds/overrides* entries on top of
+whatever `std::process::Command` already inherits from rush's own real OS
+environment by default (no `env_clear()` anywhere) — it never *removes*
+a key. So `unset`-ing a variable that came from the inherited process
+environment (`PATH`, or anything else genuinely exported) only deletes
+rush's own internal record of it; the child process still inherits the
+original OS-level value regardless, since nothing ever actually calls
+`std::env::remove_var` or blocks it from the default inheritance.
+Reproduces for any exported name: `unset PATH; some_command_only_on_the_
+now-supposedly-unset-PATH` still finds and runs it — real bash instead
+fails with "command not found" (status 127), since its child truly no
+longer has `PATH` at all. Silent wrongness, not an error, so it fits this
+tier. **Effort: M** — needs either `.env_remove(name)` calls threaded
+through both spawn paths for anything unset since the shell started, or
+switching to `.env_clear()` plus rebuilding the full child environment
+from `vars::exported()` (now that it's seeded with the inherited
+environment at startup, C36) on every spawn instead of relying on
+default inheritance at all.
 
 ---
 
@@ -601,20 +627,50 @@ search now sees the shell's actual PATH. The same root-cause bug still
 affects `command -v`/`type`/`hash` (C12, already shipped) — left alone here
 as out of scope for this item; worth its own future fix.
 
-### C36 — `command -v`/`type`/`hash` don't see in-shell `PATH` changes (tracked)
+### C36 — `command -v`/`type`/`hash` don't see in-shell `PATH` changes (tracked) ✅ done
 Found while fixing C14's own PATH search (see above): `builtins::resolve_in_path`
 (backing `command -v`/`command -V`/`type`/`hash`) and `completion.rs`'s
-`$PATH`-scanner all call `std::env::var_os("PATH")` directly — the *real*
+`$PATH`-scanner all called `std::env::var_os("PATH")` directly — the *real*
 OS process environment — rather than the shell's own `PATH` variable. A
-script that does a plain (or even `export`ed) `PATH=$PATH:dir` assignment
-and then runs `command -v tool`/`type tool`/`hash tool` for something in
-`dir` gets a false "not found", even though actually *running* `tool`
-works fine (spawning goes through `exec::build_stage`, which correctly
-threads exported vars into the child's environment). Silent wrongness for
-any script that extends `PATH` before checking a command's availability.
-**Effort: S** — same one-line fix as C14's (`vars::get("PATH").or_else(||
-std::env::var("PATH").ok())`), applied at each of the two remaining call
-sites.
+script that did a plain `PATH=$PATH:dir` assignment and then ran
+`command -v tool`/`type tool`/`hash tool` for something in `dir` got a
+false "not found". Fixed with the same one-line change as C14's
+(`vars::get("PATH").or_else(|| std::env::var("PATH").ok())`), applied at
+each of the two remaining call sites.
+
+**A deeper root cause turned up while verifying "actually running `tool`
+works fine" (this doc's own original claim, made when C36 was first
+tracked) — it doesn't, for the case that matters most**: a *bare*
+`PATH=$PATH:dir` (no `export` keyword) is exactly the same reassignment a
+production script would actually write, and rush had never seeded its own
+variable table from the inherited process environment at startup. So the
+first assignment to `PATH` (or any other already-exported, OS-inherited
+name) created a *brand-new* internal entry marked `exported: false` —
+`vars::set`'s existing-entry path already correctly preserves whatever
+`exported` flag is there (verified by an existing test,
+`set_get_unset_and_export`), but there was nothing to preserve, since
+`PATH` had never been recorded as exported in the first place. The result:
+internal lookups (this fix, `command -v`/`type`/`hash`, and `expand.rs`'s
+own `$PATH` reads) saw the update correctly, but `exec::build_stage`'s
+`command.envs(vars::exported())` — which only *adds/overrides* entries on
+top of `Command`'s default full-environment inheritance, never removes —
+silently fed the spawned child the *original*, unextended `PATH` instead.
+Fixed in `main.rs`: at startup, before any rc file or script runs, every
+inherited environment variable is registered via `vars::set_exported`,
+matching real bash's own rule that an environment-inherited variable
+stays exported through a later plain reassignment. Verified directly
+against real bash: `PATH=$PATH:dir; command -v tool; type tool; hash
+tool; tool` now matches bash's output and exit status exactly, including
+the actual spawn (previously `tool` alone still failed with the raw OS
+spawn error even after the `command -v`/`type`/`hash` half of this fix).
+
+Chasing this down turned up one further, narrower bug — deliberately left
+for its own item rather than folded into this one's effort budget: `unset`
+of an inherited/exported variable doesn't stop it from reaching a spawned
+child either (only rush's own record is deleted; nothing calls
+`std::env::remove_var` or blocks `Command`'s default inheritance) — see
+C40. **Effort: S** for the two-call-site PATH fix; the startup-seeding fix
+alongside it turned out to be a similarly small, contained change.
 
 ### C15 — `eval` ✅ done
 Needed for constructing and running commands dynamically. Rush's

@@ -279,7 +279,7 @@ fn job_spec_candidates(ids: Vec<usize>, prefix: &str) -> Vec<Pair> {
 /// for a linear directory scan to matter.
 fn path_executables() -> Vec<String> {
     let mut out = Vec::new();
-    let Some(path) = std::env::var_os("PATH") else {
+    let Some(path) = crate::vars::get("PATH").or_else(|| std::env::var("PATH").ok()) else {
         return out;
     };
     for dir in std::env::split_paths(&path) {

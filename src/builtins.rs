@@ -1159,7 +1159,7 @@ fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
         let p = Path::new(name);
         return is_executable_file(p).then(|| p.to_path_buf());
     }
-    let path = std::env::var_os("PATH")?;
+    let path = crate::vars::get("PATH").or_else(|| std::env::var("PATH").ok())?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))

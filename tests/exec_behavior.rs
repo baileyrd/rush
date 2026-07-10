@@ -743,6 +743,41 @@ fn command_type_and_hash_builtins() {
 
 #[cfg(unix)]
 #[test]
+fn command_v_type_and_hash_see_a_plain_path_extension_and_spawning_honors_it_too() {
+    // C36: `command -v`/`type`/`hash` used to call `std::env::var_os("PATH")`
+    // directly — the *real* OS process environment — rather than the
+    // shell's own `PATH` variable, so a plain (non-`export`ed)
+    // `PATH=$PATH:dir` was invisible to them even though the directory's
+    // contents were genuinely runnable. Root cause ran deeper than just
+    // those three builtins, though: without seeding the shell's variable
+    // table from the inherited environment at startup, a *bare*
+    // reassignment to an already-exported variable like `PATH` created a
+    // brand new, non-exported entry — so the *updated* value never made it
+    // into a spawned child's environment either, even though internal
+    // lookups already saw it.
+    let dir = std::env::temp_dir().join(format!("rush_c36_pathdir_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("rush_c36_tool");
+    std::fs::write(&tool, "#!/bin/sh\necho ran-c36-tool\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let dir_str = dir.to_str().unwrap();
+    let src = format!(
+        "PATH=$PATH:{dir_str}; command -v rush_c36_tool; type -t rush_c36_tool; hash rush_c36_tool; echo hash=$?; rush_c36_tool"
+    );
+    let (out, status) = rush(&src);
+    assert_eq!(
+        out,
+        format!("{dir_str}/rush_c36_tool\nfile\nhash=0\nran-c36-tool\n")
+    );
+    assert_eq!(status, 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn wait_builtin_and_last_bg_pid() {
     // `$!` is unset until something's been backgrounded.
     assert_eq!(rush("x=\"[$!]\"; echo \"$x\"").0, "[]\n");

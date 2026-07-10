@@ -146,6 +146,23 @@ fn main() -> rustyline::Result<()> {
     #[cfg(unix)]
     trap::install_signal_handlers();
 
+    // Seed the shell's own variable table with the inherited process
+    // environment, marked exported — matching real bash: an env-inherited
+    // variable stays exported through a later *plain* reassignment (no
+    // fresh `export` keyword needed), since `vars::set`'s existing-entry
+    // path preserves whatever `exported` flag is already there. Without
+    // this, a bare `PATH=$PATH:dir` (no `export`) would insert a *new*,
+    // non-exported `PATH` entry — internal PATH lookups (`vars::get`) would
+    // see the update, but the value threaded into any child process
+    // spawned afterward (`exec::build_stage`'s `vars::exported()`) would
+    // not, silently reverting to the original PATH for `dir`'s contents.
+    // Found and fixed alongside C36, which is this same root cause's
+    // narrower, easier-to-hit symptom (`command -v`/`type`/`hash` calling
+    // `std::env::var_os("PATH")` directly instead of the shell's own).
+    for (name, value) in std::env::vars() {
+        vars::set_exported(&name, &value);
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     // Non-interactive modes: `rush -c "cmd" [name args…]` and `rush FILE [args…]`.

@@ -7,10 +7,12 @@ description = "A small, bash-compatible shell written in Rust"
 repository = "https://github.com/baileyrd/rush"
 
 [dependencies]
-rustyline = "18.0.0"
 # `[[ $s =~ regex ]]` (C56). The practical ERE engine; its syntax isn't a
 # byte-for-byte POSIX ERE match, but agrees on everything the tests cover.
 regex = "1"
+# Display-column widths for the hand-rolled line editor's render engine
+# (src/editor.rs) — Unicode tables only, no code of consequence.
+unicode-width = "0.2"
 
 # Job control (process groups, terminal hand-off, signals) is Unix-only; the
 # raw libc bindings are the most stable surface for it.

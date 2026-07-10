@@ -1689,3 +1689,28 @@ its editor with the new `EditMode` before the next prompt, re-applying
 the helper and abbreviation binding and carrying the in-memory history
 across entry by entry. No `$-` letter, matching bash. Adds 1
 integration test.
+
+### New: hand-rolled line editor replaces rustyline; `$RPS1` right prompt (C71)
+Closes the last open capability-gap item — and the whole C1–C73 set.
+C71 (a zsh-`$RPS1`/fish-style right-side prompt) was dependency-blocked
+on rustyline having no right-prompt concept anywhere in its
+architecture, so rustyline is gone: `src/editor.rs` now owns the
+terminal directly — termios raw mode behind an RAII restore guard, a
+CSI key decoder with poll-based lone-ESC disambiguation, and a repaint
+engine doing its own ANSI-aware display-width and soft-wrap math
+(`unicode-width` is the one new dependency). Owning the repaint makes
+the right prompt trivial: `$RPS1` is expanded fresh each prompt and
+drawn flush-right whenever the input hasn't grown into it, exactly
+zsh's behavior. Nothing rustyline provided was dropped: emacs keys, a
+vi keymap (now switchable live per-read — `set -o vi` no longer
+rebuilds the editor or risks history), history + Ctrl-R incremental
+search, tab completion with a new self-contained filename completer,
+the C69 columned listing, C33 hints, C68 highlighting, and C70
+abbr-on-space all carry over; `completion.rs` is now pure
+candidate/hint/highlight logic with no editor-crate types. Verified
+under a real terminal by a new Python `pty.fork()` harness
+(`tests/pty/editor_pty_test.py`, 14 scenarios) — which caught a real
+bug: reading via `io::stdin()`'s buffer made `poll(2)` on fd 0 lie, so
+arrow keys decoded as ESC + literal `[A`; fd 0 is now read raw.
+Non-tty stdin falls back to a plain reader, so scripted/piped use is
+unchanged.

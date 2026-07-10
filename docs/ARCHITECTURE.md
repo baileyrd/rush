@@ -130,23 +130,38 @@ read-eval-print loop and all I/O concerns:
   used for scripts and `-c`, so an error inside it prints to stderr but
   doesn't stop the shell from starting. A missing or unreadable file is
   silently fine.
-- Translates `rustyline` signals: **Ctrl-C** (`Interrupted`) abandons the line
+- Translates editor results: **Ctrl-C** (`Interrupted`) abandons the line
   and continues; **Ctrl-D** (`Eof`) on an empty line breaks the loop.
 - Delegates parsing and execution, printing any error as `rush: …` to stderr
   without exiting.
-- Wires `completion::RushHelper` into the `Editor` via `set_helper`, so Tab
-  completion (see `completion.rs` below) is live for the whole session.
+
+### `editor.rs` — hand-rolled line editor
+Rush's own replacement for the `rustyline` dependency. Raw terminal mode
+(termios, RAII-restored), unbuffered fd-0 key decoding (UTF-8 + escape
+sequences, with a short poll disambiguating a lone ESC), and a render
+engine that repaints the edit region per keystroke: display-width math
+(ANSI-aware, wide-character-correct via `unicode-width`), soft-wrap row
+accounting with forced wraps at exact column boundaries, live syntax
+highlighting, the dimmed history hint, and the `$RPS1` right prompt —
+possible at all only because rush owns this layer. Keymaps: the emacs
+set, plus a vi-mode subset under `set -o vi` (checked live per
+`read_line`). History is in-memory with consecutive-dedup and plain-file
+persistence (tolerating rustyline's old `#V2` header); Ctrl-R is an
+incremental reverse search. Tab inserts the longest common completion
+prefix, then prints the columned candidate list. A non-tty stdin falls
+back to a plain silent read. End-to-end coverage lives in
+`tests/pty/editor_pty_test.py`, driven under a real pseudo-terminal.
 
 ### `completion.rs` — tab completion
-Implements rustyline's `Completer` (plus no-op `Hinter`/`Highlighter`/
-`Validator` — required by the `Helper` bundle trait but not needed here).
+Pure candidate/hint/highlight logic the editor calls into (no trait
+plumbing since the rustyline removal).
 `in_command_position` is a rough, not lexer-accurate check: everything since
 the last separator (`|`, `;`, `&`, `(`, newline), trimmed of leading
 whitespace, contains no whitespace of its own. In command position, completes
 against `builtins::all_names()` (builtins plus, on Unix, `job`'s
 `jobs`/`fg`/`bg`/`kill`) and every executable found scanning `$PATH` fresh on
 each call — no caching, since PATH rarely has enough entries for a linear scan
-to matter. Everywhere else, delegates to rustyline's own `FilenameCompleter`.
+to matter. Everywhere else, falls back to plain filename completion.
 
 ### `lexer.rs` — tokenizer
 A hand-written, single-pass scanner over a `Peekable<Chars>`. It produces a flat

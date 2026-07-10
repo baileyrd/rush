@@ -8,119 +8,134 @@
 //! `export`/`unset`/`local`/`declare`'s arguments complete variable names,
 //! `alias`/`unalias`'s complete existing alias names, and (Unix only)
 //! `fg`/`bg`/`kill`/`wait`'s complete `%n` job specs from the live job table.
-//! Everything else still falls through to rustyline's own `FilenameCompleter`.
+//! Everything else falls through to plain filename completion.
 //! Separately, as you type, a greyed-out inline suggestion (fish's/
 //! zsh-autosuggestions' "history autosuggestion") shows the rest of the most
 //! recent history entry that starts with what's typed so far — accept it
 //! with the right arrow at the end of the line, or just keep typing to
 //! ignore it.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 
-use rustyline::completion::{Completer, FilenameCompleter, Pair};
-use rustyline::highlight::Highlighter;
-use rustyline::hint::{Hinter, HistoryHinter};
-use rustyline::validate::Validator;
-use rustyline::{Context, Helper};
-
-pub struct RushHelper {
-    files: FilenameCompleter,
-    hints: HistoryHinter,
+/// One completion candidate: the text shown in the columned list, and the
+/// text inserted into the buffer.
+pub struct Candidate {
+    pub display: String,
+    pub replacement: String,
 }
 
-impl RushHelper {
-    pub fn new() -> Self {
-        Self { files: FilenameCompleter::new(), hints: HistoryHinter::new() }
-    }
+/// A `Candidate` whose display and replacement are the same name.
+fn plain(name: String) -> Candidate {
+    Candidate { display: name.clone(), replacement: name }
+}
 
-    /// `cd`'s own argument: reuses rustyline's own `FilenameCompleter` (so
-    /// path-splitting, escaping, and matching against the actual filesystem
-    /// stay identical to ordinary file completion), then filters its
-    /// candidates down to directories only — matching fish/zsh's own default
-    /// `cd` completion, unlike bash's, which offers plain files alongside
-    /// directories without the separate bash-completion project.
-    fn complete_directory(&self, line: &str, pos: usize) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let (start, candidates) = self.files.complete_path(line, pos)?;
-        let dirs = candidates.into_iter().filter(|p| is_directory(&p.replacement)).collect();
-        Ok((start, dirs))
+/// The completion entry point: candidates for the word at `pos`, plus the
+/// byte offset that word starts at (the editor replaces `start..pos`).
+pub fn complete(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
+    if in_command_position(line, pos) {
+        return complete_command(line, pos);
+    }
+    if let Some(result) = complete_variable(line, pos) {
+        return result;
+    }
+    match current_command(line, pos) {
+        Some("cd") => complete_directory(line, pos),
+        Some("export") | Some("unset") | Some("local") | Some("declare") => {
+            complete_variable_name_arg(line, pos)
+        }
+        Some("alias") | Some("unalias") => complete_alias_name(line, pos),
+        #[cfg(unix)]
+        Some("fg") | Some("bg") | Some("kill") | Some("wait") => complete_job_spec(line, pos),
+        _ => complete_path(line, pos),
     }
 }
 
-/// Whether `path` (a `FilenameCompleter` candidate's replacement text, so
-/// relative to the shell's own cwd unless absolute) names a directory.
-/// `FilenameCompleter` appends a trailing path separator to directory
-/// candidates — stripped first since the filesystem check needs the bare
-/// path.
+/// Plain filename completion — the fallback for anything without a more
+/// specific completer. The word splits at its last `/`: the directory
+/// part is scanned (with a leading `~` resolved through `$HOME` for the
+/// scan while the replacement keeps the user's own spelling), dotfiles
+/// offered only when the typed name already starts with a dot, and
+/// directory candidates get a trailing `/` so completion can keep
+/// descending.
+fn complete_path(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
+    let start = word_start(line, pos);
+    let word = &line[start..pos];
+    let (dir_part, name_prefix) = match word.rfind('/') {
+        Some(i) => (&word[..=i], &word[i + 1..]),
+        None => ("", word),
+    };
+    let scan_dir = if dir_part.is_empty() {
+        ".".to_string()
+    } else if let Some(rest) = dir_part.strip_prefix("~/") {
+        format!("{}/{}", crate::vars::get("HOME").unwrap_or_default(), rest)
+    } else {
+        dir_part.to_string()
+    };
+    let mut candidates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&scan_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(name_prefix) || (name.starts_with('.') && !name_prefix.starts_with('.')) {
+                continue;
+            }
+            let is_dir = entry.path().is_dir();
+            let display = if is_dir { format!("{name}/") } else { name.clone() };
+            let replacement = format!("{dir_part}{name}{}", if is_dir { "/" } else { "" });
+            candidates.push(Candidate { display, replacement });
+        }
+    }
+    candidates.sort_by(|a, b| a.display.cmp(&b.display));
+    (start, candidates)
+}
+
+/// `cd`'s own argument: ordinary path completion filtered down to
+/// directories only — matching fish/zsh's own default `cd` completion,
+/// unlike bash's, which offers plain files alongside directories without
+/// the separate bash-completion project.
+fn complete_directory(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
+    let (start, candidates) = complete_path(line, pos);
+    let dir_part_end = line[start..pos].rfind('/').map(|i| start + i + 1).unwrap_or(start);
+    let _ = dir_part_end;
+    (start, candidates.into_iter().filter(|c| is_directory(&c.replacement)).collect())
+}
+
+/// Whether `path` (a candidate's replacement text, so relative to the
+/// shell's own cwd unless absolute — with a leading `~` resolved through
+/// `$HOME` first) names a directory.
 fn is_directory(path: &str) -> bool {
-    let trimmed = path.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let resolved = if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", crate::vars::get("HOME").unwrap_or_default(), rest)
+    } else {
+        path.to_string()
+    };
+    let trimmed = resolved.trim_end_matches(std::path::MAIN_SEPARATOR);
     std::path::Path::new(trimmed).is_dir()
 }
 
-impl Completer for RushHelper {
-    type Candidate = Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        if in_command_position(line, pos) {
-            return Ok(complete_command(line, pos));
-        }
-        if let Some(result) = complete_variable(line, pos) {
-            return Ok(result);
-        }
-        match current_command(line, pos) {
-            Some("cd") => self.complete_directory(line, pos),
-            Some("export") | Some("unset") | Some("local") | Some("declare") => {
-                Ok(complete_variable_name_arg(line, pos))
-            }
-            Some("alias") | Some("unalias") => Ok(complete_alias_name(line, pos)),
-            #[cfg(unix)]
-            Some("fg") | Some("bg") | Some("kill") | Some("wait") => {
-                Ok(complete_job_spec(line, pos))
-            }
-            _ => self.files.complete_path(line, pos),
-        }
+/// The history autosuggestion (C33): the rest of the most recent history
+/// entry starting with `line` — only for a non-empty line, and never when
+/// the line already *is* that entry. (The editor only asks with the
+/// cursor at the end of the line, matching fish/zsh-autosuggestions.)
+pub fn hint(line: &str, history: &[String]) -> Option<String> {
+    if line.is_empty() {
+        return None;
     }
+    history
+        .iter()
+        .rev()
+        .find(|h| h.starts_with(line) && h.len() > line.len())
+        .map(|h| h[line.len()..].to_string())
 }
 
-impl Hinter for RushHelper {
-    type Hint = String;
-
-    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
-        self.hints.hint(line, pos, ctx)
-    }
-}
-impl Highlighter for RushHelper {
-    // Dims the suggestion (ANSI SGR 2) so it reads as a suggestion rather
-    // than text already on the line — the same visual language fish and
-    // zsh-autosuggestions use for this.
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[2m{hint}\x1b[0m"))
-    }
-
-    // Live syntax highlighting (C68), fish-style: command words are green
-    // when they resolve (keyword/builtin/function/alias/`$PATH`) and red
-    // when they don't; strings yellow (an *unmatched* quote's span red —
-    // the live-validation half); comments dimmed; `$`-expansions cyan;
-    // operators magenta. Built on a small, error-tolerant span scanner —
-    // deliberately not the real lexer, which returns tokens without byte
-    // spans and hard-errors on exactly the incomplete input an
-    // in-progress line is made of.
-    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-        Cow::Owned(highlight_line(line))
-    }
-
-    fn highlight_char(&self, _line: &str, _pos: usize, _kind: rustyline::highlight::CmdKind) -> bool {
-        true
-    }
-}
-
-/// Classify `line` into colored spans — see `Highlighter::highlight`.
-fn highlight_line(line: &str) -> String {
+/// Classify `line` into colored spans — live syntax highlighting (C68),
+/// fish-style: command words are green when they resolve
+/// (keyword/builtin/function/alias/`$PATH`) and red when they don't;
+/// strings yellow (an *unmatched* quote's span red — the live-validation
+/// half); comments dimmed; `$`-expansions cyan; operators magenta. Built
+/// on a small, error-tolerant span scanner — deliberately not the real
+/// lexer, which returns tokens without byte spans and hard-errors on
+/// exactly the incomplete input an in-progress line is made of.
+pub fn highlight_line(line: &str) -> String {
     const RESET: &str = "\x1b[0m";
     const GREEN: &str = "\x1b[32m";
     const RED: &str = "\x1b[31m";
@@ -222,9 +237,6 @@ fn highlight_line(line: &str) -> String {
     }
     out
 }
-impl Validator for RushHelper {}
-impl Helper for RushHelper {}
-
 /// The abbreviation expansion (C70) that should replace the word ending
 /// at `pos`, if any: the word must be a defined abbreviation *and* be in
 /// command position — pure logic, unit-testable apart from the key-event
@@ -246,29 +258,6 @@ pub(crate) fn abbr_expansion(line: &str, pos: usize) -> Option<(usize, String)> 
         return None;
     }
     crate::alias::abbr_get(word).map(|exp| (start, exp))
-}
-
-/// `ConditionalEventHandler` bound to the space key (C70): when the word
-/// just typed is a defined abbreviation in command position, rewrite it
-/// in place (visible and editable before Enter — fish's `abbr`
-/// behavior); otherwise fall through to inserting a plain space.
-pub struct AbbrSpaceHandler;
-
-impl rustyline::ConditionalEventHandler for AbbrSpaceHandler {
-    fn handle(
-        &self,
-        _evt: &rustyline::Event,
-        _n: rustyline::RepeatCount,
-        _positive: bool,
-        ctx: &rustyline::EventContext,
-    ) -> Option<rustyline::Cmd> {
-        let (start, expansion) = abbr_expansion(ctx.line(), ctx.pos())?;
-        let word_len = ctx.line()[start..ctx.pos()].chars().count();
-        Some(rustyline::Cmd::Replace(
-            rustyline::Movement::BackwardChar(u16::try_from(word_len).unwrap_or(u16::MAX) as rustyline::RepeatCount),
-            Some(format!("{expansion} ")),
-        ))
-    }
 }
 
 /// The start (byte offset into `line`) of the current pipeline/segment
@@ -309,18 +298,18 @@ fn word_start(line: &str, pos: usize) -> usize {
         .unwrap_or(0)
 }
 
-fn complete_command(line: &str, pos: usize) -> (usize, Vec<Pair>) {
+fn complete_command(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     let start = word_start(line, pos);
     let prefix = &line[start..pos];
 
     let mut seen = HashSet::new();
-    let mut candidates: Vec<Pair> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for name in matching_names(crate::builtins::all_names(), prefix)
         .into_iter()
         .chain(matching_names(path_executables(), prefix))
     {
         if seen.insert(name.clone()) {
-            candidates.push(Pair { display: name.clone(), replacement: name });
+            candidates.push(plain(name));
         }
     }
     candidates.sort_by(|a, b| a.display.cmp(&b.display));
@@ -346,7 +335,7 @@ fn matching_names<S: AsRef<str>>(names: impl IntoIterator<Item = S>, prefix: &st
 /// specially unwrapped out of an open double quote (`"$HO` completes as a
 /// literal word starting with `"`, not as a variable reference) — matching
 /// this module's existing not-lexer-accurate approach elsewhere.
-fn complete_variable(line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
+fn complete_variable(line: &str, pos: usize) -> Option<(usize, Vec<Candidate>)> {
     let start = word_start(line, pos);
     let word = &line[start..pos];
     let (prefix, braced) = if let Some(rest) = word.strip_prefix("${") {
@@ -371,7 +360,7 @@ fn complete_variable(line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
         .into_iter()
         .map(|n| {
             let replacement = if braced { format!("${{{n}}}") } else { format!("${n}") };
-            Pair { display: n, replacement }
+            Candidate { display: n, replacement }
         })
         .collect();
     Some((start, candidates))
@@ -391,7 +380,7 @@ fn variable_names() -> Vec<String> {
 /// Completes a variable-name argument (`export`/`unset`/`local`/`declare`) —
 /// not a flag (`-x`, `-A`, …), which this deliberately leaves uncompleted
 /// rather than nonsensically offering variable names for it.
-fn complete_variable_name_arg(line: &str, pos: usize) -> (usize, Vec<Pair>) {
+fn complete_variable_name_arg(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     let start = word_start(line, pos);
     let prefix = &line[start..pos];
     if prefix.starts_with('-') {
@@ -399,14 +388,14 @@ fn complete_variable_name_arg(line: &str, pos: usize) -> (usize, Vec<Pair>) {
     }
     let mut names = variable_names();
     names.retain(|n| n.starts_with(prefix));
-    (start, names.into_iter().map(|n| Pair { display: n.clone(), replacement: n }).collect())
+    (start, names.into_iter().map(plain).collect())
 }
 
 /// Completes an alias-name argument (`alias`/`unalias`) from the existing
 /// alias table — only while still typing the bare name (before an `=`,
 /// which starts the new definition's value instead, arbitrary text that
 /// isn't itself an alias name to complete against).
-fn complete_alias_name(line: &str, pos: usize) -> (usize, Vec<Pair>) {
+fn complete_alias_name(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     let start = word_start(line, pos);
     let prefix = &line[start..pos];
     if prefix.contains('=') {
@@ -415,14 +404,14 @@ fn complete_alias_name(line: &str, pos: usize) -> (usize, Vec<Pair>) {
     let mut names: Vec<String> = crate::alias::all().into_iter().map(|(name, _)| name).collect();
     names.retain(|n| n.starts_with(prefix));
     names.sort();
-    (start, names.into_iter().map(|n| Pair { display: n.clone(), replacement: n }).collect())
+    (start, names.into_iter().map(plain).collect())
 }
 
 /// Completes a `%n` job-spec argument (`fg`/`bg`/`kill`/`wait`) from the
 /// live job table, in exactly the plain `%N` format those builtins
 /// themselves parse — Unix only, matching job control itself.
 #[cfg(unix)]
-fn complete_job_spec(line: &str, pos: usize) -> (usize, Vec<Pair>) {
+fn complete_job_spec(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     let start = word_start(line, pos);
     let prefix = &line[start..pos];
     (start, job_spec_candidates(crate::job::ids(), prefix))
@@ -432,11 +421,11 @@ fn complete_job_spec(line: &str, pos: usize) -> (usize, Vec<Pair>) {
 /// can be tested without a real job table (which needs an actual spawned
 /// background process to populate).
 #[cfg(unix)]
-fn job_spec_candidates(ids: Vec<usize>, prefix: &str) -> Vec<Pair> {
+fn job_spec_candidates(ids: Vec<usize>, prefix: &str) -> Vec<Candidate> {
     ids.into_iter()
         .map(|id| format!("%{id}"))
         .filter(|spec| spec.starts_with(prefix))
-        .map(|spec| Pair { display: spec.clone(), replacement: spec })
+        .map(plain)
         .collect()
 }
 
@@ -583,33 +572,17 @@ mod tests {
         assert!(!is_directory("/this/path/should/not/exist/anywhere/hopefully"));
     }
 
-    /// `rustyline::hint::HistoryHinter` only offers a hint with the cursor at
-    /// the end of the line (`pos == line.len()`) — matching fish/
-    /// zsh-autosuggestions' own behavior of only suggesting while typing at
-    /// the end, not mid-line editing.
     #[test]
     fn hints_the_rest_of_the_most_recent_matching_history_entry() {
-        use rustyline::history::{DefaultHistory, History};
-
-        let helper = RushHelper::new();
-        let mut history = DefaultHistory::new();
-        history.add("echo hello world").unwrap();
-        let ctx = Context::new(&history);
-
-        assert_eq!(helper.hint("echo he", 7, &ctx).as_deref(), Some("llo world"));
+        let history = vec!["echo old".to_string(), "echo hello world".to_string()];
+        assert_eq!(hint("echo he", &history).as_deref(), Some("llo world"));
     }
 
     #[test]
     fn no_hint_on_an_empty_line_or_an_exact_history_match() {
-        use rustyline::history::{DefaultHistory, History};
-
-        let helper = RushHelper::new();
-        let mut history = DefaultHistory::new();
-        history.add("echo hi").unwrap();
-        let ctx = Context::new(&history);
-
-        assert_eq!(helper.hint("", 0, &ctx), None);
-        assert_eq!(helper.hint("echo hi", 7, &ctx), None);
+        let history = vec!["echo hi".to_string()];
+        assert_eq!(hint("", &history), None);
+        assert_eq!(hint("echo hi", &history), None);
     }
 
     // C70: abbreviation expansion decision — command position only.
@@ -658,9 +631,4 @@ mod tests {
         assert!(h.contains("\x1b[32mecho\x1b[0m"), "got: {h:?}");
     }
 
-    #[test]
-    fn highlight_hint_dims_the_suggestion() {
-        let helper = RushHelper::new();
-        assert_eq!(helper.highlight_hint("llo world"), "\x1b[2mllo world\x1b[0m");
-    }
 }

@@ -36,8 +36,11 @@ case for a container's graceful-shutdown pattern — closing Tier III out
 completely. Tier IV (bash/ksh/zsh language parity, the least POSIX-y and
 largest tier) is now underway: indexed arrays (C22) — `arr=(a b c)`,
 `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, sparse arrays, `arr[i]=`/`arr[i]+=`,
-`unset 'arr[i]'`, `local arr=(...)` — are done, the first real dent in
-what's otherwise still a dash-shaped core.
+`unset 'arr[i]'`, `local arr=(...)` — are done, and associative arrays
+(C23) — a new `declare -A` builtin, `arr[key]=`/`arr[key]+=`,
+`arr+=([k]=v ...)` merge-by-key, `${arr[@]}`/`${!arr[@]}` — followed on
+top of them, the first real dent in what's otherwise still a dash-shaped
+core.
 
 ---
 
@@ -61,7 +64,7 @@ applicable to that shell's own model.
 | `umask` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `set -e` / `-u` / `-o pipefail` / `-x` | ✅§ | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed arrays | ✅¶ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Associative arrays (`declare -A`) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Associative arrays (`declare -A`) | ✅** | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
@@ -93,7 +96,16 @@ unimplemented.
 (whole array or one index), and `local arr=(...)` are all done. Not
 supported: negative indices, `${arr[@]:offset:length}` slicing, a
 subscript combined with pattern-removal/default operators, `declare -a`/
-`declare -p` (no `declare` builtin exists at all).
+`declare -p` (no `declare` builtin's `-p` flag; `-a` itself is done, see
+below).
+
+** `declare -A`, literal assignment, all read forms (`${arr[k]}`/
+`${arr[@]}`/`${arr[*]}`/`${#arr[@]}`/`${!arr[@]}`), `arr[k]=`/`arr[k]+=`,
+`arr+=([k]=v ...)` merge-by-key, `unset 'arr[k]'`, and `local`/`declare -A
+arr=(...)` are all done. Not supported: a literal multi-word key written
+directly inside `[...]` in an assignment (`arr[key with spaces]=val`; the
+`k="b c"; arr[$k]=val` idiom works); `declare -p`/`-x`/`-r`/`-i`/`-f`;
+`declare`'s function-local scoping (always global/current-scope in rush).
 
 ---
 
@@ -102,7 +114,7 @@ subscript combined with pattern-removal/default operators, `declare -a`/
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 4 (4 done — complete)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (1 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (2 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -748,9 +760,90 @@ array position, multi-line literals, glob/command-substitution expansion
 inside a literal) chosen specifically to disambiguate from a plausible-but-
 wrong implementation.
 
-### C23 — Associative arrays: `declare -A`
-Present in bash 4+/ksh93/zsh. Common in modern tooling/config-processing
-scripts; a natural follow-on once indexed arrays exist. **Effort: L.**
+### C23 — Associative arrays: `declare -A` ✅ done
+Present in bash 4+/ksh93/zsh (not POSIX sh/dash/ksh88). Common in modern
+tooling/config-processing scripts; a natural follow-on once indexed arrays
+(C22) existed. Required an entirely new `declare` builtin (rush had none at
+all) and a non-trivial retrofit of C22's subscript evaluation, which had
+assumed "always arithmetic."
+
+**`declare` builtin** (`builtins.rs`, new): bash requires `declare -A name`
+before `name[key]=val` treats `key` as a literal string key rather than an
+arithmetic expression (which would evaluate a non-numeric key to 0). rush's
+`declare` is a deliberately narrow subset: `-a`/`-A` (type) plus an optional
+`=(...)` initializer, dispatched through the same `Command::local_decls`
+mechanism C22 built for `local`. Not implemented: `-p` (print), `-x`
+(export), `-r` (readonly), `-i` (integer), `-f` (functions), and bash's
+"`declare` acts like `local` inside a function" nuance — rush's `declare`
+always applies to the global/current scope, an explicit simplification.
+
+**Storage** (`vars.rs`): `VarValue` gained a third variant, `Assoc(BTreeMap<
+String, String>)`, alongside `Scalar`/`Array`. `is_assoc(name)` exposes a
+variable's runtime type so callers can dispatch on it. New assoc-specific
+functions mirror the array ones: `set_assoc`, `assoc_get`, `assoc_keys`,
+`assoc_unset_key`, `assoc_merge` (upsert-by-key for `+=`), and
+`declare_local_assoc`.
+
+**The type-aware subscript retrofit**: C22 treated every subscript as
+arithmetic (`arr[i+1]=x` evaluates `i+1`). Associative arrays need the
+opposite: `arr[a+b]=x` on a `-A` array uses the *literal* key `"a+b"`, never
+arithmetic — but `arr[$k]=x` still `$`-expands `$k` first. This can only be
+resolved at assignment/read time, once the target name's current runtime
+type is known, so `AssignOp`'s indexed variants changed from
+`SetIndex(usize, String)`/`AppendIndex(usize, String)` to `SetKey(String,
+String)`/`AppendKey(String, String)` — raw subscript text, evaluation
+deferred — and two dispatchers in `vars.rs` make the call:
+```rust
+pub fn key_set(name: &str, subscript: &str, value: &str) {
+    if is_assoc(name) {
+        assoc_set(name, subscript, value);
+    } else if let Some(index) = crate::expand::eval_subscript(subscript) {
+        array_set(name, index, value);
+    }
+}
+```
+(`key_append` mirrors this for `+=`.) `expand.rs` splits the old
+`eval_subscript` into `resolve_subscript_text` (`$`-expansion only, always
+applied) and a narrower `eval_subscript` (arithmetic, called only once a
+name is confirmed *not* assoc).
+
+**Expansion** (`expand.rs`): `${arr[key]}`, `${!arr[@]}` (keys, the assoc
+analogue of C22's index-list read), `${arr[@]}`/`${arr[*]}` (values, same
+`@`-vs-`*` join/preserve split as indexed arrays), and `${#arr[@]}` all
+dispatch on `is_assoc`. `"${!arr[@]}"` and `"${arr[@]}"` both needed the
+same per-key field-preservation as indexed arrays' `"$@"`-like handling —
+`parse_whole_array_at` became `enum WholeArrayAt { Values(String),
+Keys(String) }` to cover both. `arr+=([k1]=v1 [k2]=v2)` merges/upserts by
+key rather than positionally appending (`assoc_merge`); this required
+teaching *both* the `local`/`declare`-prefixed literal path and the
+ordinary top-level `NAME+=(...)` literal path to check `is_assoc(&name)`
+before deciding whether elements are plain words or `[key]=value` pairs —
+initially only the `local`/`declare` path did this, which silently broke
+`arr+=(...)` on an already-`declare -A`'d array from an earlier statement.
+
+**`local`/`declare`** (`builtins.rs`/`exec.rs`): the `local`-only
+special-casing `expand_simple` built for C22 is now shared by `declare`,
+scanning both for `-A`/`-a` flags to decide array-vs-assoc-vs-scalar before
+parsing declarations.
+
+Explicitly out of scope, each a documented, accepted gap: an unquoted or
+quoted-literal multi-word key written directly inside `[...]` in an
+assignment (`arr[key with spaces]=val`, `arr["b c"]=2`) — rush's lexer
+splits assignment words on whitespace with no awareness of "inside an
+assignment's brackets," and `assignment_split`'s bracket-scanning doesn't
+stitch a quoted-and-unquoted-mixed subscript back into one string; the
+working idiom, `k="b c"; arr[$k]=val`, was verified to work correctly and
+is the natural way to write this in bash too. Also out of scope: `declare
+-p`/`-x`/`-r`/`-i`/`-f`; `declare`'s function-local scoping nuance (rush's
+`declare` is always global/current-scope); bash's separate
+explicit-index syntax for *indexed* arrays (`arr=([5]=x [2]=y z)`, not an
+associative-array feature but easily confused with one); a subscript
+combined with pattern-removal or default/alternate operators
+(`${arr[k]:-x}`) — confirmed to be the same pre-existing C22 gap, not
+newly introduced by associative arrays. Every behavior above — including
+the merge-by-key `+=` semantics, the `declare -A` prerequisite, and the
+literal-vs-arithmetic subscript split — was verified directly against real
+bash.
 
 ### C24 — Brace expansion: `{a,b,c}`, `{1..5}`
 Present in bash/ksh/zsh/fish (not POSIX sh/dash). The most dangerous
@@ -842,7 +935,6 @@ some natural orderings:
 - **C18/C19/C20 (the rest of `set -euo pipefail` plus `-x`)** are a natural
   follow-on to the already-shipped `set -e`, reusing the same `vars.rs`
   flag-storage pattern.
-- **C22 (indexed arrays) gates C23 (associative arrays)** — do C22 first.
 - **C27/C28/C29 (C-style `for`, `((expr))`, richer arithmetic)** all extend
   `arith.rs` and the parser together — likely one combined pass rather than
   three separate ones.

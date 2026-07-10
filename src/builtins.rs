@@ -51,7 +51,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask",
+    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "declare",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -862,13 +862,15 @@ fn return_cmd(argv: &[String]) -> i32 {
 }
 
 /// `unset NAME...` — remove shell variables (scalar or array, the whole
-/// thing) or, for `unset 'arr[i]'` specifically, just that one array
-/// element (a real gap in a sparse array, not merely emptying it — see
-/// `vars::array_unset_index`).
+/// thing) or, for `unset 'arr[i]'`/`unset 'arr[key]'` specifically, just
+/// that one element (a real gap in a sparse indexed array, not merely
+/// emptying it — see `vars::array_unset_index`/`vars::assoc_unset_key`).
 fn unset(argv: &[String]) -> i32 {
+    use crate::expand::UnsetTarget;
     for name in &argv[1..] {
         match crate::expand::parse_array_unset_index(name) {
-            Ok(Some((array, index))) => crate::vars::array_unset_index(&array, index),
+            Ok(Some(UnsetTarget::Index(array, index))) => crate::vars::array_unset_index(&array, index),
+            Ok(Some(UnsetTarget::Key(array, key))) => crate::vars::assoc_unset_key(&array, &key),
             Ok(None) => crate::vars::unset(name),
             Err(e) => eprintln!("unset: {name}: {e}"),
         }
@@ -928,6 +930,9 @@ pub(crate) fn local_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Array(elements))) => {
                 crate::vars::declare_local_array(name, elements.clone())
             }
+            Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Assoc(pairs))) => {
+                crate::vars::declare_local_assoc(name, pairs.clone())
+            }
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Scalar(value))) => {
                 crate::vars::declare_local(name, Some(value))
             }
@@ -941,6 +946,28 @@ pub(crate) fn local_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]
         }
     }
     status
+}
+
+/// `declare [-a|-A] [name[=value]]...` — a deliberately narrow subset: just
+/// enough to unlock indexed (`-a`) and associative (`-A`) arrays, since
+/// `arr[key]=v` needs `arr` to already be declared `-A` to treat `key` as a
+/// literal string instead of an arithmetic index (see `vars::key_set`'s own
+/// doc comment). Always applies to the current/global scope — unlike real
+/// bash, where `declare` quietly acts like `local` inside a function; an
+/// accepted, documented simplification (use `local -A`/`local -a` for a
+/// function-scoped declaration). No `-p` (print), `-x` (export), `-r`
+/// (readonly), `-i` (integer), or `-f` (functions) — none of those exist
+/// here at all yet.
+pub(crate) fn declare_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]) -> i32 {
+    for (name, op) in decls {
+        if let Some(op) = op {
+            crate::vars::assign(name, op);
+        }
+        // A bare `declare name` (no `-a`/`-A`, no initializer) is a
+        // documented no-op here — bash pre-declares it unset, which is
+        // unobservable without a `declare -p` this codebase doesn't have.
+    }
+    0
 }
 
 /// `getopts optstring name [arg...]` — POSIX option parsing: `-a`, `-b

@@ -626,3 +626,51 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   (no `declare` builtin exists at all), `local arr[i]=x`, exporting an
   array to a spawned child's environment, arithmetic side effects inside a
   subscript.
+
+### Associative arrays (C23)
+- **`declare` builtin** (new, `builtins.rs`): bash requires `declare -A
+  name` before `name[key]=val` treats `key` as a literal string key rather
+  than an arithmetic expression; rush's `declare` is a narrow subset —
+  `-a`/`-A` plus an optional `=(...)` initializer — dispatched through the
+  same `Command::local_decls` mechanism C22 built for `local`. Not
+  implemented: `-p`, `-x`, `-r`, `-i`, `-f`, or bash's "`declare` acts like
+  `local` inside a function" nuance (rush's `declare` is always
+  global/current-scope).
+- **Storage** (`vars.rs`): `VarValue` gained `Assoc(BTreeMap<String,
+  String>)` alongside `Scalar`/`Array`, plus `is_assoc(name)` and
+  assoc-specific `set_assoc`/`assoc_get`/`assoc_keys`/`assoc_unset_key`/
+  `assoc_merge` (upsert-by-key for `+=`)/`declare_local_assoc`.
+- **Type-aware subscript retrofit**: C22 always evaluated a subscript as
+  arithmetic; associative arrays need `arr[a+b]=x` on a `-A` array to use
+  the *literal* key `"a+b"` while `arr[$k]=x` still `$`-expands `$k` — only
+  resolvable once the target's runtime type is known. `AssignOp`'s indexed
+  variants changed from `SetIndex(usize, String)`/`AppendIndex(usize,
+  String)` to `SetKey(String, String)`/`AppendKey(String, String)` (raw
+  subscript, deferred evaluation), with `vars::key_set`/`key_append`
+  dispatching to the array or assoc path based on `is_assoc`.
+  `expand::eval_subscript` split into `resolve_subscript_text` ($-expand
+  only, always applied) and a narrower arithmetic-only `eval_subscript`
+  used only once a name is confirmed not-assoc.
+- **Expansion**: `${arr[key]}`, `${!arr[@]}` (keys), `${arr[@]}`/
+  `${arr[*]}` (values), and `${#arr[@]}` all dispatch on `is_assoc`.
+  `"${!arr[@]}"`/`"${arr[@]}"` preserve each key/value as its own field
+  when quoted, the assoc analogue of indexed arrays' `"$@"`-like handling.
+  `arr+=([k1]=v1 [k2]=v2)` merges/upserts by key rather than positionally
+  appending — both the `local`/`declare`-prefixed literal path and the
+  ordinary top-level `NAME+=(...)` path now check `is_assoc(&name)` before
+  parsing elements as plain words vs. `[key]=value` pairs.
+- **`local`/`declare`**: the `local`-only special-casing `expand_simple`
+  built for C22 is now shared by `declare`, scanning both for `-A`/`-a`
+  flags to decide array-vs-assoc-vs-scalar before parsing declarations.
+- Every behavior — `declare -A`, literal assignment, all read forms,
+  `arr[k]=`/`arr[k]+=`, merge-by-key `+=`, `unset 'arr[k]'`, scalar↔assoc
+  promotion, and `local`/`declare -A arr=(...)` — was verified directly
+  against real bash.
+- Explicitly out of scope, each a documented, accepted gap: a literal
+  multi-word key written directly inside `[...]` in an assignment
+  (`arr[key with spaces]=val`, `arr["b c"]=2`; the `k="b c"; arr[$k]=val`
+  idiom works); `declare -p`/`-x`/`-r`/`-i`/`-f`; `declare`'s
+  function-local scoping; bash's explicit-index syntax for *indexed*
+  arrays (`arr=([5]=x [2]=y z)`); a subscript combined with
+  pattern-removal/default-alternate operators (the same pre-existing C22
+  gap, not newly introduced).

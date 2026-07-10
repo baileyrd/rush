@@ -44,7 +44,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring; a compound (`if`/`while`/`(...)`/…) can be one stage among several on Unix (forks) |
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask` on Unix) |
 | Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
 | `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions |
 | `set -u` (nounset) | ✅ | referencing an unset variable is an error; `:-`/`:=`/`:+`/`:?` and `$@`/`$*`/`$#`/`$?`/`$$` are exempt |
@@ -54,6 +54,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |
 | Indexed arrays | ✅ | `arr=(a b c)`, `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, `${#arr[@]}`, `${!arr[@]}`, sparse arrays, `arr[i]=`/`arr[i]+=`, `unset 'arr[i]'`, `local arr=(...)` |
+| Associative arrays | ✅ | `declare -A arr`, `arr[key]=val`, `${arr[key]}`/`${arr[@]}`/`${arr[*]}`, `${!arr[@]}` (keys), `${#arr[@]}`, `arr+=([k]=v ...)` merge-by-key, `unset 'arr[key]'`, `local`/`declare -A arr=(...)` |
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, `${V#pat}`/`##`/`%`/`%%` (prefix/suffix pattern removal), tilde, command substitution; unquoted results field-split on `$IFS` |

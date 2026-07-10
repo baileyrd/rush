@@ -12,15 +12,20 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
-/// A variable's actual payload: bash's ordinary scalar, or an indexed array
-/// (`arr=(a b c)`). `BTreeMap` rather than `Vec` because bash arrays are
-/// genuinely sparse (`arr[5]=x` on a 2-element array doesn't create indices
-/// 2–4) — iteration order matters for `${arr[@]}`/`${!arr[@]}`, and a
-/// `BTreeMap` gives that for free, keyed by the real index.
+/// A variable's actual payload: bash's ordinary scalar, an indexed array
+/// (`arr=(a b c)`), or an associative array (`declare -A`, then
+/// `arr=([k]=v ...)`). `BTreeMap` rather than `Vec`/`HashMap` because bash
+/// arrays are genuinely sparse (`arr[5]=x` on a 2-element array doesn't
+/// create indices 2–4) and an associative array's own iteration order is
+/// unspecified in bash anyway (a real hash table) — `BTreeMap` gives
+/// deterministic, sorted iteration for both `${arr[@]}`/`${!arr[@]}` for
+/// free, which is a strictly *more* predictable superset of what bash
+/// itself guarantees, not a behavior this needs to match exactly.
 #[derive(Clone)]
 pub enum VarValue {
     Scalar(String),
     Array(BTreeMap<usize, String>),
+    Assoc(BTreeMap<String, String>),
 }
 
 struct Var {
@@ -28,40 +33,51 @@ struct Var {
     exported: bool,
 }
 
-/// The value side of an assignment word — scalar (`NAME=value`) or a whole
-/// array literal's already-expanded elements (`NAME=(a b c)`).
+/// The value side of an assignment word — scalar (`NAME=value`), a whole
+/// indexed-array literal's already-expanded elements (`NAME=(a b c)`), or
+/// an associative-array literal's key/value pairs (`NAME=([k]=v ...)`,
+/// only ever produced when `declare -A`/`local -A` says so — see
+/// `expand::parse_decl_value`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignValue {
     Scalar(String),
     Array(Vec<String>),
+    Assoc(Vec<(String, String)>),
 }
 
 /// An assignment word's full operation, as `expand::assignment_split`
 /// distinguishes it: `=` (replace) or `+=` (append) on the whole name, or
-/// `NAME[index]=value`/`NAME[index]+=value` targeting one specific element
-/// — see `assign`.
+/// `NAME[subscript]=value`/`NAME[subscript]+=value` targeting one specific
+/// element — see `assign`. The subscript is carried as raw, `$`-expanded
+/// (but not yet arithmetic-evaluated) text: whether it's an array index or
+/// an associative key can only be decided at `assign` time, by checking
+/// `name`'s *current* type (verified directly against real bash: `arr[a]=x`
+/// treats `a` as an arithmetic expression — evaluating to 0 — unless `arr`
+/// is already declared `-A`, in which case `a` is the literal string key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignOp {
     Set(AssignValue),
     Append(AssignValue),
-    SetIndex(usize, String),
-    AppendIndex(usize, String),
+    SetKey(String, String),
+    AppendKey(String, String),
 }
 
 /// Apply a parsed assignment word to `name` — the single entry point
 /// `exec.rs` uses for both a bare assignment statement (`arr=(a b c)`,
 /// `arr[2]=x`) and a command's own leading `NAME=value` prefixes, via the
-/// existing per-case functions (`set`/`set_array`/`append_scalar`/
-/// `array_append`/`array_set`/`array_append_index`), each already verified
-/// directly against real bash.
+/// existing per-case functions (`set`/`set_array`/`set_assoc`/
+/// `append_scalar`/`array_append`/`assoc_merge`/`key_set`/`key_append`),
+/// each already verified directly against real bash.
 pub fn assign(name: &str, op: &AssignOp) {
     match op {
         AssignOp::Set(AssignValue::Scalar(s)) => set(name, s),
         AssignOp::Set(AssignValue::Array(elements)) => set_array(name, elements.clone()),
+        AssignOp::Set(AssignValue::Assoc(pairs)) => set_assoc(name, pairs.clone()),
         AssignOp::Append(AssignValue::Scalar(s)) => append_scalar(name, s),
         AssignOp::Append(AssignValue::Array(elements)) => array_append(name, elements.clone()),
-        AssignOp::SetIndex(index, value) => array_set(name, *index, value),
-        AssignOp::AppendIndex(index, value) => array_append_index(name, *index, value),
+        AssignOp::Append(AssignValue::Assoc(pairs)) => assoc_merge(name, pairs.clone()),
+        AssignOp::SetKey(subscript, value) => key_set(name, subscript, value),
+        AssignOp::AppendKey(subscript, value) => key_append(name, subscript, value),
     }
 }
 
@@ -292,16 +308,27 @@ pub fn set_last_bg_pid(pid: i32) {
 }
 
 /// Look up a shell variable's scalar value (not the environment — see
-/// `expand`). For an array, this is element 0 (`$arr` == `${arr[0]}`,
-/// verified directly against real bash) — absent if that particular index
-/// isn't set, same as any other unset variable.
+/// `expand`). For an array (indexed or associative), this is element/key
+/// `0`/`"0"` (`$arr` == `${arr[0]}`, verified directly against real bash) —
+/// absent if that particular slot isn't set, same as any other unset
+/// variable.
 pub fn get(name: &str) -> Option<String> {
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Scalar(s) => Some(s.clone()),
             VarValue::Array(a) => a.get(&0).cloned(),
+            VarValue::Assoc(a) => a.get("0").cloned(),
         })
     })
+}
+
+/// Whether `name` is currently declared as an *associative* array — the
+/// one piece of runtime state that decides how a `[subscript]` is
+/// interpreted everywhere else (arithmetic index vs. literal string key;
+/// see `key_set`/`key_append` and `expand::eval_subscript_for`). `false`
+/// for a scalar, an indexed array, or an unset name.
+pub fn is_assoc(name: &str) -> bool {
+    VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Assoc(_))))
 }
 
 /// Remove a shell variable (`unset NAME`) — scalar or array, the whole thing.
@@ -312,10 +339,11 @@ pub fn unset(name: &str) {
 }
 
 /// Set a variable's scalar value, preserving its exported flag if it already
-/// existed. If `name` is currently an *array*, this targets element 0 only,
-/// leaving the rest of the array untouched — matching bash exactly (`arr=x`
-/// after `arr=(a b c)` still leaves `arr[1]`/`arr[2]` alone, verified
-/// directly); a plain, never-arrayed variable is unaffected by this rule.
+/// existed. If `name` is currently an *array* (indexed or associative),
+/// this targets element/key `0`/`"0"` only, leaving the rest untouched —
+/// matching bash exactly (`arr=x` after `arr=(a b c)` still leaves
+/// `arr[1]`/`arr[2]` alone, verified directly for both array kinds); a
+/// plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
     VARS.with(|v| {
         let mut m = v.borrow_mut();
@@ -323,6 +351,9 @@ pub fn set(name: &str, value: &str) {
             Some(var) => match &mut var.value {
                 VarValue::Array(a) => {
                     a.insert(0, value.to_string());
+                }
+                VarValue::Assoc(a) => {
+                    a.insert("0".to_string(), value.to_string());
                 }
                 VarValue::Scalar(s) => value.clone_into(s),
             },
@@ -371,34 +402,66 @@ pub fn set_array(name: &str, elements: Vec<String>) {
     });
 }
 
-/// `${arr[index]}` — a specific array element, or a plain scalar's own value
-/// if `index` is 0 (a never-arrayed variable behaves like a 1-element array,
-/// verified directly against real bash) and `None` for any other index.
+/// Replace `name` entirely with a fresh associative array (`declare -A
+/// arr=([k]=v ...)`), discarding whatever was there before — the
+/// associative-array analogue of `set_array`. Later pairs win over earlier
+/// ones for a repeated key, matching an ordinary map build.
+pub fn set_assoc(name: &str, pairs: Vec<(String, String)>) {
+    let assoc: BTreeMap<String, String> = pairs.into_iter().collect();
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        let exported = m.get(name).is_some_and(|x| x.exported);
+        m.insert(name.to_string(), Var { value: VarValue::Assoc(assoc), exported });
+    });
+}
+
+/// `${arr[index]}` — a specific *indexed*-array element, or a plain
+/// scalar's own value if `index` is 0 (a never-arrayed variable behaves
+/// like a 1-element array, verified directly against real bash) and `None`
+/// for any other index. `None` for an associative array too — that's what
+/// `assoc_get` is for (see `is_assoc`, which callers check first).
 pub fn array_get(name: &str, index: usize) -> Option<String> {
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Array(a) => a.get(&index).cloned(),
             VarValue::Scalar(s) => (index == 0).then(|| s.clone()),
+            VarValue::Assoc(_) => None,
         })
     })
 }
 
-/// `${arr[@]}`/`${arr[*]}` — every element, in index order (a plain scalar
-/// is just its one value, matching `array_get`'s index-0 treatment).
+/// `${arr[key]}` — a specific associative-array element (`None` if unset,
+/// or if `name` isn't actually an associative array).
+pub fn assoc_get(name: &str, key: &str) -> Option<String> {
+    VARS.with(|v| {
+        v.borrow().get(name).and_then(|x| match &x.value {
+            VarValue::Assoc(a) => a.get(key).cloned(),
+            VarValue::Array(_) | VarValue::Scalar(_) => None,
+        })
+    })
+}
+
+/// `${arr[@]}`/`${arr[*]}` — every element, in key/index order (a plain
+/// scalar is just its one value, matching `array_get`'s index-0
+/// treatment). Shared between indexed and associative arrays: both
+/// ultimately just need "every value in this map," regardless of what the
+/// keys look like.
 pub fn array_values(name: &str) -> Vec<String> {
     VARS.with(|v| {
         v.borrow()
             .get(name)
             .map(|x| match &x.value {
                 VarValue::Array(a) => a.values().cloned().collect(),
+                VarValue::Assoc(a) => a.values().cloned().collect(),
                 VarValue::Scalar(s) => vec![s.clone()],
             })
             .unwrap_or_default()
     })
 }
 
-/// `${!arr[@]}` — the indices actually set (gaps in a sparse array are
-/// skipped entirely, not listed); `[0]` for a plain scalar.
+/// `${!arr[@]}` for an *indexed* array — the indices actually set (gaps in
+/// a sparse array are skipped entirely, not listed); `[0]` for a plain
+/// scalar. See `assoc_keys` for an associative array's own version.
 pub fn array_indices(name: &str) -> Vec<usize> {
     VARS.with(|v| {
         v.borrow()
@@ -406,20 +469,40 @@ pub fn array_indices(name: &str) -> Vec<usize> {
             .map(|x| match &x.value {
                 VarValue::Array(a) => a.keys().copied().collect(),
                 VarValue::Scalar(_) => vec![0],
+                VarValue::Assoc(_) => vec![],
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `${!arr[@]}` for an associative array — every key actually set, sorted
+/// (bash's own iteration order is unspecified — a real hash table — so
+/// this is a strictly more predictable superset, not a behavior being
+/// matched exactly; see `VarValue`'s own doc comment).
+pub fn assoc_keys(name: &str) -> Vec<String> {
+    VARS.with(|v| {
+        v.borrow()
+            .get(name)
+            .map(|x| match &x.value {
+                VarValue::Assoc(a) => a.keys().cloned().collect(),
+                VarValue::Array(_) | VarValue::Scalar(_) => vec![],
             })
             .unwrap_or_default()
     })
 }
 
 /// `${#arr[@]}` — the number of elements actually set, *not* one past the
-/// highest index (a sparse `arr=(a b); arr[5]=x` has 3 elements, not 6,
-/// verified directly); a plain scalar counts as 1, an unset name as 0.
+/// highest index for an indexed array (a sparse `arr=(a b); arr[5]=x` has 3
+/// elements, not 6, verified directly); a plain scalar counts as 1, an
+/// unset name as 0. Shared between indexed and associative arrays, same
+/// reasoning as `array_values`.
 pub fn array_len(name: &str) -> usize {
     VARS.with(|v| {
         v.borrow()
             .get(name)
             .map(|x| match &x.value {
                 VarValue::Array(a) => a.len(),
+                VarValue::Assoc(a) => a.len(),
                 VarValue::Scalar(_) => 1,
             })
             .unwrap_or(0)
@@ -448,6 +531,9 @@ pub fn array_set(name: &str, index: usize, value: &str) {
                     a.insert(index, value.to_string());
                     var.value = VarValue::Array(a);
                 }
+                // Unreachable via the normal dispatch path: `key_set`
+                // checks `is_assoc` first and calls `assoc_set` instead.
+                VarValue::Assoc(_) => {}
             },
             None => {
                 let mut a = BTreeMap::new();
@@ -479,6 +565,8 @@ pub fn array_append_index(name: &str, index: usize, value: &str) {
                     }
                     var.value = VarValue::Array(a);
                 }
+                // Unreachable via the normal dispatch path — see `array_set`.
+                VarValue::Assoc(_) => {}
             },
             None => {
                 let mut a = BTreeMap::new();
@@ -498,6 +586,12 @@ pub fn array_append(name: &str, elements: Vec<String>) {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
             Some(var) => {
+                // Unreachable via the normal dispatch path (an already-`-A`
+                // name always takes `AssignValue::Assoc` instead) — but
+                // still needs *some* fallback for exhaustiveness.
+                if matches!(var.value, VarValue::Assoc(_)) {
+                    return;
+                }
                 let a = match &mut var.value {
                     VarValue::Array(a) => a,
                     VarValue::Scalar(s) => {
@@ -508,6 +602,7 @@ pub fn array_append(name: &str, elements: Vec<String>) {
                         let VarValue::Array(a) = &mut var.value else { unreachable!() };
                         a
                     }
+                    VarValue::Assoc(_) => unreachable!("checked above"),
                 };
                 let mut next = a.keys().next_back().map_or(0, |k| k + 1);
                 for e in elements {
@@ -524,15 +619,17 @@ pub fn array_append(name: &str, elements: Vec<String>) {
 }
 
 /// `x+=value` — append the literal string `value`: to a plain scalar's own
-/// text, or (matching real bash exactly, verified directly) to *element 0*
-/// of an existing array, leaving every other element untouched. Creates a
-/// fresh scalar if `name` didn't exist yet.
+/// text, or (matching real bash exactly, verified directly) to *element/key
+/// `0`/`"0"`* of an existing array (indexed or associative), leaving every
+/// other element untouched. Creates a fresh scalar if `name` didn't exist
+/// yet.
 pub fn append_scalar(name: &str, value: &str) {
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
             Some(var) => match &mut var.value {
                 VarValue::Array(a) => a.entry(0).or_default().push_str(value),
+                VarValue::Assoc(a) => a.entry("0".to_string()).or_default().push_str(value),
                 VarValue::Scalar(s) => s.push_str(value),
             },
             None => {
@@ -544,7 +641,8 @@ pub fn append_scalar(name: &str, value: &str) {
 
 /// `unset 'arr[index]'` — remove just that one element, leaving a genuine
 /// gap in a sparse array (not merely emptying it) — a no-op if `name` isn't
-/// an array or that index isn't set.
+/// an *indexed* array or that index isn't set (see `assoc_unset_key` for
+/// an associative array's own version).
 pub fn array_unset_index(name: &str, index: usize) {
     VARS.with(|v| {
         if let Some(var) = v.borrow_mut().get_mut(name)
@@ -553,6 +651,109 @@ pub fn array_unset_index(name: &str, index: usize) {
             a.remove(&index);
         }
     });
+}
+
+/// `unset 'arr[key]'` for an associative array — a no-op if `name` isn't
+/// one, or that key isn't set.
+pub fn assoc_unset_key(name: &str, key: &str) {
+    VARS.with(|v| {
+        if let Some(var) = v.borrow_mut().get_mut(name)
+            && let VarValue::Assoc(a) = &mut var.value
+        {
+            a.remove(key);
+        }
+    });
+}
+
+/// `arr[key]=value` on an associative array — auto-vivifies *only* if
+/// `name` is already known to be one (see `key_set`, which is the real
+/// entry point; calling this directly on a non-associative name would
+/// silently convert it, which is why it's not `pub`).
+fn assoc_set(name: &str, key: &str, value: &str) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) => {
+                if let VarValue::Assoc(a) = &mut var.value {
+                    a.insert(key.to_string(), value.to_string());
+                }
+            }
+            None => {
+                let mut a = BTreeMap::new();
+                a.insert(key.to_string(), value.to_string());
+                m.insert(name.to_string(), Var { value: VarValue::Assoc(a), exported: false });
+            }
+        }
+    });
+}
+
+/// `arr[key]+=value` on an associative array — append to that key's own
+/// string (or set it, if nothing's there yet).
+fn assoc_append_key(name: &str, key: &str, value: &str) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) => {
+                if let VarValue::Assoc(a) = &mut var.value {
+                    a.entry(key.to_string()).or_default().push_str(value);
+                }
+            }
+            None => {
+                let mut a = BTreeMap::new();
+                a.insert(key.to_string(), value.to_string());
+                m.insert(name.to_string(), Var { value: VarValue::Assoc(a), exported: false });
+            }
+        }
+    });
+}
+
+/// `arr+=([k]=v ...)` — merge new key/value pairs into an existing
+/// associative array (a later pair overwrites an earlier one for the same
+/// key, matching real bash, verified directly); creates a fresh one if
+/// `name` didn't exist. Never called on a non-associative name (`assign`
+/// only reaches this arm when `expand::parse_decl_value` already committed
+/// to `-A`'s shape) — but for exhaustiveness/robustness, a `Scalar`/`Array`
+/// target is just replaced outright rather than corrupted in place.
+pub fn assoc_merge(name: &str, pairs: Vec<(String, String)>) {
+    VARS.with(|v| {
+        let mut m = v.borrow_mut();
+        match m.get_mut(name) {
+            Some(var) if matches!(var.value, VarValue::Assoc(_)) => {
+                let VarValue::Assoc(a) = &mut var.value else { unreachable!() };
+                a.extend(pairs);
+            }
+            _ => {
+                let exported = m.get(name).is_some_and(|x| x.exported);
+                m.insert(name.to_string(), Var { value: VarValue::Assoc(pairs.into_iter().collect()), exported });
+            }
+        }
+    });
+}
+
+/// `arr[subscript]=value` — the real entry point `assign` uses: if `name`
+/// is *already* declared associative (`is_assoc`), `subscript` is the
+/// literal string key; otherwise it's evaluated as an arithmetic index (via
+/// `expand::eval_subscript`, called by the one caller of this that has
+/// access to it — `exec.rs`'s assignment-application path) and dispatched
+/// to `array_set`. Both halves verified directly against real bash,
+/// including the headline case: `arr[a]=x` on a plain/unset `arr` treats
+/// `a` as an arithmetic expression (evaluating to 0), *not* a string key —
+/// only `declare -A`/`local -A` unlocks string-keyed subscripts at all.
+pub fn key_set(name: &str, subscript: &str, value: &str) {
+    if is_assoc(name) {
+        assoc_set(name, subscript, value);
+    } else if let Some(index) = crate::expand::eval_subscript(subscript) {
+        array_set(name, index, value);
+    }
+}
+
+/// As [`key_set`], for `arr[subscript]+=value`.
+pub fn key_append(name: &str, subscript: &str, value: &str) {
+    if is_assoc(name) {
+        assoc_append_key(name, subscript, value);
+    } else if let Some(index) = crate::expand::eval_subscript(subscript) {
+        array_append_index(name, index, value);
+    }
 }
 
 /// Push a fresh, empty local-variable frame — called when entering a
@@ -619,6 +820,16 @@ pub fn declare_local_array(name: &str, elements: Vec<String>) -> bool {
     declared
 }
 
+/// As [`declare_local`], but for `local -A arr=([k]=v ...)` — the
+/// associative-array-literal form.
+pub fn declare_local_assoc(name: &str, pairs: Vec<(String, String)>) -> bool {
+    let declared = capture_for_local(name);
+    if declared {
+        set_assoc(name, pairs);
+    }
+    declared
+}
+
 /// Shared by `declare_local`/`declare_local_array`: capture `name`'s prior
 /// value into the current function call's frame (only the *first* time
 /// this name is made local within that one call — see `declare_local`'s own
@@ -677,7 +888,7 @@ pub fn exported() -> Vec<(String, String)> {
             .filter(|(_, x)| x.exported)
             .filter_map(|(k, x)| match &x.value {
                 VarValue::Scalar(s) => Some((k.clone(), s.clone())),
-                VarValue::Array(_) => None,
+                VarValue::Array(_) | VarValue::Assoc(_) => None,
             })
             .collect()
     })
@@ -870,5 +1081,67 @@ mod tests {
 
         assert_eq!(array_values("RUSH_LOCAL_ARR"), vec!["outer"]);
         unset("RUSH_LOCAL_ARR");
+    }
+
+    #[test]
+    fn assoc_basic_set_get_and_whole_array_reads() {
+        unset("RUSH_ASSOC");
+        set_assoc("RUSH_ASSOC", vec![("a".into(), "1".into()), ("b".into(), "2".into())]);
+        assert!(is_assoc("RUSH_ASSOC"));
+        assert_eq!(assoc_get("RUSH_ASSOC", "a").as_deref(), Some("1"));
+        assert_eq!(assoc_get("RUSH_ASSOC", "missing"), None);
+        assert_eq!(array_len("RUSH_ASSOC"), 2);
+        assert_eq!(assoc_keys("RUSH_ASSOC"), vec!["a", "b"]);
+        assert_eq!(array_values("RUSH_ASSOC"), vec!["1", "2"]);
+        unset("RUSH_ASSOC");
+    }
+
+    #[test]
+    fn key_set_dispatches_on_runtime_type() {
+        // A plain/unset name: the subscript is arithmetic, matching
+        // ordinary indexed-array behavior — `a` evaluates to 0.
+        unset("RUSH_KEY");
+        key_set("RUSH_KEY", "a", "x");
+        assert!(!is_assoc("RUSH_KEY"));
+        assert_eq!(array_get("RUSH_KEY", 0).as_deref(), Some("x"));
+        unset("RUSH_KEY");
+
+        // Already declared associative: the subscript is a literal string
+        // key instead — verified directly against real bash, this is the
+        // headline distinction the whole feature hinges on.
+        set_assoc("RUSH_KEY", vec![]);
+        key_set("RUSH_KEY", "a", "x");
+        assert_eq!(assoc_get("RUSH_KEY", "a").as_deref(), Some("x"));
+        unset("RUSH_KEY");
+    }
+
+    #[test]
+    fn assoc_merge_upserts_and_unset_key_leaves_the_rest() {
+        unset("RUSH_MERGE");
+        set_assoc("RUSH_MERGE", vec![("a".into(), "1".into()), ("b".into(), "2".into())]);
+        // A later pair overwrites an earlier one for the same key.
+        assoc_merge("RUSH_MERGE", vec![("c".into(), "3".into()), ("a".into(), "99".into())]);
+        assert_eq!(assoc_get("RUSH_MERGE", "a").as_deref(), Some("99"));
+        assert_eq!(assoc_get("RUSH_MERGE", "c").as_deref(), Some("3"));
+        assert_eq!(array_len("RUSH_MERGE"), 3);
+
+        assoc_unset_key("RUSH_MERGE", "a");
+        assert_eq!(assoc_get("RUSH_MERGE", "a"), None);
+        assert_eq!(array_len("RUSH_MERGE"), 2);
+        unset("RUSH_MERGE");
+    }
+
+    #[test]
+    fn local_assoc_shadows_and_restores_on_frame_pop() {
+        unset("RUSH_LOCAL_ASSOC");
+        set_assoc("RUSH_LOCAL_ASSOC", vec![("a".into(), "outer".into())]);
+
+        push_local_frame();
+        assert!(declare_local_assoc("RUSH_LOCAL_ASSOC", vec![("a".into(), "inner".into())]));
+        assert_eq!(assoc_get("RUSH_LOCAL_ASSOC", "a").as_deref(), Some("inner"));
+        pop_local_frame();
+
+        assert_eq!(assoc_get("RUSH_LOCAL_ASSOC", "a").as_deref(), Some("outer"));
+        unset("RUSH_LOCAL_ASSOC");
     }
 }

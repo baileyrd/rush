@@ -391,6 +391,72 @@ fn local_array_scopes_to_the_function_call() {
 }
 
 #[test]
+fn associative_arrays_declare_index_and_whole_array_reads() {
+    // `declare -A` unlocks string-keyed subscripts; a literal's elements
+    // are `[key]=value` pairs.
+    assert_eq!(rush(r#"declare -A arr=([a]=1 [b]=2); echo "${arr[a]}" "${arr[b]}""#).0, "1 2\n");
+    assert_eq!(rush(r#"declare -A arr=([a]=1 [b]=2); echo "count=${#arr[@]}""#).0, "count=2\n");
+    assert_eq!(rush(r#"declare -A arr=([a]=1 [b]=2); echo "${#arr[a]}""#).0, "1\n");
+
+    // Auto-vivifying element assignment on an already-`-A` name.
+    assert_eq!(
+        rush(r#"declare -A arr; arr[foo]=bar; arr[baz]=qux; echo "${arr[foo]} ${arr[baz]}""#).0,
+        "bar qux\n"
+    );
+
+    // Without `declare -A` first, a subscript is *always* arithmetic — a
+    // non-numeric one evaluates to 0, the headline distinction this whole
+    // feature hinges on, verified directly against real bash.
+    assert_eq!(rush(r#"arr[foo]=bar; echo "${arr[0]}""#).0, "bar\n");
+}
+
+#[test]
+fn associative_arrays_at_vs_star_and_key_iteration() {
+    // `"${!arr[@]}"`: one argument per key, spaces and all — the
+    // associative-array analogue of `"$@"`/`"${arr[@]}"`. (The multi-word
+    // key comes from a variable, not a quoted literal directly inside
+    // `[...]` — `arr["b c"]=x` isn't supported, a documented gap.)
+    assert_eq!(
+        rush(r#"declare -A arr; arr[a]=1; k="b c"; arr[$k]=2; for k in "${!arr[@]}"; do echo "[$k]"; done"#).0,
+        "[a]\n[b c]\n"
+    );
+    // The standard "iterate an associative array by key" idiom.
+    assert_eq!(
+        rush(r#"declare -A arr=([a]=1 [b]=2); for k in "${!arr[@]}"; do echo "$k=${arr[$k]}"; done"#)
+            .0
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["a=1", "b=2"].into_iter().collect()
+    );
+}
+
+#[test]
+fn associative_arrays_append_merge_and_unset_key() {
+    // `arr+=([k]=v ...)` merges by key (a later pair overwrites an earlier
+    // one for the same key) rather than appending positionally.
+    assert_eq!(
+        rush(r#"declare -A arr=([a]=1 [b]=2); arr+=([c]=3 [a]=99); echo "${arr[a]} ${arr[c]}""#).0,
+        "99 3\n"
+    );
+    // `arr[k]+=v` appends to that one key's own string.
+    assert_eq!(rush(r#"declare -A arr=([a]=1); arr[a]+=X; echo "${arr[a]}""#).0, "1X\n");
+    // `unset 'arr[k]'` removes just that key.
+    assert_eq!(
+        rush(r#"declare -A arr=([a]=1 [b]=2); unset "arr[a]"; echo "count=${#arr[@]}""#).0,
+        "count=1\n"
+    );
+}
+
+#[test]
+fn local_assoc_array_scopes_to_the_function_call() {
+    assert_eq!(
+        rush(r#"f() { local -A arr=([a]=1 [b]=2); echo "${arr[a]}"; }; f; echo "outer:${#arr[@]}""#).0,
+        "1\nouter:0\n"
+    );
+}
+
+#[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used
     // to leak stderr straight to the terminal instead of routing it through

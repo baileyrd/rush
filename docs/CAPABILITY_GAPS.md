@@ -46,10 +46,14 @@ nesting, cross products — closed out what had been the single most
 dangerous *silent* gap in this whole document (`mkdir {a,b,c}` used to
 make one wrongly-named directory instead of three, with no warning at
 all), `case` fallthrough (C25) — `;&`/`;;&` — rounded out `case` itself,
-and `select` (C26) — a numbered menu prompt, `$REPLY`, blank-line
-redisplay, EOF handling — brought rush's control-flow keyword set to
-parity with bash/ksh93/zsh's own, the first real dent in what's
-otherwise still a dash-shaped core.
+`select` (C26) — a numbered menu prompt, `$REPLY`, blank-line redisplay,
+EOF handling — brought rush's control-flow keyword set to parity with
+bash/ksh93/zsh's own, and C-style `for`/standalone `((expr))`/richer
+arithmetic (C27–C29, done together in one pass since all three needed
+the same lexer/`arith.rs` groundwork) rounded out arithmetic to real
+C-like completeness — `++`/`--`, compound assignment, `**`, bitwise
+operators, the ternary `?:`, all with genuine short-circuit evaluation —
+the first real dent in what's otherwise still a dash-shaped core.
 
 ---
 
@@ -77,6 +81,7 @@ applicable to that shell's own model.
 | Brace expansion `{a,b,c}` | ✅†† | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `case` fallthrough `;&` / `;;&` | ✅ | ❌ | ✅ | ✅ | ✅ | — |
 | `select` (numbered-menu prompt) | ✅‡‡ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| C-style `for ((;;))` / `((expr))` / `++`/`--`/bitwise/`?:` | ✅§§ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
@@ -134,6 +139,15 @@ statements' own values.
 accepted cosmetic (not functional) narrowing: real bash lays the menu out
 in columns sized to `$COLUMNS`; rush always prints one entry per line.
 
+§§ `for ((init; cond; update))` (all clauses optional, `for ((;;))` a real
+infinite loop), the standalone `((expr))` command (exit status mirrors
+`test`'s convention), and `arith.rs`'s full operator set — `++`/`--`
+(pre/post), `= += -= *= /= %= <<= >>= &= ^= |=`, `**`, bitwise `& | ^ ~ <<
+>>`, and the ternary `?:` (all with real short-circuit evaluation for
+`&&`/`||`/`?:`, not just value-discarding) — are all done. Not supported:
+an lvalue other than a plain variable name (`arr[i]++`, `arr[i] = x`); the
+comma operator.
+
 ---
 
 ## Summary counts
@@ -141,7 +155,7 @@ in columns sized to `$COLUMNS`; rush always prints one entry per line.
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (5 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (8 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -1040,22 +1054,99 @@ whitespace/sign/leading zeros, out-of-range/unparseable → empty `NAME`,
 `break`'s exit-status semantics, and the EOF-forces-status-1 quirk — was
 verified directly against real bash and matches exactly.
 
-### C27 — C-style `for (( i=0; i<n; i++ ))`
+### C27 — C-style `for (( i=0; i<n; i++ ))` ✅ done
 Present in bash/ksh93/zsh (not POSIX sh/dash). A very common counted-loop
-idiom in bash-family scripts; needs a new parser variant and reuses the
-existing arithmetic evaluator. **Effort: M.**
+idiom in bash-family scripts. Done together with C28/C29 in one pass,
+as this doc's own sequencing notes suggested — all three needed the same
+lexer/`arith.rs` groundwork.
 
-### C28 — Standalone arithmetic command: `((expr))`
+New `Compound::CFor { init, cond, update, body }`, each clause `None`
+when its part of the header was left empty (`for ((;;))` is a real
+infinite loop — `cond: None` means always-true; `init`/`update: None`
+are no-ops — all verified directly). `parse_for` checks for
+`Token::DblParen` (see C28) right after the `for` keyword, before
+falling through to the ordinary `NAME [in WORDS]` grammar — a `NAME`
+can never itself start with `(`, so this is unambiguous, and no space is
+needed between `for` and `((` (`for((i=0;...` parses the same as
+`for ((i=0;...`, verified directly). Execution (`exec.rs`) evaluates
+`init` once, then loops: test `cond` (or `true` if absent), run `body`,
+then `update` — except when `body` ended via `break` (here, or
+propagating from an outer loop via `break N`/`continue N`), in which
+case `update` does *not* run; a local `continue` (level 1) *does* still
+run `update` before re-testing `cond` — real C `for` semantics, both
+verified directly against bash.
+
+### C28 — Standalone arithmetic command: `((expr))` ✅ done
 Present in bash/ksh93/zsh. The idiomatic way to write `((i++))` or `((count
 += 1))` as a statement instead of wrapping it in `$(( ))` and discarding the
-value. Pairs naturally with C27 and C29. **Effort: S–M.**
+value.
 
-### C29 — Richer arithmetic: `++`/`--`, `+=`, `**`, bitwise ops, ternary `?:` (tracked)
+The real complexity here was disambiguation, not evaluation: `((expr))`
+in command position is *never* two nested subshells, full stop — bash
+doesn't try one reading and fall back to the other, verified directly
+(`((echo hi))` fails as invalid arithmetic rather than running `echo hi`
+in a doubly-nested subshell; a nested-subshell reading needs an explicit
+space, `( (echo hi) )`). Since a subshell's own `(`/`)` are ordinary
+lexer-level tokens with no memory of surrounding whitespace by the time
+the parser sees them, this has to be decided in the lexer, the same way
+`$((...))` already disambiguates from `$(...)` (peeking whether the
+character right after the first `(` is *also* `(`, with no gap). A new
+`Token::DblParen(String)` — holding the raw, unsplit text between the
+matching `((`/`))`, via a new `take_double_paren` mirroring
+`expand::take_arith`'s identical depth-tracking algorithm — is emitted
+wherever the lexer would otherwise tokenize a bare `(`, whenever a
+second `(` immediately follows. The parser turns this into a new
+`Compound::Arith(String)` at command position (see C27 for `for
+((...))`'s own use of the same token). Execution `$`-expands the text
+(same two-step pipeline `$((...))` itself uses) then evaluates it via
+`arith.rs` (C29) for its side effects; exit status mirrors `test`'s
+convention (`0` if the result is nonzero, `1` if zero). An empty `(( ))`
+evaluates as `0`/status `1` rather than erroring — matching a real,
+slightly odd bash asymmetry with `$(( ))` (which *does* error on empty),
+verified directly.
+
+### C29 — Richer arithmetic: `++`/`--`, `+=`, `**`, bitwise ops, ternary `?:` ✅ done
 Present in bash/ksh93/zsh (POSIX arithmetic is more minimal, closer to
-rush's current scope). `arith.rs`'s own doc comment already flags "no
-assignment/increment inside the expression yet" — this rounds that out.
-Without it, `$((i++))` and `$((a > b ? a : b))` simply don't parse.
-**Effort: M.**
+rush's previous scope). `arith.rs`'s own doc comment used to flag "no
+assignment/increment inside the expression yet" — this rounds that out,
+and was the prerequisite C27/C28 both needed (a C-style `for` header and
+a standalone `((...))` are close to meaningless without `i++`/`i+=1`).
+
+**The one real architectural change**: the previous `arith.rs` combined
+parsing and evaluation into one recursive-descent pass — fine when
+nothing has side effects, but assignment means `&&`/`||`/`?:` have to
+*actually* short-circuit (`0 && (i=5)` must never run the assignment,
+verified directly), which a combined pass can't do once it's already
+recursed into evaluating the right-hand side. `arith.rs` now parses into
+an `Expr` tree first, then a separate `eval_expr` walks it, evaluating
+`LogAnd`/`LogOr`/`Ternary`'s untaken side not at all — not just
+discarding its value.
+
+**Grammar**, precedence lowest to highest (verified directly against
+real bash at every boundary): assignment (`=`, and `+= -= *= /= %= <<=
+>>= &= ^= |=` — deliberately no `**=`, since real bash itself doesn't
+have one either, verified directly) is lowest and right-associative
+(`a = b = 5` assigns `b` first); then ternary `?:` (right-associative in
+its `else` position: `a?b:c?d:e` is `a?b:(c?d:e)`); `||`; `&&`; bitwise
+`|`, `^`, `&` (in that order — binding *looser* than the comparison
+operators below them, the classic C gotcha, e.g. `2+3 & 1` is `(2+3)&1`
+= `1`, not `2+(3&1)`); `==`/`!=`; `<`/`<=`/`>`/`>=`; `<<`/`>>`; `+`/`-`;
+`*`/`/`/`%`; `**` (right-associative, binds *tighter* than `*` but
+*looser* than unary — `2*3**2` is `2*(3**2)` = 18, `-2**2` is `(-2)**2`
+= 4); prefix `- + ! ~ ++ --`; postfix `++`/`--` (highest, and only valid
+directly on a variable name — `(1+2)++` errors, matching real bash).
+Assignment/`++`/`--`'s lvalue must be a plain variable name — indexing
+an array element in arithmetic context (`arr[i]++`, `arr[i] = x`) isn't
+supported, an accepted, documented gap.
+
+Every behavior — operator precedence at each boundary above, `**`'s
+right-associativity and its interaction with unary/`*`, bitwise
+operators' looser-than-comparison binding, ternary's right-associative
+nesting, chained right-associative assignment, compound-assignment's
+own RHS being a full sub-expression (`a += 2*3`), pre- vs. post-`++`/`--`
+returning the new vs. old value respectively, and `&&`/`||`/`?:` never
+running the untaken side's side effects — was verified directly against
+real bash and matches exactly.
 
 ### C30 — Here-strings: `<<<`
 Present in bash/ksh/zsh (not POSIX sh/dash). A small, extremely convenient
@@ -1113,8 +1204,5 @@ some natural orderings:
 - **C18/C19/C20 (the rest of `set -euo pipefail` plus `-x`)** are a natural
   follow-on to the already-shipped `set -e`, reusing the same `vars.rs`
   flag-storage pattern.
-- **C27/C28/C29 (C-style `for`, `((expr))`, richer arithmetic)** all extend
-  `arith.rs` and the parser together — likely one combined pass rather than
-  three separate ones.
 - **C33 (autosuggestions)** is the standout cheap win in Tier V given
   `completion.rs` already has the `Hinter` trait wired up as a no-op.

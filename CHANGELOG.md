@@ -783,3 +783,49 @@ This closes out **Tier I** (correctness/POSIX risk) — see
 - Found while verifying this item: `set -- args…`/`set args…` doesn't
   reassign positional parameters at all in rush — general, not specific
   to `select`, tracked as C39 (open, not fixed in this change).
+
+### C-style `for`, standalone `((expr))`, richer arithmetic (C27–C29)
+Done together in one pass — all three needed the same lexer/`arith.rs`
+groundwork.
+
+- **`Token::DblParen(String)`** (new, `lexer.rs`): `((` with no space is
+  always an arithmetic command or `for` header, never two nested
+  subshells (which need an explicit space, `( (cmd) )`, to get that
+  reading instead) — verified directly (`((echo hi))` fails as invalid
+  arithmetic rather than falling back to running `echo hi` in nested
+  subshells). Emitted wherever the lexer would otherwise tokenize a bare
+  `(`, via a new `take_double_paren` mirroring `expand::take_arith`'s
+  identical depth-tracking algorithm.
+- **`Compound::Arith(String)`** (C28, new, `parser.rs`/`exec.rs`): a
+  standalone `((expr))` command at command position. `$`-expands `expr`
+  then evaluates it via `arith.rs` for its side effects; exit status `0`
+  if the result is nonzero, `1` if zero (or if `expr` is empty — `(( ))`
+  evaluates as `0` rather than erroring, a real bash asymmetry with
+  `$(( ))`, which does error on empty, verified directly).
+- **`Compound::CFor { init, cond, update, body }`** (C27, new): `for
+  ((init; cond; update)); do BODY; done`. `parse_for` checks for
+  `Token::DblParen` right after `for` (unambiguous — a `NAME` can never
+  start with `(`), splitting the raw header on `;` into the three
+  clauses, `None` for an empty one (`for ((;;))` is a real infinite
+  loop). Execution evaluates `init` once, then loops testing `cond` (or
+  always-true if absent), running `body`, then `update` — except when
+  `body` ended via `break` (here or propagating outward), in which case
+  `update` doesn't run; a local `continue` still runs it first — real C
+  `for` semantics, verified directly.
+- **`arith.rs` rewrite** (C29): previously a combined parse-and-evaluate
+  pass; now parses into an `Expr` tree first, then a separate `eval_expr`
+  walks it — needed so `&&`/`||`/`?:` can genuinely short-circuit
+  (`0 && (i=5)` must never run the assignment, verified directly, which
+  a combined pass can't skip once already recursed into the right side).
+  Adds, in precedence order (lowest to highest, every boundary verified
+  directly against real bash): assignment (`=`, `+= -= *= /= %= <<= >>=
+  &= ^= |=` — no `**=`, matching bash exactly, which doesn't have one
+  either), right-associative; ternary `?:`, right-associative in its
+  `else` position; bitwise `| ^ &` (looser than comparisons — `2+3 & 1`
+  is `(2+3)&1`, not `2+(3&1)`); shift `<< >>`; `**` (right-associative,
+  tighter than `*` but looser than unary — `2*3**2`=18, `-2**2`=4);
+  prefix `- + ! ~ ++ --`; postfix `++`/`--` (only valid on a plain
+  variable name). Assignment/`++`/`--`'s lvalue must be a variable name —
+  no array-element lvalues (`arr[i]++`) or comma operator.
+- Adds 7 new `arith.rs` unit tests, 2 new parser unit tests, and 8 new
+  `exec_behavior.rs` integration tests; full suite and clippy stay clean.

@@ -260,6 +260,50 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             }
             Ok(status)
         }
+        // `for ((init; cond; update)); do BODY; done` — C-style. `cond`
+        // empty means always-true (`for ((;;))` is a real infinite loop,
+        // verified directly); `init`/`update` empty are no-ops.
+        Compound::CFor { init, cond, update, body } => {
+            if let Some(e) = init {
+                eval_arith_stmt(e)?;
+            }
+            let mut status = 0;
+            loop {
+                let keep_going = match cond {
+                    Some(e) => eval_arith_stmt(e)? != 0,
+                    None => true,
+                };
+                if !keep_going {
+                    break;
+                }
+                status = exec_list(body)?;
+                // This loop's own `continue` still runs `update` before
+                // re-testing `cond` — real C `for` semantics, verified
+                // directly; `break` (here, or propagating from an outer
+                // loop via `break N`/`continue N`) does not.
+                let ran_to_completion =
+                    matches!(crate::vars::loop_ctl(), None | Some(crate::vars::LoopCtl::Continue(1)));
+                if ran_to_completion && let Some(e) = update {
+                    eval_arith_stmt(e)?;
+                }
+                if loop_step()? {
+                    break;
+                }
+            }
+            Ok(status)
+        }
+        // `((expr))` — a standalone arithmetic command, for its side
+        // effects (assignment, `++`/`--`) rather than its value. Exit
+        // status mirrors `test`'s convention: `0` if `expr` is nonzero,
+        // `1` if zero. An empty `expr` evaluates as `0` (status `1`)
+        // rather than erroring — real bash's own asymmetry with `$(( ))`,
+        // which does error on empty — verified directly.
+        Compound::Arith(expr) => {
+            if expr.trim().is_empty() {
+                return Ok(1);
+            }
+            Ok(if eval_arith_stmt(expr)? != 0 { 0 } else { 1 })
+        }
         // `select NAME [in WORDS]; do BODY; done`: prints `WORDS` as a
         // numbered menu to stderr, then repeatedly prompts (`$PS3`, default
         // `#? `) and reads a line, setting `$REPLY` to it *raw* — no
@@ -391,6 +435,16 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             Ok(0)
         }
     }
+}
+
+/// Evaluate a raw arithmetic clause from `((expr))` or a C-style `for`
+/// header: `$`-references are resolved first (same two-step pipeline
+/// `$((...))` itself uses — a bare `i` and a `$`-prefixed `$i` both work),
+/// then the result is evaluated for its value *and* side effects
+/// (assignment, `++`/`--`).
+fn eval_arith_stmt(expr: &str) -> Result<i64, String> {
+    let expanded = crate::expand::expand_dollars(expr)?;
+    crate::arith::eval(&expanded)
 }
 
 /// `select`'s numbered menu, one entry per line: `N) word`. Real bash lays
@@ -1434,8 +1488,10 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
                 Compound::Loop { until: false, .. } => "while ...".to_string(),
                 Compound::Loop { until: true, .. } => "until ...".to_string(),
                 Compound::For { .. } => "for ...".to_string(),
+                Compound::CFor { .. } => "for ((...)) ...".to_string(),
                 Compound::Select { .. } => "select ...".to_string(),
                 Compound::Case { .. } => "case ...".to_string(),
+                Compound::Arith(_) => "((...))".to_string(),
                 Compound::Group(_) => "{ ... }".to_string(),
                 Compound::Subshell(_) => "( ... )".to_string(),
                 Compound::FuncDef { name, .. } => format!("{name}() {{ ... }}"),

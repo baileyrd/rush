@@ -1277,6 +1277,83 @@ fn select_ps3_prompt_defaults_and_dollar_expands() {
 }
 
 #[test]
+fn c_style_for_loop_basic_and_all_clauses_optional() {
+    assert_eq!(rush("for ((i=0;i<3;i++)); do echo $i; done").0, "0\n1\n2\n");
+    // No space needed between `for` and `((`.
+    assert_eq!(rush("for((i=0;i<3;i++)); do echo $i; done").0, "0\n1\n2\n");
+    // All three clauses empty: an infinite loop (an explicit `break` is
+    // what actually ends it, not the missing condition).
+    assert_eq!(rush("for ((;;)); do echo once; break; done").0, "once\n");
+    // Only the condition clause present; init/update are ordinary
+    // statements around the loop instead.
+    assert_eq!(rush("i=0; for ((;i<3;)); do echo $i; i=$((i+1)); done").0, "0\n1\n2\n");
+}
+
+#[test]
+fn c_style_for_continue_runs_update_but_break_does_not() {
+    assert_eq!(
+        rush("for ((i=0;i<5;i++)); do if [ $i -eq 2 ]; then continue; fi; echo $i; done").0,
+        "0\n1\n3\n4\n"
+    );
+    assert_eq!(
+        rush(r#"for ((i=0;i<3;i++)); do echo "i=$i"; break; done; echo "after:$i""#).0,
+        "i=0\nafter:0\n"
+    );
+}
+
+#[test]
+fn standalone_arith_command_sets_exit_status_and_runs_side_effects() {
+    // A nonzero result is status 0 (true); the assignment's side effect
+    // (not its value) is what the rest of the script sees.
+    assert_eq!(rush(r#"i=1; ((i = i + 5)); echo "$i status:$?""#).0, "6 status:0\n");
+    assert_eq!(rush(r#"i=0; ((i)); echo "status:$?""#).0, "status:1\n");
+    assert_eq!(rush(r#"i=1; ((i)); echo "status:$?""#).0, "status:0\n");
+    // Empty `(( ))` evaluates as 0/status 1 rather than erroring — a real
+    // bash asymmetry with `$(( ))` (which does error on empty).
+    assert_eq!(rush(r#"((  )); echo "status:$?""#).0, "status:1\n");
+    // Usable directly in `&&`/`||` like `test`.
+    assert_eq!(rush("((1==1)) && echo yes || echo no").0, "yes\n");
+}
+
+#[test]
+fn double_paren_is_always_arithmetic_never_nested_subshells() {
+    // A space between the two `(` is what forces the nested-subshell
+    // reading instead — matching real bash exactly, verified directly.
+    assert_eq!(rush("( (echo hi) )").0, "hi\n");
+    // Adjacent, no space: always arithmetic, even where that's invalid —
+    // never falls back to trying nested subshells.
+    let (_, status) = rush("((echo hi))");
+    assert_eq!(status, 1);
+}
+
+#[test]
+fn arithmetic_exponent_bitwise_and_ternary() {
+    assert_eq!(rush("echo $((2**10))").0, "1024\n");
+    // Unary binds tighter than `**`; `**` binds tighter than `*`.
+    assert_eq!(rush("echo $((-2**2))").0, "4\n");
+    assert_eq!(rush("echo $((2*3**2))").0, "18\n");
+    assert_eq!(rush("echo $((5 & 3)) $((5 | 2)) $((5 ^ 1)) $((~5))").0, "1 7 4 -6\n");
+    assert_eq!(rush("echo $((1 << 3)) $((16 >> 2))").0, "8 4\n");
+    assert_eq!(rush("echo $((1 ? 2 : 3)) $((0 ? 2 : 3))").0, "2 3\n");
+}
+
+#[test]
+fn arithmetic_assignment_and_inc_dec_in_dollar_paren() {
+    assert_eq!(rush("i=5; echo $((i++)); echo $i").0, "5\n6\n"); // postfix: old value
+    assert_eq!(rush("i=5; echo $((++i)); echo $i").0, "6\n6\n"); // prefix: new value
+    assert_eq!(rush("i=5; echo $((i+=3)); echo $i").0, "8\n8\n");
+    assert_eq!(rush(r#"i=1; j=$((i = 10)); echo "i=$i j=$j""#).0, "i=10 j=10\n");
+    assert_eq!(rush("i=1; ((i++)); echo $i").0, "2\n");
+}
+
+#[test]
+fn arithmetic_short_circuit_skips_assignment_side_effects() {
+    assert_eq!(rush("i=1; echo $((0 && (i=5))); echo $i").0, "0\n1\n");
+    assert_eq!(rush("i=1; echo $((1 || (i=5))); echo $i").0, "1\n1\n");
+    assert_eq!(rush("i=1; echo $((0 ? (i=9) : (i=7))); echo $i").0, "7\n7\n");
+}
+
+#[test]
 fn brace_expansion_comma_lists_and_cross_products() {
     // A plain comma-list turns one word into several argv words.
     assert_eq!(rush("echo {a,b,c}").0, "a b c\n");

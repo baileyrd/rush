@@ -59,10 +59,10 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, `${V#pat}`/`##`/`%`/`%%` (prefix/suffix pattern removal), tilde, command substitution; unquoted results field-split on `$IFS` |
-| Arithmetic (`$((...))`) | ✅ | `+ - * / %`, comparisons, `&& \|\| !`, parentheses, variables (`i=$((i+1))`) |
+| Arithmetic (`$((...))`, `((expr))`) | ✅ | `+ - * / % **`, bitwise `& \| ^ ~ << >>`, comparisons, `&& \|\| !`, ternary `?:`, assignment (`= += -= *= /= %= <<= >>= &= ^= \|=`), `++`/`--` (pre/post), parentheses, variables; standalone `((expr))` command, `for ((init;cond;update))` |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
-| Control flow | ✅ | `if`/`while`/`until`/`for`/`select` (`for`/`select x; do` with no `in` iterates `"$@"`), `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
+| Control flow | ✅ | `if`/`while`/`until`/`for`/`select` (`for`/`select x; do` with no `in` iterates `"$@"`), C-style `for ((init;cond;update))`, `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`, `local [name[=value]]…` for function-scoped variables; brace groups `{ …; }` |
 | Subshells | ✅ | `( … )` forks a real child on Unix (genuine isolation, incl. `exit`); state save/restore fallback elsewhere |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`/`wait`, `$!`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |

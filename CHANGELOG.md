@@ -674,3 +674,59 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   arrays (`arr=([5]=x [2]=y z)`); a subscript combined with
   pattern-removal/default-alternate operators (the same pre-existing C22
   gap, not newly introduced).
+
+### Brace expansion (C24)
+- **`BraceAtom`** (`expand.rs`, new): re-represents a `Word`'s content for
+  scanning purposes — `Ch(char)` for a character from an `Unquoted` part
+  (eligible to be `{`/`,`/`.`, or ordinary text) or `Opaque(WordPart)` for
+  a `Quoted`/`Literal`/`ArrayLiteral` chunk, inert to brace syntax but
+  still carried through verbatim into whichever alternative it lands in
+  (`pre{"a,b",c}post` splits on the *unquoted* comma only).
+- **Scanning** (`brace_expand_atoms`): scans left to right for the first
+  valid `{...}` group (depth-tracked bracket matching via
+  `matching_close`) and expands it, recursing into the suffix for any
+  further group (`{a,b}{c,d}` is a cross product); an invalid group (no
+  top-level comma and not a valid range) is left as a literal `{` and the
+  scan resumes right after it, so one invalid group doesn't block a valid
+  one later in the same word (`{{a,b}` → `{a`, `{b`).
+- **Comma-lists and ranges** (`expand_group`/`expand_range`): a
+  comma-list splits only on *top-level* commas (one inside a nested
+  `{...}` doesn't count), and each segment is itself recursively
+  brace-expanded. A range is numeric (`{1..5}`, `{-3..3}`) or
+  single-letter (`{a..z}`, stepping raw ASCII code points even across a
+  mixed-case pair like `{A..z}`), both with an optional third `..step`
+  field (sign ignored, direction inferred from the endpoints, an explicit
+  step of `0` treated as `1`). Zero-padding: a leading `0` on either
+  endpoint (after an optional sign, more than one digit) pads every
+  generated term to that endpoint's own total literal width, sign
+  included (`{-01..05}` → `-01 000 001 002 003 004 005`); a leading `+`
+  never triggers it.
+- **Wiring**: hooked into `expand_argv_word` (covering ordinary command
+  arguments, `for`-loop word lists, and array-literal elements, which all
+  already funnel through it) and into `local`/`declare`'s own
+  argument-parsing loop — verified directly that `local x={a,b}`
+  brace-expands into two words (`x=a` then `x=b`, applied in order,
+  leaving `x=b`), since bash treats `local`'s arguments as ordinary
+  command words, not assignment-statement syntax. Deliberately *not*
+  wired into real assignment-statement values: a bare `x={a,b}` or a
+  prefix `FOO={a,b} cmd` keeps the literal text, matching bash exactly.
+- Runs on a word's raw, unexpanded text, before `$`/glob expansion — same
+  order as real bash: `{$x,y}` expands the braces into two words first,
+  then `$x` resolves normally in whichever one it lands in; `{1..$n}` is
+  an invalid range at brace-expansion time (`$n` isn't yet a literal
+  integer) and stays literal text even though `$n` itself still expands
+  afterwards.
+- Explicitly out of scope, each a documented, accepted gap: redirect
+  targets and case subjects/patterns aren't brace-expanded (real bash
+  *does* brace-expand a redirect target, erroring "ambiguous redirect" on
+  more than one resulting word — rush's redirect-target expansion doesn't
+  go through this path at all); a generated range element that happens to
+  itself be a shell metacharacter (a bare `\` from a mixed-case ASCII
+  range crossing code point 92, e.g. one term of `{A..z}`) doesn't get
+  real bash's own post-generation backslash-consumption quirk.
+- Verified directly against real bash across more than 60 scenarios —
+  comma-lists, nesting, cross products, quoting interactions,
+  numeric/letter ranges with and without an explicit step, zero-padding,
+  the assignment-vs-argument-word distinction, and the `$`-expansion
+  ordering — matching exactly except the one documented backslash corner
+  above.

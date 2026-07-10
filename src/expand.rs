@@ -181,7 +181,15 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
         }
 
         let mut decls = Vec::new();
-        for word in rest {
+        // `local`/`declare`'s own arguments are ordinary command-argument
+        // words, not assignment-statement syntax, so — unlike a bare
+        // `x={a,b}` statement or a `FOO={a,b} cmd` prefix assignment,
+        // neither of which brace-expand — `local x={a,b}` does (verified
+        // directly: it becomes two words, `x=a` then `x=b`, applied in
+        // order, leaving `x=b`). Brace-expand each word here, before
+        // `assignment_split` ever sees it.
+        for word in rest.iter().flat_map(brace_expand) {
+            let word = &word;
             match assignment_split(word) {
                 Some((name, RawAssign::Whole(append, raw_value))) => {
                     let value = match raw_value {
@@ -380,6 +388,18 @@ fn parse_assoc_literal_element(word: &Word) -> Option<(String, Word)> {
 
 /// Expand a word destined for `argv`, possibly into several arguments.
 ///
+/// Brace expansion (`{a,b,c}`, `{1..5}`) runs first, on the word's raw,
+/// unexpanded text — same order as real bash, so `{$x,y}` expands the
+/// braces into two words *before* `$x` resolves in whichever one it lands
+/// in. Each resulting word is then expanded independently below.
+fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for w in brace_expand(word) {
+        out.extend(expand_argv_word_after_braces(&w)?);
+    }
+    Ok(out)
+}
+
 /// Whitespace inside an *unquoted* expansion splits the word into fields
 /// (`x="a b"; echo $x` → two args) — and since the lexer already split on
 /// literal whitespace, any whitespace left in an unquoted part can only have
@@ -390,7 +410,7 @@ fn parse_assoc_literal_element(word: &Word) -> Option<(String, Word)> {
 /// replaced by the sorted matches; otherwise its literal text is used. A field
 /// that is entirely unquoted and empty (e.g. `$UNSET`) drops out; a quoted empty
 /// (`""`) is kept.
-fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
+fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
     // A standalone `"$@"` expands to one argument per positional parameter,
     // preserving any spaces within each — the common arg-forwarding idiom.
     if let [WordPart::Quoted(s)] = word.as_slice() {
@@ -464,6 +484,294 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
         out.push(field.plain);
     }
     Ok(out)
+}
+
+/// Brace expansion (`{a,b,c}`, `{1..5}`, `{a..z..2}`) — bash/ksh/zsh, not
+/// POSIX; not applied to assignment-statement words (`x=value`, a prefix
+/// `FOO=value cmd`), case subjects/patterns, or redirect targets, matching
+/// real bash exactly for the first, and an accepted, documented scope
+/// narrowing for the rest (verified directly: real bash *does*
+/// brace-expand a redirect target, producing "ambiguous redirect" if it's
+/// more than one word — rush's own redirect-target expansion doesn't go
+/// through this path at all).
+///
+/// Runs on the word's raw, unexpanded text, exactly like real bash: a `$`
+/// or `$(...)` inside a brace group is only resolved *after* the group
+/// itself is expanded (`{$x,y}` splits into two words first; `$x` then
+/// resolves normally in whichever one it lands in), and an endpoint that
+/// isn't a literal integer/single-letter at this stage (`{1..$n}`) makes
+/// the whole group invalid — left as literal text — even though `$n`
+/// itself still expands normally afterwards. Returns `vec![word.clone()]`
+/// unchanged when no valid group exists anywhere in the word (the common
+/// case).
+fn brace_expand(word: &Word) -> Vec<Word> {
+    brace_expand_atoms(&word_to_atoms(word)).into_iter().map(|a| atoms_to_word(&a)).collect()
+}
+
+/// One atomic unit of a word's text for brace-expansion scanning: a single
+/// unquoted character (eligible to be `{`/`,`/`.`, or ordinary text) or an
+/// opaque quoted/literal/array-literal chunk — inert to brace syntax (a
+/// quoted `,` or `}` never acts as a delimiter) but still carried through
+/// verbatim into whichever alternative it ends up in (`pre{"a,b",c}post`
+/// splits on the *unquoted* comma only, verified directly against bash).
+#[derive(Clone)]
+enum BraceAtom {
+    Ch(char),
+    Opaque(WordPart),
+}
+
+fn word_to_atoms(word: &Word) -> Vec<BraceAtom> {
+    let mut atoms = Vec::new();
+    for part in word {
+        match part {
+            WordPart::Unquoted(s) => atoms.extend(s.chars().map(BraceAtom::Ch)),
+            other => atoms.push(BraceAtom::Opaque(other.clone())),
+        }
+    }
+    atoms
+}
+
+fn atoms_to_word(atoms: &[BraceAtom]) -> Word {
+    let mut parts: Word = Vec::new();
+    for atom in atoms {
+        match atom {
+            BraceAtom::Ch(c) => match parts.last_mut() {
+                Some(WordPart::Unquoted(s)) => s.push(*c),
+                _ => parts.push(WordPart::Unquoted(c.to_string())),
+            },
+            BraceAtom::Opaque(part) => parts.push(part.clone()),
+        }
+    }
+    parts
+}
+
+/// Scan left to right for the first *valid* `{...}` group (a comma-list or
+/// a range) and expand it, recursing into the suffix for any further group
+/// (`{a,b}{c,d}` is a cross product). A `{` that turns out invalid (no
+/// top-level comma and not a range — `{a}`, `{1..$n}`, unterminated) is
+/// left as a literal character and the scan resumes right after it, so an
+/// invalid group doesn't block a valid one later in the same word
+/// (`{{a,b}` → `{a`, `{b`: the outer `{` is unterminated as its own group
+/// since the first `}` closes the inner one, so it falls back to literal
+/// and the scan finds `{a,b}` starting one character later — verified
+/// directly against bash).
+fn brace_expand_atoms(atoms: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
+    let mut i = 0;
+    while i < atoms.len() {
+        if matches!(atoms[i], BraceAtom::Ch('{'))
+            && let Some(j) = matching_close(atoms, i)
+            && let Some(alternatives) = expand_group(&atoms[i + 1..j])
+        {
+            let prefix = &atoms[..i];
+            let suffix_alts = brace_expand_atoms(&atoms[j + 1..]);
+            let mut out = Vec::new();
+            for alt in &alternatives {
+                for suffix in &suffix_alts {
+                    let mut combined = prefix.to_vec();
+                    combined.extend(alt.iter().cloned());
+                    combined.extend(suffix.iter().cloned());
+                    out.push(combined);
+                }
+            }
+            return out;
+        }
+        i += 1;
+    }
+    vec![atoms.to_vec()]
+}
+
+/// The position of the `}` matching the `{` at `atoms[open]`, tracking
+/// nested depth — `None` if unterminated.
+fn matching_close(atoms: &[BraceAtom], open: usize) -> Option<usize> {
+    let mut depth = 1;
+    for (k, atom) in atoms.iter().enumerate().skip(open + 1) {
+        match atom {
+            BraceAtom::Ch('{') => depth += 1,
+            BraceAtom::Ch('}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Try to expand a `{...}` group's inner content as a comma-list
+/// (`a,b,c`, split only on *top-level* commas — one inside a nested
+/// `{...}` doesn't count) or, failing that, a range (`1..5`, `a..z..2`).
+/// `None` if it's neither — an invalid/malformed group, left as literal
+/// text by the caller.
+fn expand_group(content: &[BraceAtom]) -> Option<Vec<Vec<BraceAtom>>> {
+    let segments = split_top_level_commas(content);
+    if segments.len() > 1 {
+        let mut out = Vec::new();
+        for seg in &segments {
+            out.extend(brace_expand_atoms(seg));
+        }
+        return Some(out);
+    }
+    expand_range(content)
+}
+
+fn split_top_level_commas(content: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
+    let mut segments = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0;
+    for atom in content {
+        match atom {
+            BraceAtom::Ch('{') => {
+                depth += 1;
+                current.push(atom.clone());
+            }
+            BraceAtom::Ch('}') => {
+                depth -= 1;
+                current.push(atom.clone());
+            }
+            BraceAtom::Ch(',') if depth == 0 => segments.push(std::mem::take(&mut current)),
+            _ => current.push(atom.clone()),
+        }
+    }
+    segments.push(current);
+    segments
+}
+
+/// `{X..Y}` / `{X..Y..Z}` — a numeric or single-letter range. `None` if
+/// `content` isn't a valid range expression: not plain unquoted text, not
+/// exactly two or three `..`-separated fields, or the endpoints aren't
+/// both integers or both single ASCII letters (verified directly: a
+/// mismatched pair like `{1..a}` or a quoted endpoint like `{"1"..5}` is
+/// left as literal text, same as any other invalid group).
+fn expand_range(content: &[BraceAtom]) -> Option<Vec<Vec<BraceAtom>>> {
+    let mut text = String::new();
+    for atom in content {
+        match atom {
+            BraceAtom::Ch(c) => text.push(*c),
+            BraceAtom::Opaque(_) => return None,
+        }
+    }
+    let fields: Vec<&str> = text.split("..").collect();
+    let (start, end, step_field) = match fields.as_slice() {
+        [a, b] => (*a, *b, None),
+        [a, b, c] => (*a, *b, Some(*c)),
+        _ => return None,
+    };
+    let step = match step_field {
+        Some(s) => Some(parse_range_int(s)?.value),
+        None => None,
+    };
+
+    let strings = if let (Some(a), Some(b)) = (parse_range_int(start), parse_range_int(end)) {
+        numeric_range(&a, &b, step)
+    } else {
+        let a = single_letter(start)?;
+        let b = single_letter(end)?;
+        char_range(a, b, step.unwrap_or(1))
+    };
+
+    Some(strings.into_iter().map(|s| s.chars().map(BraceAtom::Ch).collect()).collect())
+}
+
+/// A parsed numeric range endpoint: its value, whether it triggers
+/// zero-padding (its digits — sign aside — start with `0` and there's more
+/// than one of them, bash's own trigger, verified directly), and the total
+/// character width its own literal token occupies once padding is
+/// triggered (a leading `+` is dropped and doesn't count; a leading `-`
+/// stays and does — `{-01..05}` pads to width 3, `-01`'s own length, not
+/// 2).
+struct RangeEndpoint {
+    value: i64,
+    width: usize,
+    pads: bool,
+}
+
+fn parse_range_int(s: &str) -> Option<RangeEndpoint> {
+    let (negative, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude: i64 = digits.parse().ok()?;
+    Some(RangeEndpoint {
+        value: if negative { -magnitude } else { magnitude },
+        width: usize::from(negative) + digits.len(),
+        pads: digits.len() > 1 && digits.starts_with('0'),
+    })
+}
+
+fn numeric_range(a: &RangeEndpoint, b: &RangeEndpoint, explicit_step: Option<i64>) -> Vec<String> {
+    let step = match explicit_step.map(i64::abs) {
+        None | Some(0) => 1,
+        Some(s) => s,
+    };
+    let pad = a.pads || b.pads;
+    let width = a.width.max(b.width);
+    let mut out = Vec::new();
+    let mut v = a.value;
+    if a.value <= b.value {
+        while v <= b.value {
+            out.push(format_range_int(v, pad, width));
+            v += step;
+        }
+    } else {
+        while v >= b.value {
+            out.push(format_range_int(v, pad, width));
+            v -= step;
+        }
+    }
+    out
+}
+
+fn format_range_int(v: i64, pad: bool, width: usize) -> String {
+    if !pad {
+        return v.to_string();
+    }
+    if v < 0 {
+        format!("-{:0width$}", -v, width = width.saturating_sub(1))
+    } else {
+        format!("{v:0width$}")
+    }
+}
+
+/// A single ASCII letter, and nothing else — `{ab..cd}` isn't a range.
+fn single_letter(s: &str) -> Option<char> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    (chars.next().is_none() && c.is_ascii_alphabetic()).then_some(c)
+}
+
+/// A character range steps raw ASCII code points between the two
+/// endpoints — same as real bash, including a mixed-case pair like
+/// `{A..z}` stepping through the punctuation between `Z` and `a` in the
+/// ASCII table (verified directly), not just same-case letter ranges.
+fn char_range(a: char, b: char, step: i64) -> Vec<String> {
+    let step = match step.abs() {
+        0 => 1,
+        s => s,
+    };
+    let (a, b) = (a as i64, b as i64);
+    let mut out = Vec::new();
+    let mut v = a;
+    if a <= b {
+        while v <= b {
+            if let Some(c) = char::from_u32(v as u32) {
+                out.push(c.to_string());
+            }
+            v += step;
+        }
+    } else {
+        while v >= b {
+            if let Some(c) = char::from_u32(v as u32) {
+                out.push(c.to_string());
+            }
+            v -= step;
+        }
+    }
+    out
 }
 
 /// `$IFS`'s field-splitting rules (POSIX §2.6.5). Unset IFS defaults to

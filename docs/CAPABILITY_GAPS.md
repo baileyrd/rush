@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (13 done, 10 open — C58–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (14 done, 9 open — C59–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C57 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C58 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-16 are open.
+15 are open.
 
 ---
 
@@ -2413,7 +2413,7 @@ expansion verified byte-identical to bash on shared fixtures. One unit
 test (the semantics matrix) and one integration test (all four
 surfaces) cover it.
 
-### C58 — `shopt` builtin, and the glob options it gates: `nullglob`, `failglob`, `dotglob`, `globstar` (tracked)
+### C58 — `shopt` builtin, and the glob options it gates: `nullglob`, `failglob`, `dotglob`, `globstar` ✅ done
 `shopt` itself is bash-specific; the *behaviors* it toggles have rough
 equivalents in zsh (`setopt`) and, for `globstar`, native `**` in
 ksh93/zsh. Not in dash. Rush has no `shopt` builtin at all (`command not
@@ -2432,6 +2432,33 @@ the thread-local flag pattern `errexit`/`nounset`/`xtrace`/`pipefail`
 already use in `vars.rs`); **globstar specifically is its own M** — real
 recursive-descent directory walking in `glob.rs`'s `walk`, not just a
 flag check.
+
+Implemented, both halves. The `shopt` builtin covers list/`-p`
+(re-runnable)/query/`-q`/`-s`/`-u`, with bash's exact formats and
+statuses (query returns 0 only when *all* named options are set;
+unknown names are "invalid shell option name", status 1; a bare
+`shopt -s` lists only the set options — all verified). Recognized set:
+the four glob options plus `extglob`, which defaults **on** (C57's
+ksh93-style choice, now genuinely toggleable — `shopt -u extglob` makes
+the matcher treat `@(…)` as literal text; bash-off-mode's hard syntax
+error is the one deliberate divergence, since rush's lexer change is
+unconditional). Options live in a `SHOPTS` map over a defaults table in
+`vars.rs`, only storing explicit toggles.
+
+The glob behaviors: `nullglob` (no-match drops the word) and `failglob`
+(no-match is a hard error — bash aborts the whole `-c` script there,
+verified, and rush's expansion-error channel does the same) hook the
+single existing fallback decision point in `expand.rs`; `dotglob` is a
+flag check in `glob.rs`'s `walk`; and `globstar` got the real recursive
+descent the estimate promised — `**` matches zero or more directory
+levels, with output shapes verified **byte-identical to bash** on a
+shared fixture tree for `echo **`, `echo **/*.txt`, and `echo a/**`
+(including bash's quirk of listing the zero-level directory itself as
+`a/` with a trailing slash). Not implemented, documented: the
+`**/`-only-directories trailing-slash form (rush's path splitter drops
+the empty final component). Without the option, `**` keeps collapsing
+to `*`, exactly as before. One integration test covers the whole
+matrix.
 
 ### C59 — String transformation operators: search/replace `${v/pat/repl}`, substring `${v:offset:length}`, case conversion `${v^^}` (tracked)
 The single most commonly used family of missing `${...}` operators.

@@ -61,10 +61,37 @@ fn walk(dir: &Path, segs: &[&str], i: usize, prefix: &str, out: &mut Vec<String>
         Err(_) => return,
     };
     let pattern_is_dotted = seg.starts_with('.');
+    let dotglob = crate::vars::shopt("dotglob");
+
+    // `**` (globstar, C58; opt-in via `shopt -s globstar`, same as bash):
+    // zero or more directory levels. Without the option, the pre-existing
+    // behavior stands — adjacent `*`s collapse, so `**` acts like `*`.
+    if seg == "**" && crate::vars::shopt("globstar") {
+        if is_last {
+            // Zero levels: the prefix directory itself, printed with its
+            // trailing slash (`a/**` lists `a/` first — verified bash).
+            if !prefix.is_empty() {
+                out.push(prefix.to_string());
+            }
+            collect_recursive(dir, prefix, dotglob, out);
+        } else {
+            walk(dir, segs, i + 1, prefix, out); // zero levels
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') && !dotglob {
+                    continue;
+                }
+                if entry.path().is_dir() {
+                    walk(&entry.path(), segs, i, &format!("{prefix}{name}/"), out);
+                }
+            }
+        }
+        return;
+    }
 
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && !pattern_is_dotted {
+        if name.starts_with('.') && !pattern_is_dotted && !dotglob {
             continue;
         }
         if !match_component(seg, &name) {
@@ -76,6 +103,26 @@ fn walk(dir: &Path, segs: &[&str], i: usize, prefix: &str, out: &mut Vec<String>
         } else if entry.path().is_dir() {
             walk(&entry.path(), segs, i + 1, &format!("{display}/"), out);
         }
+    }
+}
+
+/// Every descendant of `dir` (files and directories alike, directories
+/// without a trailing slash), for a trailing `**` — bash's own format,
+/// verified directly.
+fn collect_recursive(dir: &Path, prefix: &str, dotglob: bool, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !dotglob {
+            continue;
+        }
+        let display = format!("{prefix}{name}");
+        if entry.path().is_dir() {
+            collect_recursive(&entry.path(), &format!("{display}/"), dotglob, out);
+        }
+        out.push(display);
     }
 }
 
@@ -133,6 +180,7 @@ fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
         if pi + 1 < p.len()
             && matches!(p[pi], '?' | '*' | '+' | '@' | '!')
             && p[pi + 1] == '('
+            && crate::vars::shopt("extglob")
             && let Some((alts, rest)) = parse_extglob(p, pi + 1)
         {
             return match_extglob(p[pi], &alts, p, rest, s, si);

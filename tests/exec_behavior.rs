@@ -2523,3 +2523,54 @@ fn extended_globs_across_surfaces() {
     let (out, _) = rush("echo @(zz|yy)qq; (echo subshell)");
     assert_eq!(out, "@(zz|yy)qq\nsubshell\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn shopt_and_glob_options() {
+    // C58: shopt didn't exist and the glob engine's behavior was
+    // hardcoded. Formats and statuses all verified against bash.
+    let dir = std::env::temp_dir().join(format!("rush_c58_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("a/b")).unwrap();
+    for f in ["f1.txt", "a/f2.txt", "a/b/f3.txt", ".hidden"] {
+        std::fs::write(dir.join(f), "").unwrap();
+    }
+    let cd = format!("cd {}; ", dir.display());
+
+    // nullglob drops the word; failglob is a hard error; default keeps
+    // the literal.
+    let (out, _) = rush(&format!("{cd}shopt -s nullglob; echo x *.zzz y"));
+    assert_eq!(out, "x y\n");
+    let (out, status) = rush(&format!("{cd}shopt -s failglob; echo *.zzz; echo after"));
+    assert_eq!((out.as_str(), status), ("", 1));
+    let (out, _) = rush(&format!("{cd}echo *.zzz"));
+    assert_eq!(out, "*.zzz\n");
+
+    // dotglob lets * see dotfiles; globstar makes ** recursive (zero or
+    // more levels — bash-identical output shapes).
+    let (out, _) = rush(&format!("{cd}shopt -s dotglob; echo *"));
+    assert_eq!(out, ".hidden a f1.txt\n");
+    let (out, _) = rush(&format!("{cd}shopt -s globstar; echo **"));
+    assert_eq!(out, "a a/b a/b/f3.txt a/f2.txt f1.txt\n");
+    let (out, _) = rush(&format!("{cd}shopt -s globstar; echo **/*.txt"));
+    assert_eq!(out, "a/b/f3.txt a/f2.txt f1.txt\n");
+    let (out, _) = rush(&format!("{cd}shopt -s globstar; echo a/**"));
+    assert_eq!(out, "a/ a/b a/b/f3.txt a/f2.txt\n");
+    // Without globstar, ** collapses to * (the pre-existing behavior).
+    let (out, _) = rush(&format!("{cd}echo **"));
+    assert_eq!(out, "a f1.txt\n");
+
+    // Query/set/quiet/print forms and statuses.
+    let (out, _) = rush("shopt nullglob; echo st=$?; shopt -q nullglob; echo st=$?; shopt -s nullglob; shopt -q nullglob; echo st=$?");
+    assert_eq!(out, "nullglob       \toff\nst=1\nst=1\nst=0\n");
+    let (out, _) = rush("shopt -p extglob");
+    assert_eq!(out, "shopt -s extglob\n"); // rush's extglob defaults ON (C57)
+    let (err, status) = rush_stderr("shopt badopt");
+    assert!(err.contains("invalid shell option name"), "got: {err:?}");
+    assert_eq!(status, 1);
+
+    // extglob is genuinely toggleable: off makes the pattern literal.
+    let (out, _) = rush("shopt -u extglob; [[ afile = @(a|b)file ]]; echo st=$?; shopt -s extglob; [[ afile = @(a|b)file ]] && echo back-on");
+    assert_eq!(out, "st=1\nback-on\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

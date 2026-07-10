@@ -897,6 +897,54 @@ fn exec_builtin() {
 
 #[cfg(unix)]
 #[test]
+fn redirect_to_fd_3_actually_uses_fd_3_not_stdout() {
+    // C38: a redirect to any fd other than 0/1/2 used to silently collapse
+    // onto fd 1 — `cmd 3>file` redirected *stdout*, not a real fd 3. Now a
+    // real `cmd 4>&3` (dup'd off it) lands in the file, and ordinary stdout
+    // (unredirected) still reaches the captured output normally.
+    let path = std::env::temp_dir().join(format!("rush_c38_fd3_{}.txt", std::process::id()));
+    let file = path.to_str().unwrap();
+
+    // Builtin path (`redirect_stdio`, in-process): `echo`'s own stdout is
+    // dup'd through fd 3 into the file, not left on the real stdout at all.
+    let (out, _) = rush(&format!("echo hi 3>{file} 1>&3"));
+    assert_eq!(out, "");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi\n");
+    let _ = std::fs::remove_file(&path);
+
+    // External-command path (`build_stage`, a real spawned child): same
+    // idea, through `cat` instead of a builtin.
+    let (out, _) = rush(&format!("cat <<< external-hi 3>{file} 1>&3"));
+    assert_eq!(out, "");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external-hi\n");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_side_fd_dup_works_for_builtins_and_external_commands() {
+    // The read-side counterpart of the above: `N<&target` (verified above
+    // in `lexer.rs` to not even parse before this fix) actually reads
+    // through the duplicated fd.
+    let path = std::env::temp_dir().join(format!("rush_c38_readfd_{}.txt", std::process::id()));
+    let file = path.to_str().unwrap();
+    std::fs::write(&path, "fd-chain-value\n").unwrap();
+
+    // Builtin (`read`), stdin from /dev/null so a wrong redirect would hang
+    // rather than silently pass by reading the test harness's own stdin.
+    let (out, _) = rush_stdin(&format!("read line 3<{file} <&3; echo got:$line"), "");
+    assert_eq!(out, "got:fd-chain-value\n");
+
+    // External command (`cat`), chaining fd 3 → fd 4 → stdin (`<&4`) to
+    // also cover a multi-hop dup, not just a single one.
+    let (out, _) = rush_stdin(&format!("cat 3<{file} 4<&3 <&4"), "");
+    assert_eq!(out, "fd-chain-value\n");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
 fn umask_builtin() {
     // No args reports the current mask; `-S` reports it symbolically.
     assert_eq!(rush("umask 022; umask").0, "0022\n");

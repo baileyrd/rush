@@ -922,15 +922,7 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
 
     let mut guard = StdioGuard { saved: Vec::new() };
 
-    // Same fd-0/2/else-is-stdout approximation `build_stage` uses.
-    let target_fd = |fd: u32| -> i32 {
-        match fd {
-            0 => 0,
-            2 => 2,
-            _ => 1,
-        }
-    };
-    let redirect_to = |guard: &mut StdioGuard, target: i32, source: &File| -> Result<(), String> {
+    let redirect_to = |guard: &mut StdioGuard, target: i32, source: File| -> Result<(), String> {
         if !guard.saved.iter().any(|(fd, _)| *fd == target) {
             let saved = unsafe { libc::dup(target) };
             if saved == -1 {
@@ -940,6 +932,19 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
         }
         if unsafe { libc::dup2(source.as_raw_fd(), target) } == -1 {
             return Err(std::io::Error::last_os_error().to_string());
+        }
+        // A freshly opened file's own fd is often *exactly* `target` (its
+        // lowest-available-fd allocation landing on the very number we're
+        // redirecting to) — overwhelmingly likely for fd 3+ specifically,
+        // since 0/1/2 are essentially always already open in a real
+        // process but 3+ usually isn't. `dup2` on identical fds is a
+        // defined no-op (POSIX: neither closes nor duplicates anything),
+        // so in that case `source` *is* the live redirect now — letting it
+        // drop normally would close the very fd this call just set up.
+        // Forget it instead; ownership has effectively passed to the fd
+        // table entry itself.
+        if source.as_raw_fd() == target {
+            std::mem::forget(source);
         }
         Ok(())
     };
@@ -951,18 +956,25 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
                     RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
                     RedirMode::Write | RedirMode::Append => open_write(file, *mode == RedirMode::Append)?,
                 };
-                redirect_to(&mut guard, target_fd(*fd), &f)?;
+                // Any fd, not just 0/1/2 — `StdioGuard.saved` is keyed by
+                // plain `i32`, so no fd is special-cased here (see C38).
+                redirect_to(&mut guard, *fd as i32, f)?;
             }
             Redirect::Both { file, append } => {
                 let f = open_write(file, *append)?;
-                redirect_to(&mut guard, 1, &f)?;
-                redirect_to(&mut guard, 2, &f)?;
+                let g = f.try_clone().map_err(|e| e.to_string())?;
+                redirect_to(&mut guard, 1, f)?;
+                redirect_to(&mut guard, 2, g)?;
             }
             Redirect::Dup { fd, target } => {
-                // `target` is already live on fd 0/1/2 (possibly redirected by
-                // an earlier entry in this same list) — dup straight from it.
-                let dst = target_fd(*fd);
-                let src = target_fd(*target);
+                // `target` is already live on its own fd (possibly redirected
+                // by an earlier entry in this same list) — dup straight from
+                // it, whatever fd it actually is. No freshly opened `File`
+                // involved here (unlike the `File` arm above), so no
+                // self-dup/forget concern: `target` is a plain existing fd
+                // number, not something we'd otherwise drop.
+                let dst = *fd as i32;
+                let src = *target as i32;
                 if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
                     let saved = unsafe { libc::dup(dst) };
                     if saved == -1 {
@@ -1001,7 +1013,7 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
             let mut write = write;
             let _ = write.write_all(body.as_bytes());
         });
-        redirect_to(&mut guard, 0, &read)?;
+        redirect_to(&mut guard, 0, read)?;
     }
 
     Ok(guard)
@@ -1475,25 +1487,27 @@ pub(crate) fn build_stage(
     let mut stdout_sink = if !is_last || capture { Sink::Pipe } else { Sink::Inherit };
     let mut stderr_sink = Sink::Inherit;
     let mut real_pipe_read: Option<File> = None;
+    // Any fd other than 0/1/2 (`cmd 3>file`, `cmd 4<&3`) — `Command` only
+    // exposes `.stdin()`/`.stdout()`/`.stderr()`, so these are applied via a
+    // `pre_exec` `dup2` sequence instead (see below), in the same source
+    // order they appear in `cmd.redirects` so a later entry can reference an
+    // earlier one (`3>file 4>&3`).
+    let mut extra_fds: Vec<FdAction> = Vec::new();
 
     for r in &cmd.redirects {
         match r {
-            Redirect::File { fd, file, mode } => match mode {
-                RedirMode::Read => {
-                    let f = File::open(file).map_err(|e| format!("{file}: {e}"))?;
-                    if *fd == 0 {
-                        stdin_sink = Some(Stdio::from(f));
-                    }
+            Redirect::File { fd, file, mode } => {
+                let f = match mode {
+                    RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                    RedirMode::Write | RedirMode::Append => open_write(file, *mode == RedirMode::Append)?,
+                };
+                match fd {
+                    0 => stdin_sink = Some(Stdio::from(f)),
+                    1 => stdout_sink = Sink::File(f),
+                    2 => stderr_sink = Sink::File(f),
+                    _ => extra_fds.push(FdAction::Open(f, *fd)),
                 }
-                RedirMode::Write | RedirMode::Append => {
-                    let f = open_write(file, *mode == RedirMode::Append)?;
-                    match fd {
-                        0 => stdin_sink = Some(Stdio::from(f)),
-                        2 => stderr_sink = Sink::File(f),
-                        _ => stdout_sink = Sink::File(f),
-                    }
-                }
-            },
+            }
             Redirect::Both { file, append } => {
                 let f = open_write(file, *append)?;
                 let g = f.try_clone().map_err(|e| e.to_string())?;
@@ -1501,14 +1515,24 @@ pub(crate) fn build_stage(
                 stderr_sink = Sink::File(g);
             }
             Redirect::Dup { fd, target } => {
-                let cloned = if *target == 2 {
-                    clone_or_materialize(&mut stderr_sink, &mut real_pipe_read)?
+                if matches!(fd, 0..=2) && matches!(target, 0..=2) {
+                    let cloned = if *target == 2 {
+                        clone_or_materialize(&mut stderr_sink, &mut real_pipe_read)?
+                    } else {
+                        clone_or_materialize(&mut stdout_sink, &mut real_pipe_read)?
+                    };
+                    match fd {
+                        2 => stderr_sink = cloned,
+                        _ => stdout_sink = cloned,
+                    }
                 } else {
-                    clone_or_materialize(&mut stdout_sink, &mut real_pipe_read)?
-                };
-                match fd {
-                    2 => stderr_sink = cloned,
-                    _ => stdout_sink = cloned,
+                    // Either side is 3+: nothing to clone from a `Sink` (that
+                    // machinery only tracks 0/1/2) — `target`'s own value is
+                    // whatever the child's fd table holds for it by this
+                    // point in the sequence (Rust's own stdio setup for
+                    // 0/1/2, or an earlier entry here for 3+), so a plain
+                    // `dup2(target, fd)` at `pre_exec` time is enough.
+                    extra_fds.push(FdAction::Dup { source: *target, dest: *fd });
                 }
             }
         }
@@ -1529,7 +1553,50 @@ pub(crate) fn build_stage(
         command.stderr(s);
     }
 
+    #[cfg(unix)]
+    if !extra_fds.is_empty() {
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the closure only calls `dup2`/inspects `errno` — both
+        // async-signal-safe, the requirement `pre_exec` documents. It owns
+        // `extra_fds` (including any opened `File`s), keeping their fds open
+        // through `fork()` regardless of what the parent does with its own
+        // copies afterward (matching the existing pattern already used for
+        // pipeline fds elsewhere in this shell).
+        unsafe {
+            command.pre_exec(move || {
+                for action in &extra_fds {
+                    let (source, dest) = match action {
+                        FdAction::Open(f, dest) => (f.as_raw_fd(), *dest),
+                        FdAction::Dup { source, dest } => (*source as i32, *dest),
+                    };
+                    if libc::dup2(source, dest as i32) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = extra_fds; // No raw `dup2` equivalent off Unix — same platform limit `redirect_stdio` documents.
+
     Ok((command, real_pipe_read))
+}
+
+/// One `pre_exec`-time step for setting up an fd other than 0/1/2 in a
+/// spawned child — see `build_stage`'s own doc comment on `extra_fds`.
+/// Built on every platform (it's simplest to collect while walking
+/// `cmd.redirects` uniformly), but only ever read under `#[cfg(unix)]` —
+/// `pre_exec`/`dup2` have no off-Unix equivalent, so fd 3+ stays a no-op
+/// there, same as `redirect_stdio`'s own platform split.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum FdAction {
+    /// Duplicate an already-opened file's fd onto `dest`.
+    Open(File, u32),
+    /// Duplicate whatever `source` already resolves to (in the child, at
+    /// this point in the sequence) onto `dest`.
+    Dup { source: u32, dest: u32 },
 }
 
 /// Where one descriptor is routed. Files are kept as handles so `2>&1` can

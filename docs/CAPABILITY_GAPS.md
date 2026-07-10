@@ -23,17 +23,22 @@ on top. Tier I's original 6 items are done, and so now are C35 (`\$` inside
 double quotes wasn't staying literal — fixed by giving the lexer a
 separate, never-re-expanded `WordPart::Literal("$")` for it instead of
 just stripping the backslash and leaving a bare `$` indistinguishable
-from a real, unescaped one) and C37 (an unknown command name used to
+from a real, unescaped one), C37 (an unknown command name used to
 print a raw OS error and abort the whole script instead of reporting
 status 127 and continuing — fixed for a standalone command, the headline
 case; a not-found command as one stage of a multi-command pipeline is a
 deliberately out-of-scope narrower remainder, needing real process-group
-unwinding rush's `Command`-based spawn path can't cheaply do). C38
-(redirects to fd 3+ silently landing on fd 1) turned up while closing out
-Tier II, which is now fully closed out too — `local`, `getopts`,
-`command`/`type`/`hash`, `wait` (with its own prerequisite, `$!`),
-`source`/`.`, `eval`, `exec`, and `umask` all landed alongside
-`read`/`printf`/`shift`. C36 (a PATH-visibility bug in
+unwinding rush's `Command`-based spawn path can't cheaply do), and C38
+(redirects to fd 3+ silently collapsed onto fd 1 — fixed via a real
+per-fd `dup2` in both `redirect_stdio`, builtins, and a new `pre_exec`
+`dup2` sequence in `build_stage` for real spawned children; also fixed a
+genuine hazard the fix itself could have hit — a freshly opened file's
+own fd is often exactly the fd being redirected to, and `dup2` on
+identical fds is a no-op that would otherwise leave a stray `Drop` to
+close the very fd just set up). Tier II is fully closed out too —
+`local`, `getopts`, `command`/`type`/`hash`, `wait` (with its own
+prerequisite, `$!`), `source`/`.`, `eval`, `exec`, and `umask` all landed
+alongside `read`/`printf`/`shift`. C36 (a PATH-visibility bug in
 `command`/`type`/`hash`, plus a deeper root cause — the shell never
 seeded its own variable table from the inherited environment at startup,
 so a *bare* `PATH=$PATH:dir` silently failed to reach a spawned child's
@@ -237,7 +242,7 @@ completion *system* (as opposed to this fixed case list) provides.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 10 (8 done)
+- **Tier I — correctness/POSIX risk:** 10 (9 done)
 - **Tier II — missing standard builtins:** 12 (12 done — complete)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
@@ -427,20 +432,83 @@ and as the sole command), a found-but-not-executable file and a directory
 script; no synthetic `$!`, a documented gap). **Effort: S** for the
 standalone-command fix that was this item's actual described scope.
 
-### C38 — Redirects to any fd other than 0/1/2 silently collapse to fd 1 (tracked)
+### C38 — Redirects to any fd other than 0/1/2 silently collapse to fd 1 (tracked) ✅ done
 POSIX-mandated: `cmd 3>file`, `cmd 4<&5`, `exec 3>file` (holding a
 descriptor open for later) are all ordinary, if less common, shell idioms.
 Rush's whole redirect machinery — both `redirect_stdio` (builtins) and
-`build_stage` (real spawned children) — collapses any `fd` that isn't
-literally `0` or `2` into fd **1** (`target_fd`'s `_ => 1` arm), so `cmd
-3>file` today silently redirects the command's *stdout*, not a real fd 3.
-Silent wrongness, not an error. Found while implementing `exec` (C16),
-which is the first place this blocks a headline idiom (`exec 3>file`)
-rather than being an edge case, but it's general — reproduces for any
-command, builtin or external. **Effort: M** — needs real per-fd tracking
-(open the target, `dup2` onto the actual requested fd) in both code paths,
-plus, for `exec`'s permanent form specifically, a way to keep an arbitrary
-fd open across the rest of the script rather than just 0/1/2.
+`build_stage` (real spawned children) — used to collapse any `fd` that
+wasn't literally `0` or `2` into fd **1** (a `target_fd` closure's
+`_ => 1` arm, duplicated in both places), so `cmd 3>file` silently
+redirected the command's *stdout*, not a real fd 3. Silent wrongness, not
+an error. Found while implementing `exec` (C16), which was the first
+place this blocked a headline idiom (`exec 3>file`) rather than being an
+edge case, but it was general — reproduced for any command, builtin or
+external.
+
+**Fix — `redirect_stdio` (builtins, in-process)**: the `target_fd`
+collapse was simply deleted — `StdioGuard`'s own save/restore bookkeeping
+(`Vec<(i32, i32)>`) was already keyed by plain `i32`, needing no
+structural change to support fd 3+ once the artificial 0/2/else clamp was
+gone. This also fixed two related bugs the same collapse was
+responsible for, not called out in the original write-up: a `Dup`
+redirect's *source* side collapsed exactly the same way as its
+destination (`4>&3` botched fd 3, not just an unusual destination fd),
+and a `Read`-mode redirect to fd 1 or 2 (`cmd 1<file`, unusual but valid)
+was silently dropped entirely rather than merely collapsed.
+
+**Fix — `build_stage` (real spawned children)**: `std::process::Command`
+only exposes `.stdin()`/`.stdout()`/`.stderr()` — there's no generic
+"set fd N" API for a child process. Fd 3+ redirects are now collected (in
+their own source order, alongside the existing fd-0/1/2 handling) into a
+new `FdAction` list — `Open(File, fd)` for a freshly opened target, `Dup
+{ source, dest }` for an `fd>&target`/`fd<&target` pair where either side
+is 3+ — and applied via one `pre_exec` closure (`CommandExt::pre_exec`,
+the same Unix-only mechanism `job.rs` already uses for process-group
+setup) that runs a plain `dup2` per entry in the child, after `fork` but
+before `exec`. This composes cleanly with `job.rs`'s own separate
+`pre_exec` call (multiple closures registered on one `Command` all run,
+in order) and needs no new persistent shell-side bookkeeping — the
+child's own inherited (then `dup2`'d) fd table entries are exactly the
+kind of state `exec`'s permanent redirect form already relies on the OS
+to hold, generalized from fd 0/1/2 to any fd.
+
+**A real, general bug found and fixed along the way, not specific to fd
+3+ at all**: a freshly opened file's own fd is often *exactly* the target
+fd being redirected to (its "lowest available fd" allocation landing on
+the very number requested) — overwhelmingly likely for fd 3+
+specifically, since 0/1/2 are essentially always already open in a real
+process but 3+ usually isn't. `dup2` on identical fds is a defined
+no-op, so in that case the freshly opened file *is* the live redirect
+already — but the original code still let it drop normally at the end of
+its match arm, which closed the very fd the redirect had just set up.
+Fixed in `redirect_stdio` by detecting this case and `mem::forget`-ing
+the file instead (ownership has effectively passed to the fd table entry
+itself); `build_stage`'s `pre_exec`-closure design was naturally immune
+(the files it captures are never dropped in the parent before `exec`
+replaces the child's whole process image).
+
+**Also fixed, found during the same pass and not called out in the
+original write-up**: the lexer's `<&n` (read-side fd duplication, e.g.
+`4<&5`) didn't parse *at all* — only `>&n` did, since `lex_gt_op` checked
+for a following `&` but there was no equivalent check on the `<` side, at
+either of the two places `<` is lexed (the bare `'<'` top-level dispatch,
+and `lex_redirect`'s explicit-fd-prefixed path, e.g. `4<...`). A new,
+shared `lex_lt_op` (mirroring `lex_gt_op`) fixes both. `RedirOp::Dup`
+doesn't need a direction flag — `<&n`/`>&n` both just mean "`dup2` this
+fd onto that one," and which arrow spelled it doesn't change that.
+
+Verified directly against real bash across: a standalone `cmd 3>file`
+and `4<&5`-style chains (including multi-hop, `3<file 4<&3 <&4`) for
+both a builtin (`read`/`echo`) and a real external command (`cat`),
+`exec 3>file`'s permanent form, and the exact self-dup coincidence bug
+above (which real bash, forking a real process per redirect rather than
+opening files in-process the way rush's builtins do, never hits at all —
+purely a rush-internal hazard this fix specifically addresses). Adds 2
+new lexer unit tests plus 3 new integration tests exercising both the
+builtin and external-command code paths; full suite and clippy stay
+clean (Windows cross-compile checked too, since `build_stage` itself
+runs on every platform even though the new `pre_exec` logic is
+`#[cfg(unix)]`). **Effort: M**, as estimated.
 
 ### C40 — `unset` of an inherited/exported variable doesn't stop a spawned child from still seeing it (tracked)
 Found while fixing C36: `exec::build_stage`/`run_foreground`'s

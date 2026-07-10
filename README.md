@@ -44,7 +44,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |
 | Comments (`#`) | ✅ | `#` at a word boundary starts a comment to end of line |
 | Pipelines (`\|`) | ✅ | N stages, stdout→stdin wiring; a compound (`if`/`while`/`(...)`/…) can be one stage among several on Unix (forks) |
-| Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files; fd duplication (`> f 2>&1`); `&>` both streams |
+| Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files, any fd (`3>file`, `4<&5`); fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) / here-strings (`<<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion); `cmd <<< "$var"` |
 | Process substitution | ✅ | `<(cmd)`/`>(cmd)` via a real pipe + `/dev/fd/N`, non-blocking and concurrent (Unix only) |
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask` on Unix) |

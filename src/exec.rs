@@ -41,6 +41,9 @@ pub struct Command {
     /// can carry a real array literal, which a plain `Vec<String>` argv
     /// can't represent at all. See `builtins::local_cmd`.
     pub local_decls: Vec<(String, Option<crate::vars::AssignOp>)>,
+    /// Attributes declared by this `local`/`declare` invocation's flags
+    /// (`-u`/`-l`/`-i`, C43), applying to every name in `local_decls`.
+    pub decl_attrs: crate::vars::Attrs,
 }
 
 #[derive(Debug, Clone)]
@@ -917,8 +920,8 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
 /// own doc comment and `expand::expand_simple`, which builds it).
 fn dispatch_builtin(cmd: &Command) -> i32 {
     match cmd.argv.first().map(String::as_str) {
-        Some("local") => builtins::local_from_decls(&cmd.local_decls),
-        Some("declare") => builtins::declare_from_decls(&cmd.local_decls),
+        Some("local") => builtins::local_from_decls(&cmd.local_decls, cmd.decl_attrs),
+        Some("declare") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
         _ => builtins::try_run(&cmd.argv).unwrap_or(1),
     }
 }

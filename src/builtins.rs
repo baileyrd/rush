@@ -942,7 +942,10 @@ fn shift_cmd(argv: &[String]) -> i32 {
 /// flattened into a plain string, so `expand::expand_simple` parses each
 /// declaration itself into `decls` ahead of time (see `Command::
 /// local_decls`'s own doc comment).
-pub(crate) fn local_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]) -> i32 {
+pub(crate) fn local_from_decls(
+    decls: &[(String, Option<crate::vars::AssignOp>)],
+    attrs: crate::vars::Attrs,
+) -> i32 {
     if decls.is_empty() {
         eprintln!("local: usage: local name[=value] ...");
         return 1;
@@ -951,17 +954,17 @@ pub(crate) fn local_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]
     for (name, op) in decls {
         let declared = match op {
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Array(elements))) => {
-                crate::vars::declare_local_array(name, elements.clone())
+                crate::vars::declare_local_array_attrs(name, elements.clone(), attrs)
             }
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Assoc(pairs))) => {
-                crate::vars::declare_local_assoc(name, pairs.clone())
+                crate::vars::declare_local_assoc_attrs(name, pairs.clone(), attrs)
             }
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Scalar(value))) => {
-                crate::vars::declare_local(name, Some(value))
+                crate::vars::declare_local_attrs(name, Some(value), attrs)
             }
             // `+=`/indexed forms aren't meaningful for a name that isn't
             // local yet — treated the same as a bare `local name`.
-            _ => crate::vars::declare_local(name, None),
+            _ => crate::vars::declare_local_attrs(name, None, attrs),
         };
         if !declared {
             eprintln!("local: can only be used in a function");
@@ -981,12 +984,22 @@ pub(crate) fn local_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]
 /// function-scoped declaration). No `-p` (print), `-x` (export), `-r`
 /// (readonly), `-i` (integer), or `-f` (functions) — none of those exist
 /// here at all yet.
-pub(crate) fn declare_from_decls(decls: &[(String, Option<crate::vars::AssignOp>)]) -> i32 {
+pub(crate) fn declare_from_decls(
+    decls: &[(String, Option<crate::vars::AssignOp>)],
+    attrs: crate::vars::Attrs,
+) -> i32 {
     for (name, op) in decls {
+        // Attributes install *before* the initializer applies, so
+        // `declare -u u=hello` uppercases (C43). Separate invocations
+        // merge (`declare -i x` after `declare -u x` keeps both), same as
+        // real bash — see `vars::set_attrs`.
+        if attrs.any() {
+            crate::vars::set_attrs(name, attrs);
+        }
         if let Some(op) = op {
             crate::vars::assign(name, op);
         }
-        // A bare `declare name` (no `-a`/`-A`, no initializer) is a
+        // A bare `declare name` (no flags, no initializer) is a
         // documented no-op here — bash pre-declares it unset, which is
         // unobservable without a `declare -p` this codebase doesn't have.
     }

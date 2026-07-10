@@ -1308,3 +1308,31 @@ and the `${v#pat}`-family pattern-removal operators, which all share
   `case`, and pattern removal — byte-identical output on every pattern.
   Adds 2 unit tests and 2 integration tests; full suite and clippy stay
   clean.
+
+### Fix: `declare -u` / `-l` / `-i` attributes were silently ignored (C43)
+The `declare`/`local` flag parser only recognized `-a`/`-A`; any other
+flag was misparsed as a bare variable name to declare, so `declare -u
+u=hello; echo $u` printed `hello` and `declare -i n; n=2+3` stored the
+literal text `2+3` — wrong values with no diagnostic.
+
+- **New `Attrs` (`vars.rs`)**, kept in their own `ATTRS` map rather than
+  on `Var`: an attribute can be declared on a name with no value yet,
+  and bash keeps the variable genuinely unset in that state — `VARS`
+  has no unset-but-existing representation. Transforms hook the central
+  assignment paths (`set`, `set_exported`, `append_scalar`, array/assoc
+  element writes), so every assignment form transforms.
+- **Semantics probed against real bash case-by-case**: not retroactive;
+  `-u`/`-l` displace each other across separate declarations but cancel
+  when clustered (`declare -lu w=Abc` leaves `Abc` — a real bash quirk,
+  matched); under `-i`, `+=` is arithmetic *addition*, an unresolvable
+  name is 0, and a syntax error keeps the old value (diagnostic matched;
+  bash's status-1 there is an accepted, documented simplification);
+  `unset` drops attributes; `local -u` starts from its own attributes
+  and restores the outer attribute state on return (local frames now
+  capture prior attributes alongside prior values).
+- **Flag words now cluster** (`declare -ui n`, `local -au arr=(…)`);
+  unrecognized letters end flag parsing exactly as before, keeping
+  `-r`/`-n`/`-x`/`-p` (C45/C62/C48) no worse than they were.
+- Verified against real bash across all of the above (ksh93/zsh
+  `typeset -u` agreement spot-checked). Adds 3 unit tests and 3
+  integration tests; full suite and clippy stay clean.

@@ -163,18 +163,39 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // inside a function — an accepted, documented simplification; use
     // `local` explicitly for function-scoped declarations.)
     let decl_word = if idx < rc.argv.len() { expand_argv_word(&rc.argv[idx])?.into_iter().next() } else { None };
-    let (argv, local_decls) = if matches!(decl_word.as_deref(), Some("local") | Some("declare")) {
+    let (argv, local_decls, decl_attrs) = if matches!(decl_word.as_deref(), Some("local") | Some("declare")) {
         let cmd_name = decl_word.unwrap();
         let mut rest = &rc.argv[idx + 1..];
-        // `-A` (associative)/`-a` (indexed) apply to every name that
-        // follows in this same invocation — bash allows mixing plain names
-        // in with `-A`/`-a` too, but this scope only needs the common case.
+        // Leading flags apply to every name that follows in this same
+        // invocation — bash allows mixing plain names in with flags too,
+        // but this scope only needs the common case. `-A` (associative) and
+        // `-a` (indexed) select the value shape; `-u`/`-l`/`-i` (C43)
+        // declare attribute transforms. Flags cluster (`declare -ui n`),
+        // same as bash. A word with any *other* letter isn't a recognized
+        // flag and ends flag parsing (falling through to the old
+        // treated-as-a-name path), keeping `-r`/`-n`/`-x`/`-p` — still
+        // unimplemented, tracked as C45/C62/C48 — no worse than before.
         let mut assoc = false;
         let mut array = false;
+        let mut attrs = crate::vars::Attrs::default();
         while let Some(word) = rest.first() {
             match word.as_slice() {
-                [WordPart::Unquoted(s)] if s == "-A" => assoc = true,
-                [WordPart::Unquoted(s)] if s == "-a" => array = true,
+                [WordPart::Unquoted(s)]
+                    if s.len() > 1
+                        && s.starts_with('-')
+                        && s[1..].chars().all(|c| matches!(c, 'a' | 'A' | 'u' | 'l' | 'i')) =>
+                {
+                    for c in s[1..].chars() {
+                        match c {
+                            'A' => assoc = true,
+                            'a' => array = true,
+                            'u' => attrs.upper = true,
+                            'l' => attrs.lower = true,
+                            'i' => attrs.integer = true,
+                            _ => unreachable!(),
+                        }
+                    }
+                }
                 _ => break,
             }
             rest = &rest[1..];
@@ -235,7 +256,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 }
             }
         }
-        (vec![cmd_name], decls)
+        (vec![cmd_name], decls, attrs)
     } else {
         let mut argv = Vec::new();
         for word in &rc.argv[idx..] {
@@ -251,11 +272,11 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
             expanded.extend(argv.into_iter().skip(1));
             argv = expanded;
         }
-        (argv, Vec::new())
+        (argv, Vec::new(), crate::vars::Attrs::default())
     };
 
     let (redirects, heredoc) = expand_redirects(&rc.redirects)?;
-    Ok(Command { argv, redirects, assignments, heredoc, local_decls })
+    Ok(Command { argv, redirects, assignments, heredoc, local_decls, decl_attrs })
 }
 
 /// Expand a raw redirect list into concrete `Redirect`s plus an optional

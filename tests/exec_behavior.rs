@@ -2574,3 +2574,47 @@ fn shopt_and_glob_options() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn string_transformation_operators() {
+    // C59: the ${v/…}, ${v:off:len}, and ${v^^} families all fell
+    // through to "bad substitution". Every expectation verified against
+    // bash byte-for-byte.
+    let (out, _) = rush(r#"v=hello_world; echo "${v/o/0}" "${v//o/0}" "${v/#hello/HI}" "${v/%world/EARTH}" "${v/o}" "${v//l}""#);
+    assert_eq!(out, "hell0_world hell0_w0rld HI_world hello_EARTH hell_world heo_word\n");
+
+    // Substrings: negative offset (space-disambiguated), negative
+    // length, arithmetic expressions, out-of-range → empty.
+    let (out, _) = rush(r#"v=abcdef; echo "${v:2}" "${v:2:3}" "${v: -3}" "${v: -4:2}" "${v:1:-2}"; n=2; echo "${v:n+1:2}"; echo "[${v:9}]" "[${v: -10}]""#);
+    assert_eq!(out, "cdef cde def cd bcd\nde\n[] []\n");
+
+    // Case conversion, with and without a pattern restriction.
+    let (out, _) = rush(r#"v=hello; echo "${v^}" "${v^^}" "${v^^[a-f]}"; V=HELLO; echo "${V,}" "${V,,}""#);
+    assert_eq!(out, "Hello HELLO hEllo\nhELLO hello\n");
+
+    // Glob patterns in search/replace; escaped `/` as the pattern.
+    let (out, _) = rush(r#"v=aXbXc; echo "${v/X*/Z}" "${v//X/-}" "${v/[Xb]/_}"; p=a/b/c; echo "${p/\//_}" "${p//\//.}""#);
+    assert_eq!(out, "aZ a-b-c a_bXc\na_b/c a.b.c\n");
+
+    // The `:-` default family is untouched by the substring parse.
+    let (out, _) = rush(r#"v=abc; echo "${v:-default}"; u=; echo "${u:-empty-default}""#);
+    assert_eq!(out, "abc\nempty-default\n");
+
+    // A negative length landing before the offset errors like bash.
+    let (err, status) = rush_stderr(r#"v=abc; echo "${v:1:-5}""#);
+    assert!(err.contains("substring expression < 0"), "got: {err:?}");
+    assert_eq!(status, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn array_wide_transformations_and_slicing() {
+    // C59's array-wide forms: per-element for /, ^^, #/% — but `:` is
+    // array *slicing* (elements, not characters) — verified against bash.
+    let (out, _) = rush(r#"arr=(one two); echo "${arr[@]/o/0}"; echo "${arr[@]^^}"; echo "${arr[@]#o}""#);
+    assert_eq!(out, "0ne tw0\nONE TWO\nne two\n");
+
+    let (out, _) = rush(r#"arr=(a b c d); echo "${arr[@]:1:2}"; echo "${arr[@]: -1}"; echo "${arr[@]:2}""#);
+    assert_eq!(out, "b c\nd\nc d\n");
+}

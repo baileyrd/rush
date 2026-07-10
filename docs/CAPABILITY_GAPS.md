@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (14 done, 9 open — C59–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (15 done, 8 open — C60–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C58 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C59 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-15 are open.
+14 are open.
 
 ---
 
@@ -2460,7 +2460,7 @@ the empty final component). Without the option, `**` keeps collapsing
 to `*`, exactly as before. One integration test covers the whole
 matrix.
 
-### C59 — String transformation operators: search/replace `${v/pat/repl}`, substring `${v:offset:length}`, case conversion `${v^^}` (tracked)
+### C59 — String transformation operators: search/replace `${v/pat/repl}`, substring `${v:offset:length}`, case conversion `${v^^}` ✅ done
 The single most commonly used family of missing `${...}` operators.
 Search/replace (`${v/pat/repl}` first match, `${v//pat/repl}` all,
 `${v/#pat/repl}`/`${v/%pat/repl}` anchored) and substring extraction
@@ -2476,6 +2476,32 @@ scripts (stripping a path segment, normalizing case, trimming a known
 prefix length). Also missing: applying any of these across a whole array
 (`${arr[@]/pat/repl}`, `${arr[@]^^}`) — the operators don't exist for
 scalars to begin with, so the array-wide form is a strict superset gap.
+
+Implemented — all three families plus the array-wide forms:
+
+- **Search/replace**: `/` (longest match at the earliest position — the
+  greediness verified against bash: `${v/X*/Z}` on `aXbXc` yields `aZ`),
+  `//` (every non-overlapping match), `/#`/`/%` (anchored), a missing
+  `/repl` deletes, and the pattern/replacement split is the first
+  *unescaped* slash (`${v/\//_}` replaces a literal `/`). Patterns are
+  the shared glob matcher's — classes, extglobs and all.
+- **Substrings**: `${v:offset[:length]}`, both sides full arithmetic
+  expressions; negative offset counts from the end (with bash's own
+  space disambiguation against `:-`, and out-of-range → empty), negative
+  length means "up to that many before the end" and errors with bash's
+  exact "substring expression < 0" when it lands before the offset. The
+  `:-`/`:=`/`:+`/`:?` family is untouched — a `:` only reads as a
+  substring when the next character can't start that family.
+- **Case conversion**: `^`/`^^`/`,`/`,,`, with the optional
+  single-character pattern restriction (`${v^^[a-f]}` → `hEllo`).
+- **Array-wide forms**: `${arr[@]/pat/repl}`, `${arr[@]^^}`, and the
+  `#`/`%` strips apply per element; `${arr[@]:off:len}` turned out to be
+  a different operation entirely — array *slicing* (a range of elements,
+  `${arr[@]:1:2}` is elements 1–2, `${arr[@]: -1}` the last), caught by
+  direct comparison and implemented as such.
+
+Verified against bash byte-for-byte across ~40 cases. Two integration
+tests cover the scalar matrix and the array-wide/slicing split.
 **Effort: M** — search/replace needs a leftmost-glob-match-at-each-
 position primitive (the existing pattern matcher only supports whole-
 string/anchored matching, per C1's prefix/suffix removal); substring

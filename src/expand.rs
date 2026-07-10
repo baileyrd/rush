@@ -455,7 +455,7 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
             WordPart::Quoted(s) => sp.add_unsplit(&expand_dollars(s)?),
             WordPart::Unquoted(s) => {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
-                sp.add_split(&expand_dollars(&text)?, &ifs);
+                sp.add_split(&expand_unquoted(&text)?, &ifs);
             }
             // See `WordPart::ArrayLiteral`'s own doc comment: `assignment_split`
             // always intercepts a word shaped like this before it reaches here.
@@ -971,7 +971,7 @@ fn expand_word(word: &Word) -> Result<String, String> {
             WordPart::Unquoted(s) => {
                 // Tilde only expands at the very start of a word.
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
-                out.push_str(&expand_dollars(&text)?);
+                out.push_str(&expand_unquoted(&text)?);
             }
             // See `WordPart::ArrayLiteral`'s own doc comment: `assignment_split`
             // always intercepts a word shaped like this before it reaches here.
@@ -1024,10 +1024,32 @@ fn tilde_expand(text: &str) -> String {
 /// prompt undergoes ordinary `$`/command-substitution expansion, unlike
 /// `$PS1`'s own bespoke backslash-escape codes in `main.rs`).
 pub(crate) fn expand_dollars(text: &str) -> Result<String, String> {
+    expand_dollars_impl(text, false)
+}
+
+/// Like [`expand_dollars`], but also recognizes `<(cmd)`/`>(cmd)` process
+/// substitution — used only for genuinely *unquoted* text (ordinary argv
+/// words, assignment values, redirect targets, case subjects), since
+/// quoting fully suppresses process substitution in real bash (verified
+/// directly: `echo "<(echo hi)"` and `echo '<(echo hi)'` both print the
+/// literal text `<(echo hi)`), unlike `$(...)`, which *does* still expand
+/// inside double quotes — so this is deliberately a separate function from
+/// `expand_dollars` rather than a flag threaded through every call site.
+pub(crate) fn expand_unquoted(text: &str) -> Result<String, String> {
+    expand_dollars_impl(text, true)
+}
+
+fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, String> {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
 
     while let Some(c) = chars.next() {
+        if allow_process_sub && matches!(c, '<' | '>') && chars.peek() == Some(&'(') {
+            chars.next(); // consume '('
+            let inner = take_balanced_paren(&mut chars)?;
+            out.push_str(&crate::exec::process_substitute(&inner, c == '>')?);
+            continue;
+        }
         if c != '$' {
             out.push(c);
             continue;

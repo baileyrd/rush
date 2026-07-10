@@ -199,7 +199,17 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
             }
             '<' => {
                 chars.next();
-                if chars.peek() == Some(&'<') {
+                if chars.peek() == Some(&'(') {
+                    // `<(cmd)` process substitution (bash/ksh/zsh — not
+                    // POSIX sh/dash): a *word*, not a redirect — verified
+                    // directly that real bash always reads adjacent `<(`
+                    // this way, even where the alternative (two nested
+                    // subshells) would otherwise be syntactically valid.
+                    let mut seed = String::from("<");
+                    consume_balanced_paren(&mut chars, &mut seed)?;
+                    let word = lex_word(&mut chars, Some(seed))?;
+                    tokens.push(Token::Word(word));
+                } else if chars.peek() == Some(&'<') {
                     chars.next();
                     if chars.peek() == Some(&'<') {
                         // `<<<` here-string — the word that follows is
@@ -229,7 +239,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                 }
             }
             '>' => {
-                tokens.push(Token::Redirect(lex_redirect(&mut chars, None)?));
+                chars.next();
+                if chars.peek() == Some(&'(') {
+                    // `>(cmd)` process substitution — same rule as `<(`.
+                    let mut seed = String::from(">");
+                    consume_balanced_paren(&mut chars, &mut seed)?;
+                    let word = lex_word(&mut chars, Some(seed))?;
+                    tokens.push(Token::Word(word));
+                    continue;
+                }
+                tokens.push(Token::Redirect(Redir { fd: 1, op: lex_gt_op(&mut chars)? }));
             }
             // A digit run immediately before `<`/`>` is an explicit fd (`2>`);
             // otherwise it's the start of a word.
@@ -347,32 +366,35 @@ fn read_line(chars: &mut Peekable<Chars>) -> Option<String> {
 fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, LexError> {
     match chars.next() {
         Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: RedirOp::Read }),
-        Some('>') => {
-            let fd = explicit_fd.unwrap_or(1);
-            let op = match chars.peek() {
-                Some('>') => {
-                    chars.next();
-                    RedirOp::Append
-                }
-                Some('&') => {
-                    chars.next();
-                    let mut target = String::new();
-                    while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
-                        target.push(chars.next().unwrap());
-                    }
-                    let t = target
-                        .parse()
-                        .map_err(|_| {
-                            LexError::Syntax("expected a file descriptor after `>&`".into())
-                        })?;
-                    RedirOp::Dup(t)
-                }
-                _ => RedirOp::Write,
-            };
-            Ok(Redir { fd, op })
-        }
+        Some('>') => Ok(Redir { fd: explicit_fd.unwrap_or(1), op: lex_gt_op(chars)? }),
         _ => unreachable!("lex_redirect called off a redirection"),
     }
+}
+
+/// The operator that follows an already-consumed `>`: `>>`, `>&target`
+/// (dup), or plain `>` (write) — shared by `lex_redirect` (the
+/// explicit-fd-prefixed case, `2>...`) and the top-level `'>'` dispatch
+/// (which needs to peek for `>(` — process substitution — before falling
+/// back to this).
+fn lex_gt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
+    Ok(match chars.peek() {
+        Some('>') => {
+            chars.next();
+            RedirOp::Append
+        }
+        Some('&') => {
+            chars.next();
+            let mut target = String::new();
+            while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                target.push(chars.next().unwrap());
+            }
+            let t = target
+                .parse()
+                .map_err(|_| LexError::Syntax("expected a file descriptor after `>&`".into()))?;
+            RedirOp::Dup(t)
+        }
+        _ => RedirOp::Write,
+    })
 }
 
 /// Accumulate a single word, honoring single quotes, double quotes, escapes,
@@ -387,6 +409,27 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
     }
 
     loop {
+        // `<(cmd)`/`>(cmd)` concatenated onto other text with no space
+        // (`pre<(cmd)post`) — verified directly that real bash keeps
+        // reading the word rather than stopping at `<`/`>` here, same as
+        // it would for a `$(...)` in the same position. Checked before the
+        // main match below (rather than as one of its arms) since it
+        // needs a 2-char lookahead — via a cloned iterator, since
+        // `Peekable` only offers one — to tell this apart from an
+        // ordinary `<`/`>` that really does end the word.
+        if let Some(&c) = chars.peek()
+            && matches!(c, '<' | '>')
+        {
+            let mut lookahead = chars.clone();
+            lookahead.next();
+            if lookahead.peek() == Some(&'(') {
+                chars.next();
+                let mut s = c.to_string();
+                consume_balanced_paren(chars, &mut s)?;
+                push_unquoted(&mut parts, &s);
+                continue;
+            }
+        }
         match chars.peek() {
             None => break,
             // `NAME=(` / `NAME+=(` with no space: an array-literal

@@ -848,3 +848,67 @@ groundwork.
   an earlier one, same "last redirect for a given fd wins" rule as any
   other redirect, verified directly.
 - Adds 1 new integration test; full suite and clippy stay clean.
+
+### Process substitution `<(cmd)` / `>(cmd)` (C31)
+The biggest lift in Tier IV — real fork/pipe plumbing, not just
+parser/`arith.rs` work — and the item that closes it out completely.
+
+- **`exec::process_substitute(src, write_side)`** (new, `#[cfg(unix)]`):
+  parses `src` (`parser::parse`), forks it hooked up to one end of a
+  `make_pipe()` pipe (`run_list` runs it in the child) — its stdout for
+  `<(cmd)`, its stdin for `>(cmd)` — and returns a `/dev/fd/<n>` path for
+  the *other* end, kept open in the shell process itself. Never blocks
+  waiting for `cmd` (verified directly: `diff <(sleep 1; echo a) <(sleep
+  1; echo b)` takes ~1s total, not ~2s serialized). `$!` reflects the
+  substitution's own pid (verified directly against real bash), but it's
+  deliberately not added to the job table, matching real bash's own
+  `jobs -l` not listing one either.
+- **Lifecycle**: the kept-open fd survives, unclosed, until the caller
+  has finished spawning whatever the substitution's path expanded into
+  (fork+exec inherits open, non-`CLOEXEC` fds unchanged — `make_pipe`'s
+  raw `libc::pipe` already doesn't set `CLOEXEC`), then a new
+  `close_pending_proc_subs` (backed by a `PENDING_PROC_SUBS` thread-local)
+  closes it and non-blocking-reaps its child. Called once at each of the
+  handful of places a whole pipeline actually gets spawned
+  (`run_foreground`, backgrounding in `run_job`, `capture_pipeline`),
+  covering every path a substitution's word could expand into (builtin,
+  function call, or a real spawned child) without duplicating this at
+  each of *those* individually.
+- **Lexing/expansion**: no new `WordPart` variant needed — `<(cmd)`/
+  `>(cmd)` is captured as raw text embedded in a `WordPart::Unquoted`
+  string, exactly like `$(cmd)` already is, via the existing
+  `consume_balanced_paren`. The lexer checks for `(` immediately after
+  `<`/`>` (never a real redirect there, verified directly) both at the
+  top level and inside `lex_word`'s own per-character loop, so
+  `pre<(cmd)post` concatenates the same way `$(...)` does. A new
+  `expand::expand_unquoted` (`expand_dollars` plus this same `<(`/`>(`
+  recognition) is used specifically for genuinely unquoted text —
+  quoting fully suppresses process substitution in real bash (unlike
+  `$(...)`, which still expands inside double quotes, verified directly)
+  — so it's a separate function, not a flag threaded through
+  `expand_dollars` itself. Assignment RHS *does* get it, a real
+  asymmetry with brace expansion, verified directly.
+- **A real, general bug found and fixed along the way, unrelated to
+  process substitution itself**: Rust's runtime sets `SIGPIPE` to
+  `SIG_IGN` at startup, so any builtin's `print!`/`println!` surfaced a
+  write to an already-closed pipe as an `Err` that those macros then
+  panic on — reproduced with no process substitution involved at all
+  (`rush -c 'while true; do echo x; done' | head`). Fixed by resetting
+  `SIGPIPE` to its default disposition once at startup (`main.rs`),
+  matching real bash's own behavior exactly (verified directly: bash's
+  own builtin `echo` hits the identical race against a `>(...)` whose
+  reader exits without reading, and just dies silently there too).
+- Explicitly out of scope: real bash's own `/dev/fd` fd-numbering
+  convention (a fixed high range, counting down per substitution) — rush
+  just uses whatever fd the OS returns; combining a substitution with an
+  explicit non-standard redirect-target fd inherits the pre-existing C38
+  gap, not a new one; a write-side substitution whose reader exits
+  without reading races the main command's own write against the
+  reader's exit — confirmed to reproduce identically, and just as
+  unpredictably, in real bash itself under load, not something to paper
+  over with synchronization real bash doesn't have either.
+- Verified directly against real bash across more than a dozen scenarios
+  — read side, write side, concatenation, quoting suppression, nesting,
+  piping inside a substitution, assignment RHS, redirect targets, `$!`,
+  concurrent timing, and status independence. Adds 7 new integration
+  tests; full suite and clippy stay clean.

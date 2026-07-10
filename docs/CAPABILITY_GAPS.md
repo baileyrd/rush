@@ -55,9 +55,18 @@ C-like completeness — `++`/`--`, compound assignment, `**`, bitwise
 operators, the ternary `?:`, all with genuine short-circuit evaluation.
 Here-strings (C30) — `cmd <<< "$var"` — turned out to be exactly the
 small, low-effort item predicted, reusing the heredoc-feeding mechanism
-already in place with no `exec.rs` changes at all. Tier IV now stands at
-9 of 10 done — only process substitution (C31, genuinely the biggest
-remaining lift in this tier) is left — the first real dent in what's
+already in place with no `exec.rs` changes at all. Process substitution
+(C31) — `<(cmd)`/`>(cmd)`, real fork/pipe plumbing behind a `/dev/fd/N`
+path, non-blocking and concurrent same as real bash — closes out Tier IV
+completely, 10 of 10. Finding it also turned up a real, general bug
+unrelated to process substitution itself: Rust's runtime ignores
+`SIGPIPE` by default, so any builtin's `print!`/`println!` panicked
+instead of quietly dying on a closed pipe (`rush -c 'while true; do echo
+x; done' | head` reproduced it with no substitution involved at all) —
+fixed by resetting `SIGPIPE` to its default disposition at startup,
+matching real bash's own C-program behavior exactly. Tier IV — bash/ksh/
+zsh language parity, the least POSIX-y and largest tier — is now the
+first fully-closed tier in this document, the biggest dent yet in what's
 otherwise still a dash-shaped core.
 
 ---
@@ -88,6 +97,7 @@ applicable to that shell's own model.
 | `select` (numbered-menu prompt) | ✅‡‡ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | C-style `for ((;;))` / `((expr))` / `++`/`--`/bitwise/`?:` | ✅§§ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Here-strings `<<<` | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Process substitution `<(cmd)` / `>(cmd)` | ✅¶¶ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
@@ -154,6 +164,16 @@ infinite loop), the standalone `((expr))` command (exit status mirrors
 an lvalue other than a plain variable name (`arr[i]++`, `arr[i] = x`); the
 comma operator.
 
+¶¶ Read side (`<(cmd)`), write side (`>(cmd)`), concatenation with
+adjacent text, quoting suppression, nesting, non-blocking/concurrent
+timing, `$!`, assignment-RHS support, and redirect-target support are all
+done. Not matched: real bash's own `/dev/fd` fd-numbering convention (a
+fixed high range, counting down per substitution) — rush just uses
+whatever fd the OS returns, functionally equivalent but a different
+number. Combining an explicit non-standard redirect-target fd with a
+substitution inherits the pre-existing C38 gap (fd 3+ redirects), not a
+new limitation.
+
 ---
 
 ## Summary counts
@@ -161,7 +181,7 @@ comma operator.
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (9 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -1181,11 +1201,95 @@ rule, and the last-redirect-wins interaction with a real heredoc on the
 same command — was verified directly against real bash and matches
 exactly.
 
-### C31 — Process substitution: `<(cmd)`, `>(cmd)`
+### C31 — Process substitution: `<(cmd)`, `>(cmd)` ✅ done
 Present in bash/ksh/zsh (not POSIX sh/dash). Treats a command's output as a
-file — `diff <(cmd1) <(cmd2)`. Genuinely advanced, and a bigger lift than
-most items here: needs named-pipe or `/dev/fd`-style plumbing. Lowest
-priority in this tier. **Effort: L.**
+file — `diff <(cmd1) <(cmd2)`. The biggest lift in this tier, needing real
+fork/pipe plumbing rather than just parser/`arith.rs` work.
+
+**Mechanism**, verified directly against real bash at every point below:
+on Linux, `<(cmd)`/`>(cmd)` is a genuine pipe plus `/dev/fd`'s
+magic-symlink-to-an-open-fd trick — not a named FIFO, which bash only
+falls back to on platforms without `/dev/fd` at all (not a concern for a
+Unix-only feature; gated `#[cfg(unix)]`, matching subshells/job control).
+A new `exec::process_substitute(src, write_side)` forks `cmd` (parsed via
+the ordinary `parser::parse`, run via `run_list`) hooked up to one end of
+a `make_pipe()` pipe — its stdout for `<(cmd)`, its stdin for `>(cmd)` —
+and returns a `/dev/fd/<n>` path for the *other* end, which the shell
+process itself keeps open. Crucially, this never blocks waiting for
+`cmd` (verified directly: `diff <(sleep 1; echo a) <(sleep 1; echo b)`
+takes ~1s total, not ~2s serialized) — the kept-open fd survives,
+unclosed, until the caller has finished spawning whatever the
+substitution's path was expanded into (fork+exec inherits open,
+non-`CLOEXEC` fds unchanged; `make_pipe`'s raw `libc::pipe` already
+doesn't set `CLOEXEC`), then gets closed and its child
+non-blocking-reaped via a new `close_pending_proc_subs`, called once at
+each of the handful of places a whole pipeline actually gets spawned
+(ordinary foreground, backgrounding, `$(...)` capture) — covering every
+path a substitution's word could expand into (builtin, function call, or
+a real spawned child) without needing to duplicate this at each of
+*those* individually. `$!` reflects the substitution's own pid — real,
+current bash behavior, verified directly (`: <(echo hi); echo $!` prints
+a real, distinct pid each time) — deliberately not added to the job
+table, though, matching real bash's own `jobs -l` not listing one either.
+
+**Lexing/expansion**: unlike `WordPart::ArrayLiteral`, this needed no new
+`WordPart` variant at all — `<(cmd)`/`>(cmd)` is captured as raw text
+embedded directly in a `WordPart::Unquoted` string, exactly like
+`$(cmd)` already is, via the existing `consume_balanced_paren`. Since
+`(` immediately after `<`/`>` never starts a real redirect (verified
+directly: real bash always reads it as process substitution, with no
+attempt at the alternative reading first), the lexer checks for it both
+at the top level (before falling into ordinary `<`/`>` redirect lexing)
+and *inside* `lex_word`'s own per-character loop, so `pre<(cmd)post`
+concatenates onto adjacent text the same way `$(...)` does (verified
+directly). A new `expand::expand_unquoted` — `expand_dollars` plus this
+same `<(`/`>(` recognition — is used specifically for genuinely
+*unquoted* text (ordinary argv words, assignment values, redirect
+targets, case subjects): quoting fully suppresses process substitution
+in real bash (verified directly: `echo "<(echo hi)"`/`echo '<(echo
+hi)'` both print the literal text), unlike `$(...)`, which *does* still
+expand inside double quotes — this is why it's a separate function
+rather than a flag threaded through `expand_dollars` itself, which stays
+`$`-only for genuinely quoted text. Assignment RHS *does* get process
+substitution — a real, deliberate asymmetry with brace expansion (which
+doesn't), verified directly (`x=<(cmd)` assigns the literal path,
+forking for real).
+
+**A real, general bug found and fixed along the way (not specific to
+process substitution)**: Rust's runtime sets `SIGPIPE` to `SIG_IGN` at
+startup, so any builtin's `print!`/`println!` surfaces a write to an
+already-closed pipe as an ordinary `Err` — which those macros then
+*panic* on, dumping a scary backtrace, instead of the process just
+quietly dying the way a normal Unix command does (`rush -c 'while true;
+do echo x; done' | head` reproduced this with no process substitution
+involved at all). Fixed by resetting `SIGPIPE` to its default
+disposition once at startup (`main.rs`) — matching real bash's own
+behavior exactly, verified directly: bash's own builtin `echo` hits the
+identical race against a `>(...)` whose reader exits without reading,
+and just dies silently there rather than printing anything.
+
+Explicitly out of scope, each a documented, accepted gap: the exact
+`/dev/fd` fd *numbers* real bash uses (a fixed high range starting at
+63, counting down per additional substitution on one command line) —
+rush just uses whatever fd the OS hands back, which is typically much
+lower; scripts shouldn't (and don't, in practice) hardcode the number
+either way. A substituted command combined with an explicit non-standard
+redirect target fd (`cat 3< <(cmd)`, `exec 3< <(cmd)`) inherits the
+pre-existing C38 limitation (redirects to fd 3+ collapse) — confirmed
+directly that `exec 3< <(cmd)` hangs the exact same way `exec 3< anyfile`
+already does today, with no process substitution involved. A write-side
+substitution whose own reader exits without ever reading (`echo hi >
+>(exit 7)`) races the main command's own write against the reader's
+exit — an inherent property of the underlying pipe, confirmed to
+reproduce identically (and just as unpredictably) in real bash itself
+under concurrent load, not something to paper over with rush-only
+synchronization real bash doesn't have either.
+
+Verified directly against real bash across more than a dozen scenarios —
+read side, write side, concatenation, quoting suppression, nesting,
+piping inside a substitution, assignment RHS, redirect targets, `$!`,
+non-blocking/concurrent timing, and status independence — all matching
+exactly (aside from the documented fd-number cosmetic difference).
 
 ---
 

@@ -318,15 +318,15 @@ syntax directly.
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
-- **Tier II — missing standard builtins:** 17 (14 done, 3 open — C47–C49)
+- **Tier II — missing standard builtins:** 17 (15 done, 2 open — C48–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C46 are
-now done (re-closing Tier I completely) and the remaining 27 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C47 are
+now done (re-closing Tier I completely) and the remaining 26 are open.
 
 ---
 
@@ -1310,7 +1310,7 @@ integration test covering read/set/inherit/`-S`-vs-`-H`/`-a`/both error
 paths, plus the substitution fix is exercised by `$(ulimit -n)` inside
 it.
 
-### C47 — `command -p` (default-`$PATH` form) not supported (tracked)
+### C47 — `command -p` (default-`$PATH` form) not supported ✅ done
 POSIX-mandated; present in bash/dash. `command -v`/`command -V`/the
 function-bypass form (`command name`) are all done (C12) — this is
 specifically the `-p` flag, which searches a default, hardcoded PATH
@@ -1321,6 +1321,29 @@ rather than a flag, so `command -p echo hi` reports `-p: command not
 found`. **Effort: S** — parse the `-p` flag and route the lookup through
 a hardcoded default path (e.g. `confstr(_CS_PATH)`, or a fixed
 `/usr/bin:/bin`) instead of `vars::get("PATH")`.
+
+Implemented in both halves of `command`'s split brain: the *lookup*
+forms (`command -pv`/`-pV`, clustered or separate — bash accepts both,
+verified) route file resolution through a new
+`resolve_in_default_path` (`/bin:/usr/bin`, the same value bash's own
+`confstr(_CS_PATH)` yields on Linux, checked via `getconf PATH`), while
+aliases/functions/builtins keep their usual precedence; and the
+*execution* form (`command -p name …`, handled by `exec.rs`'s
+`command_bypass`) pins argv[0] to its default-path resolution as an
+absolute path before the spawn, so the shell's own `$PATH` can't sway
+it — verified with `PATH=/nowhere; command -p ls` running fine. A
+builtin still wins over a default-path file (`command -p echo` runs the
+builtin), same as bash. A name found nowhere on the default path takes
+the ordinary 127 path — and fixing that surfaced a small cosmetic bug
+in the shared diagnostic: the synthetic trailing `/` that
+`resolve_program` (and now `command_bypass`) appends to force a clean
+NotFound was leaking into the "command not found" message; it's now
+stripped there.
+
+Verified against real bash for every form above (including the
+`PATH=/nowhere` isolation both ways and the 127 status). Regression
+test: one integration test covering execution, both lookup spellings,
+builtin precedence, and the clean not-found diagnostic.
 
 ### C48 — `type -a` (list every match, not just the first) not supported (tracked)
 Present in bash/ksh93/zsh (not dash, which has no `type -a`). `type`/

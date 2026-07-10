@@ -1406,3 +1406,15 @@ the missing command).
 - Verified against real bash (`-a` dump line-identical over the
   implemented set). Adds 1 integration test; full suite and clippy stay
   clean.
+
+### Fix: `command -p` (default-PATH form) treated `-p` as the command name (C47)
+`command -p echo hi` reported `-p: command not found`. Now both halves
+work: the lookup forms (`command -pv ls`, `command -p -v ls`) resolve
+files through the fixed default system path (`/bin:/usr/bin`, bash's
+own `confstr(_CS_PATH)` value on Linux), and the execution form pins
+the program to its default-path resolution before the spawn, immune to
+the shell's `$PATH` (`PATH=/nowhere; command -p ls` works). A builtin
+still wins over a default-path file, same as bash. Also fixed alongside:
+the synthetic trailing `/` used internally to force a clean NotFound no
+longer leaks into "command not found" diagnostics. Verified against
+real bash for every form; adds 1 integration test.

@@ -2236,3 +2236,40 @@ fn typeset_is_a_synonym_for_declare() {
     let (out, _) = rush("type -t typeset");
     assert_eq!(out, "builtin\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn noclobber_refuses_overwrite_and_clobber_overrides() {
+    // C50: `set -C` didn't exist and `>|` didn't lex.
+    let dir = std::env::temp_dir().join(format!("rush_c50_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("f");
+    let f = f.to_str().unwrap();
+
+    // Creating a fresh file under -C is fine; a second `>` refuses and
+    // the original content survives. (Rush's pre-existing behavior for
+    // any failed redirect is to abort the script — bash continues with
+    // status 1; that divergence is inherited here, not new to C50.)
+    let (_, status) = rush(&format!("set -C; echo x > {f}; echo y > {f}"));
+    assert_eq!(status, 1);
+    assert_eq!(std::fs::read_to_string(f).unwrap(), "x\n");
+
+    // `>|` overrides; `>>` and device targets are exempt.
+    let (out, _) = rush(&format!("set -C; echo y >| {f}; echo st=$?; cat {f}"));
+    assert_eq!(out, "st=0\ny\n");
+    let (out, _) = rush(&format!("set -C; echo a >> {f}; echo z > /dev/null; echo st=$?"));
+    assert_eq!(out, "st=0\n");
+
+    // `&>` honors noclobber too (verified against bash).
+    let (_, status) = rush(&format!("set -C; echo b &> {f}"));
+    assert_eq!(status, 1);
+
+    // `set +C` turns it back off; `>|` without -C is a plain write; `$-`
+    // gains/loses C.
+    let (out, _) = rush(&format!("set -C; set +C; echo ok > {f}; cat {f}; echo n >| {f}; cat {f}"));
+    assert_eq!(out, "ok\nn\n");
+    let (out, _) = rush("set -C; echo [$-]; set +C; echo [$-]");
+    assert_eq!(out, "[C]\n[]\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

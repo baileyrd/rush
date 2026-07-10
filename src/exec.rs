@@ -1027,14 +1027,14 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
             Redirect::File { fd, file, mode } => {
                 let f = match mode {
                     RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
-                    RedirMode::Write | RedirMode::Append => open_write(file, *mode == RedirMode::Append)?,
+                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
                 };
                 // Any fd, not just 0/1/2 — `StdioGuard.saved` is keyed by
                 // plain `i32`, so no fd is special-cased here (see C38).
                 redirect_to(&mut guard, *fd as i32, f)?;
             }
             Redirect::Both { file, append } => {
-                let f = open_write(file, *append)?;
+                let f = open_write(file, if *append { crate::parser::RedirMode::Append } else { crate::parser::RedirMode::Write })?;
                 let g = f.try_clone().map_err(|e| e.to_string())?;
                 redirect_to(&mut guard, 1, f)?;
                 redirect_to(&mut guard, 2, g)?;
@@ -1681,7 +1681,7 @@ pub(crate) fn build_stage(
             Redirect::File { fd, file, mode } => {
                 let f = match mode {
                     RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
-                    RedirMode::Write | RedirMode::Append => open_write(file, *mode == RedirMode::Append)?,
+                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
                 };
                 match fd {
                     0 => stdin_sink = Some(Stdio::from(f)),
@@ -1691,7 +1691,7 @@ pub(crate) fn build_stage(
                 }
             }
             Redirect::Both { file, append } => {
-                let f = open_write(file, *append)?;
+                let f = open_write(file, if *append { crate::parser::RedirMode::Append } else { crate::parser::RedirMode::Write })?;
                 let g = f.try_clone().map_err(|e| e.to_string())?;
                 stdout_sink = Sink::File(f);
                 stderr_sink = Sink::File(g);
@@ -1869,7 +1869,19 @@ pub(crate) fn make_pipe() -> Result<(File, File), String> {
     Ok((read, write))
 }
 
-fn open_write(file: &str, append: bool) -> Result<File, String> {
+fn open_write(file: &str, mode: crate::parser::RedirMode) -> Result<File, String> {
+    use crate::parser::RedirMode;
+    // `set -C` (noclobber, C50): a plain `>` refuses to truncate an
+    // existing *regular* file — writing to an existing device
+    // (`> /dev/null`) stays fine, per POSIX and verified against bash.
+    // `>|` (Clobber) and `>>` are exempt.
+    if mode == RedirMode::Write
+        && crate::vars::noclobber()
+        && std::fs::metadata(file).is_ok_and(|m| m.is_file())
+    {
+        return Err(format!("{file}: cannot overwrite existing file"));
+    }
+    let append = mode == RedirMode::Append;
     OpenOptions::new()
         .write(true)
         .create(true)

@@ -52,6 +52,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions; clustered flags (`set -euo pipefail`) parse as in bash |
 | `set -u` (nounset) | ✅ | referencing an unset variable is an error; `:-`/`:=`/`:+`/`:?` and `$@`/`$*`/`$#`/`$?`/`$$` are exempt |
 | `set -o pipefail` | ✅ | a pipeline's status is the rightmost non-zero stage, not just its last; applies inside `$(...)` too |
+| `set -C` (noclobber) | ✅ | `>` refuses to overwrite an existing regular file; `>|` overrides; `>>`/devices exempt |
 | `set -x` (xtrace) | ✅ | echoes each command (`$PS4`-prefixed) before running it; nesting in `$(...)` repeats `$PS4`'s first character |
 | `trap` | ✅ | `EXIT` (every exit path), `INT` (Ctrl-C at an idle prompt), and (Unix) `TERM`/`HUP` — real signals, interrupting a blocking wait immediately; numeric/`SIG`-prefixed/lowercase specs all accepted (`trap 'cmd' 15`) |
 | Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment; `declare`/`local` `-u`/`-l`/`-i` attribute transforms; `readonly`/`declare -r` read-only variables |

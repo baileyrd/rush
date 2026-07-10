@@ -164,6 +164,9 @@ thread_local! {
     // Whether this shell is running its interactive REPL — `$-` includes
     // `i` when set (see `option_flags`).
     static INTERACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    // `set -C` (noclobber, C50): a plain `>` redirect refuses to truncate
+    // an existing regular file (see `exec::open_write`); `>|` overrides.
+    static NOCLOBBER: RefCell<bool> = const { RefCell::new(false) };
     // Declared variable attributes (`declare -u/-l/-i`, C43) — see `Attrs`'s
     // own doc comment for why this is a separate map rather than a `Var`
     // field.
@@ -210,6 +213,14 @@ pub fn xtrace() -> bool {
     XTRACE.with(|e| *e.borrow())
 }
 
+pub fn set_noclobber(on: bool) {
+    NOCLOBBER.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn noclobber() -> bool {
+    NOCLOBBER.with(|e| *e.borrow())
+}
+
 pub fn set_interactive(on: bool) {
     INTERACTIVE.with(|e| *e.borrow_mut() = on);
 }
@@ -226,6 +237,9 @@ pub fn interactive() -> bool {
 /// letter).
 pub fn option_flags() -> String {
     let mut flags = String::new();
+    if noclobber() {
+        flags.push('C');
+    }
     if errexit() {
         flags.push('e');
     }

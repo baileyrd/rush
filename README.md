@@ -117,7 +117,10 @@ commands only and `&` is rejected.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture, data-flow
   diagrams, module reference, and roadmap.
 - **[docs/CAPABILITY_GAPS.md](docs/CAPABILITY_GAPS.md)** — capability
-  assessment against dash/bash/ksh93/zsh/fish: 40 ranked gaps, by consequence — all now closed.
+  assessment against dash/bash/ksh93/zsh/fish: 73 ranked gaps, by
+  consequence — the original 40 are closed; a fresh comparison pass
+  found 33 more, currently open (headlined by a missing `[[ ]]`
+  extended-test construct and a missing `readonly` builtin).
 - **[CHANGELOG.md](CHANGELOG.md)** — what's been built, by area.
 
 ## Project Layout

@@ -238,6 +238,12 @@ fn interactive() -> rustyline::Result<()> {
     let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).build();
     let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::with_config(config)?;
     rl.set_helper(Some(completion::RushHelper::new()));
+    // Abbreviations (C70): a space after a defined abbreviation in
+    // command position rewrites it in place before the space lands.
+    rl.bind_sequence(
+        rustyline::KeyEvent::new(' ', rustyline::Modifiers::NONE),
+        rustyline::EventHandler::Conditional(Box::new(completion::AbbrSpaceHandler)),
+    );
     let hist = history_path();
     if let Some(ref h) = hist {
         let _ = rl.load_history(h);

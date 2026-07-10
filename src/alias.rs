@@ -10,6 +10,29 @@ use std::collections::BTreeMap;
 
 thread_local! {
     static ALIASES: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+    // Abbreviations (C70): fish/zsh-style names that live-expand on the
+    // interactive line itself (on space, in command position) — kept
+    // separate from aliases, as fish and zsh both do, since the two
+    // expand at completely different times.
+    static ABBRS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+pub fn abbr_set(name: &str, value: &str) {
+    ABBRS.with(|a| a.borrow_mut().insert(name.to_string(), value.to_string()));
+}
+
+pub fn abbr_get(name: &str) -> Option<String> {
+    ABBRS.with(|a| a.borrow().get(name).cloned())
+}
+
+/// Removes `name`; returns whether it was actually defined.
+pub fn abbr_unset(name: &str) -> bool {
+    ABBRS.with(|a| a.borrow_mut().remove(name).is_some())
+}
+
+/// All abbreviations, name-sorted.
+pub fn abbr_all() -> Vec<(String, String)> {
+    ABBRS.with(|a| a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
 }
 
 pub fn set(name: &str, value: &str) {

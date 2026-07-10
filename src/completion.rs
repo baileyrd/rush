@@ -225,6 +225,52 @@ fn highlight_line(line: &str) -> String {
 impl Validator for RushHelper {}
 impl Helper for RushHelper {}
 
+/// The abbreviation expansion (C70) that should replace the word ending
+/// at `pos`, if any: the word must be a defined abbreviation *and* be in
+/// command position — pure logic, unit-testable apart from the key-event
+/// plumbing in `AbbrSpaceHandler`. Returns the byte offset the word
+/// starts at and its expansion.
+pub(crate) fn abbr_expansion(line: &str, pos: usize) -> Option<(usize, String)> {
+    let start = line[..pos]
+        .rfind(char::is_whitespace)
+        .map(|i| i + 1)
+        .unwrap_or(0)
+        .max(segment_start(line, pos));
+    let word = &line[start..pos];
+    if word.is_empty() {
+        return None;
+    }
+    // Command position: nothing but whitespace between the segment start
+    // and the word itself.
+    if !line[segment_start(line, pos)..start].trim().is_empty() {
+        return None;
+    }
+    crate::alias::abbr_get(word).map(|exp| (start, exp))
+}
+
+/// `ConditionalEventHandler` bound to the space key (C70): when the word
+/// just typed is a defined abbreviation in command position, rewrite it
+/// in place (visible and editable before Enter — fish's `abbr`
+/// behavior); otherwise fall through to inserting a plain space.
+pub struct AbbrSpaceHandler;
+
+impl rustyline::ConditionalEventHandler for AbbrSpaceHandler {
+    fn handle(
+        &self,
+        _evt: &rustyline::Event,
+        _n: rustyline::RepeatCount,
+        _positive: bool,
+        ctx: &rustyline::EventContext,
+    ) -> Option<rustyline::Cmd> {
+        let (start, expansion) = abbr_expansion(ctx.line(), ctx.pos())?;
+        let word_len = ctx.line()[start..ctx.pos()].chars().count();
+        Some(rustyline::Cmd::Replace(
+            rustyline::Movement::BackwardChar(u16::try_from(word_len).unwrap_or(u16::MAX) as rustyline::RepeatCount),
+            Some(format!("{expansion} ")),
+        ))
+    }
+}
+
 /// The start (byte offset into `line`) of the current pipeline/segment
 /// containing `pos`: just after the last `|`/`;`/`&`/`(`/newline before it,
 /// or the start of the line if there is none.
@@ -564,6 +610,22 @@ mod tests {
 
         assert_eq!(helper.hint("", 0, &ctx), None);
         assert_eq!(helper.hint("echo hi", 7, &ctx), None);
+    }
+
+    // C70: abbreviation expansion decision — command position only.
+    #[test]
+    fn abbr_expansion_logic() {
+        crate::alias::abbr_set("gs", "git status");
+        assert_eq!(abbr_expansion("gs", 2), Some((0, "git status".to_string())));
+        // After a pipe/semicolon: command position again.
+        assert_eq!(abbr_expansion("true | gs", 9), Some((7, "git status".to_string())));
+        assert_eq!(abbr_expansion("true; gs", 8), Some((6, "git status".to_string())));
+        // Argument position: no expansion.
+        assert_eq!(abbr_expansion("echo gs", 7), None);
+        // Not an abbreviation / empty word: no expansion.
+        assert_eq!(abbr_expansion("ls", 2), None);
+        assert_eq!(abbr_expansion("gs ", 3), None);
+        crate::alias::abbr_unset("gs");
     }
 
     // C68: span classification — command words green/red by

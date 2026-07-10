@@ -321,13 +321,13 @@ syntax directly.
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
-- **Tier V — interactive UX:** 9 (5 done, 4 open — C70–C73)
+- **Tier V — interactive UX:** 9 (6 done, 3 open — C71–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C69 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C70 are
 now done (re-closing Tiers I through IV completely) and the remaining
-4 (all Tier V, interactive UX) are open.
+3 (all Tier V, interactive UX) are open.
 
 ---
 
@@ -2851,7 +2851,7 @@ display bash's Tab-Tab and fish's dropdown are built on) instead of
 silently cycling candidates in place. No completion logic changed —
 every candidate source from C34 feeds the new display unchanged.
 
-### C70 — No abbreviations / global-alias live expansion (tracked)
+### C70 — No abbreviations / global-alias live expansion ✅ done
 Native in fish (`abbr`) and zsh (`alias -g`) — a name that expands
 in-place as you type (typically on space or Enter), visible and editable
 before the command runs, distinct from a regular alias which only
@@ -2868,6 +2868,20 @@ default behavior runs. **Effort: M** — new abbreviation table
 (name → expansion, likely its own builtin `abbr`/`unabbr` rather than
 overloading `alias`, since fish/zsh keep the two concepts separate) plus
 the key-event wiring.
+
+Implemented per the sketch: a separate abbreviation table with its own
+`abbr name=value` / `unabbr` builtins (listing re-runnably with bare
+`abbr`, matching the concept split fish and zsh both keep), and the
+key-event wiring the write-up identified — a `ConditionalEventHandler`
+bound to the space key that, when the word just typed is a defined
+abbreviation *in command position* (segment-aware: after `|`/`;`/`&`
+counts, argument position doesn't), rewrites it in the buffer via
+`Cmd::Replace` before the space lands — visible and editable before the
+command runs, fish's `abbr` behavior exactly. The expansion decision is
+a pure function (`abbr_expansion`), unit-tested apart from the
+key-event plumbing; the builtins have an integration test. Expansion
+triggers on space (fish also expands on Enter — a documented
+narrowing).
 
 ### C71 — No right-side prompt (`$RPS1` / fish right prompt) (tracked)
 Native in zsh (`$RPS1`) and fish (`fish_right_prompt`) — text

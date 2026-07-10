@@ -1658,3 +1658,12 @@ The interactive Editor is now built with `CompletionType::List` — Tab
 shows the columned, paged candidate list (bash's Tab-Tab display)
 instead of silently cycling candidates in place. One-line config
 change; no completion logic touched.
+
+### New: abbreviations with live in-line expansion (C70)
+`abbr name=value` / `unabbr` (a table separate from aliases, as fish
+and zsh keep them) plus a space-key `ConditionalEventHandler` that
+rewrites a defined abbreviation in place when typed in command
+position — visible and editable before Enter, fish's behavior.
+Expansion decision is a pure, unit-tested function; expansion triggers
+on space (Enter is a documented narrowing). Adds unit + integration
+tests.

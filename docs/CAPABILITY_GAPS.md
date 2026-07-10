@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (16 done, 7 open — C61–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (17 done, 6 open — C62–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C60 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C61 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-13 are open.
+12 are open.
 
 ---
 
@@ -2551,7 +2551,7 @@ tracked by any item* — `w=$'a\nb'` assigns the literal text — noted
 here rather than silently skipped. Two integration tests cover the
 matrix.
 
-### C61 — `mapfile` / `readarray` (tracked)
+### C61 — `mapfile` / `readarray` ✅ done
 Bash-only (no equivalent spelling in zsh/ksh93, which use `arr=("${(@f)$(...)}")`/`read -A`
 idioms instead; not in dash) — but since rush targets bash compatibility
 specifically, and `mapfile -t lines < file` is the modern, correct
@@ -2563,6 +2563,19 @@ that same primitive, appending into an indexed array (C22) via
 `array_append`. `-t` (strip trailing newline) is the one flag that
 actually matters for real usage; `-d`/`-n`/`-s`/`-O`/callback flags
 (`-c`/`-C`) can reasonably wait.
+
+Implemented exactly per the sketch: `mapfile [-t] [array]` (and its
+`readarray` synonym) loops `read`'s existing byte-at-a-time
+logical-line primitive in raw mode — so it never over-consumes fd 0 and
+`mapfile -t lines < file` works with redirects like any builtin — and
+assigns the collected lines as one indexed array (`MAPFILE` when no
+name is given). Verified against bash: `-t` strips the newline; without
+it each element keeps its own trailing `\n`; an unterminated final
+line still becomes an element (with no newline to keep either way);
+empty input yields an empty array (`n=0`); an invalid identifier is
+"not a valid identifier", status 1. `-d`/`-n`/`-s`/`-O`/`-c`/`-C`
+remain documented waits per the item's own scoping, and error clearly
+rather than misparse. One integration test covers the matrix.
 
 ### C62 — Nameref variables: `declare -n` / `local -n` / ksh `nameref` (tracked)
 Present in bash 4.3+ (`declare -n`/`local -n`) and ksh93 (its own

@@ -44,6 +44,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "umask" => Some(umask_cmd(argv)),
         "ulimit" => Some(ulimit_cmd(argv)),
         "shopt" => Some(shopt_cmd(argv)),
+        "mapfile" | "readarray" => Some(mapfile_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -54,7 +55,7 @@ pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
-    "declare", "typeset", "readonly",
+    "mapfile", "readarray", "declare", "typeset", "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -546,6 +547,58 @@ fn read_cmd(argv: &[String]) -> i32 {
 /// where `read reply` on the same input would trim it to empty). "Blank"
 /// (for the menu-redisplay rule) is the caller's job: it means this
 /// returned line is zero-length, not merely all-whitespace.
+/// `mapfile [-t] [array]` / `readarray [-t] [array]` (C61) — read every
+/// line from stdin into an indexed array (`MAPFILE` when no name is
+/// given). Without `-t` each element keeps its trailing newline; with it
+/// the delimiter is stripped — the one flag that matters in real usage
+/// (`-d`/`-n`/`-s`/`-O`/`-c`/`-C` are documented waits, per the item's
+/// own scoping). Reads raw (no backslash processing), one byte at a time
+/// off fd 0 via the same primitive `read` uses, so it never over-consumes.
+fn mapfile_cmd(argv: &[String]) -> i32 {
+    let mut strip = false;
+    let mut name: Option<&str> = None;
+    for arg in &argv[1..] {
+        match arg.as_str() {
+            "-t" => strip = true,
+            other if other.starts_with('-') => {
+                eprintln!("{}: {other}: only -t is supported", argv[0]);
+                return 2;
+            }
+            other if name.is_none() => name = Some(other),
+            other => {
+                eprintln!("{}: {other}: too many arguments", argv[0]);
+                return 2;
+            }
+        }
+    }
+    let name = name.unwrap_or("MAPFILE");
+    let mut valid = name.chars().next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
+    valid &= name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric());
+    if !valid {
+        eprintln!("{}: {name}: not a valid identifier", argv[0]);
+        return 1;
+    }
+    let mut lines = Vec::new();
+    loop {
+        let (bytes, _, hit_eof) = read_logical_line(true);
+        let mut line = String::from_utf8_lossy(&bytes).into_owned();
+        if line.is_empty() && hit_eof {
+            break;
+        }
+        // `hit_eof` means this line was unterminated — it has no trailing
+        // newline to keep even without `-t` (matching bash).
+        if !strip && !hit_eof {
+            line.push('\n');
+        }
+        lines.push(line);
+        if hit_eof {
+            break;
+        }
+    }
+    crate::vars::set_array(name, lines);
+    0
+}
+
 pub(crate) fn read_reply_line() -> (String, bool) {
     let (line, _protected, hit_eof) = read_logical_line(false);
     (String::from_utf8_lossy(&line).into_owned(), hit_eof)

@@ -1044,6 +1044,44 @@ fn source_searches_path_for_a_readable_but_not_executable_bare_name() {
 }
 
 #[test]
+fn set_reassigns_positional_parameters() {
+    // C39: `set -- args…` / `set args…` — the standard way to reassign
+    // `$1`/`$2`/…/`$#` mid-script — used to be rejected outright ("not
+    // supported") rather than actually reassigning anything.
+    assert_eq!(rush("set -- a b c; echo \"$#: $1 $2 $3\"").0, "3: a b c\n");
+    // No `--` needed either — a bare, non-flag first word triggers the
+    // same reassignment.
+    assert_eq!(rush("set a b c; echo \"$#: $1 $2 $3\"").0, "3: a b c\n");
+    // `set --` alone clears the positional parameters.
+    assert_eq!(rush("set --; echo \"$#:[$1]\"").0, "0:[]\n");
+    // `$0` is never touched by either form.
+    assert_eq!(rush_argv("set -- newarg; echo $0", &["myprog"]).0, "myprog\n");
+    // After `--`, everything is positional even if it looks like a flag.
+    assert_eq!(rush("set -- -x; echo \"1=[$1]\"").0, "1=[-x]\n");
+    assert_eq!(rush("set -- --; echo \"1=[$1]\"").0, "1=[--]\n");
+    // A flag before `--`/the positional list still applies.
+    assert_eq!(
+        rush("set -e -- a b c; echo \"$#: $1 $2 $3\"; false; echo unreached").0,
+        "3: a b c\n"
+    );
+    // The textbook getopts idiom: drop the parsed flags, keep the rest.
+    assert_eq!(
+        rush("set -- -a foo bar; while getopts a opt; do :; done; shift $((OPTIND-1)); set -- \"$@\"; echo \"$#: $1 $2\"").0,
+        "2: foo bar\n"
+    );
+
+    // An unrecognized flag is still a hard error — and, critically, must
+    // *not* fall through and reassign positional parameters from whatever
+    // follows it (a real bug this feature's own implementation could have
+    // reintroduced: an early "unsupported flag" error path that didn't
+    // stop processing would let `set -z a b` wrongly set $1/$2).
+    let (out, _) = rush("set -z a b; echo \"status=$? [$1] [$2]\"");
+    assert_eq!(out, "status=1 [] []\n");
+    let (out, _) = rush("set -o badname a b; echo \"status=$? [$1] [$2]\"");
+    assert_eq!(out, "status=1 [] []\n");
+}
+
+#[test]
 fn getopts_builtin() {
     // Combined short flags (`-abc` = `-a -b -c`): `$OPTIND` stays put while
     // still inside the same word, advancing only once it's exhausted.

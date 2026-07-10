@@ -1171,3 +1171,30 @@ used to force any fd that wasn't literally 0 or 2 onto fd **1** — `cmd
   self-dup coincidence bug, for both a builtin and a real external
   command. Adds 2 lexer unit tests plus 3 integration tests; full suite
   and clippy stay clean (Windows cross-compile checked too).
+
+### Fix: `set -- args…` / `set args…` didn't reassign positional parameters (C39)
+Closes out Tier III completely, 5 of 5. The standard way to reassign
+`$1`/`$2`/…/`$#` mid-script — the textbook idiom right after `getopts`
+finishes — used to be rejected outright by `set` rather than actually
+reassigning anything.
+
+- **New `vars::set_positional(args)`** reassigns just the positional
+  parameters, leaving `$0` untouched (unlike `set_args`, used only for a
+  script's own initial argv).
+- **`set_cmd` (`builtins.rs`)** now recognizes two triggers, matching
+  real bash exactly: an explicit `--` (everything after is positional,
+  even flag-looking text — `set -- -x` makes `$1` the literal `-x`), and
+  a bare first word that isn't `-`/`+`-prefixed (`set a b c`, no `--`
+  needed). A preceding flag still applies first (`set -e -- a b c`).
+- **A real bug fixed along the way**: an unrecognized flag or invalid
+  `-o`/`+o` name used to set an error flag and keep looping rather than
+  stopping immediately — harmless before (nothing past it to trigger),
+  but would have let `set -z a b` silently reassign `$1`/`$2` from `a b`
+  once positional reassignment existed. Both error paths now return
+  immediately, verified directly against real bash to leave `$1`/`$2`
+  completely untouched.
+- Verified directly against real bash across `set -- args`, the bare
+  form, `set --` alone, `$0` staying untouched, the textbook
+  post-`getopts` idiom, and both hard-error cases. Adds 1 new
+  integration test covering all of the above; full suite and clippy stay
+  clean.

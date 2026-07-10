@@ -211,6 +211,13 @@ pub fn set_args(name: String, args: Vec<String>) {
     ARGS.with(|a| *a.borrow_mut() = args);
 }
 
+/// Reassign just the positional parameters (`$1`…/`$#`/`"$@"`), leaving `$0`
+/// untouched — `set -- args…`/`set args…`, unlike `set_args` above (used
+/// only for a script's own initial argv, which does set `$0`).
+pub fn set_positional(args: Vec<String>) {
+    ARGS.with(|a| *a.borrow_mut() = args);
+}
+
 /// `$n`: `$0` is the shell/script name, `$1`… the positional parameters.
 pub fn arg(n: usize) -> Option<String> {
     if n == 0 {

@@ -52,8 +52,11 @@ now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
 and `-x` (C20, xtrace) alongside them. `TERM`/`HUP` traps (C21) now fire
 too — including interrupting a blocking wait immediately, the headline
 case for a container's graceful-shutdown pattern. (One gap turned up
-alongside `-x`: `set --`/`set args…` doesn't reassign positional
-parameters at all — tracked as C39, still open.) Tier IV (bash/ksh/zsh
+alongside `-x` — `set --`/`set args…` didn't reassign positional
+parameters at all — fixed as C39, closing out Tier III completely, 5 of
+5; fixing it also caught a real bug its own implementation could
+otherwise have introduced, an unrecognized `set` flag that didn't stop
+processing immediately.) Tier IV (bash/ksh/zsh
 language parity, the least POSIX-y and largest tier) is now underway:
 indexed arrays (C22) — `arr=(a b c)`,
 `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, sparse arrays, `arr[i]=`/`arr[i]+=`,
@@ -244,7 +247,7 @@ completion *system* (as opposed to this fixed case list) provides.
 
 - **Tier I — correctness/POSIX risk:** 10 (9 done)
 - **Tier II — missing standard builtins:** 12 (12 done — complete)
-- **Tier III — scripting-safety idioms:** 5 (4 done)
+- **Tier III — scripting-safety idioms:** 5 (5 done — complete)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
 - **Tier V — interactive UX:** 3 (3 done — complete)
 
@@ -944,21 +947,53 @@ exact header format for every compound kind was a bigger lift than this
 item's effort budget justified next to the headline case (seeing every
 command that actually ran).
 
-### C39 — `set -- args…` / `set args…` doesn't reassign positional parameters (tracked)
+### C39 — `set -- args…` / `set args…` doesn't reassign positional parameters (tracked) ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh. The standard way to
 reassign `$1`/`$2`/…/`$#` mid-script — the textbook idiom right after
 `getopts` finishes (`shift $((OPTIND - 1)); set -- "$@"` to drop the
 parsed flags) — or to split a string into positional fields (`set -- $line`).
-Rush's `set` builtin only recognizes its flag-toggling forms
+Rush's `set` builtin used to only recognize its flag-toggling forms
 (`-e`/`-u`/`-x`/`-o pipefail`); any other argument, including a bare `--`,
-is rejected outright (`set: --: not supported`, status 1) rather than
+was rejected outright (`set: --: not supported`, status 1) rather than
 becoming the new `$1`/`$2`/…. Found while verifying C26 (`select`
 without an `in` clause iterating `"$@"`) — needed a way to *set* `"$@"`
 for the test and discovered there wasn't one; general, not specific to
-`select` at all. **Effort: S** — `set_cmd` (`builtins.rs`) needs a
-`--`-or-first-non-flag-argument branch that calls into whatever
-`vars.rs` mechanism already backs `$1`/`$2`/`$#`/`"$@"` for a script's own
-initial argv.
+`select` at all.
+
+**Fix**: a new `vars::set_positional(args)` reassigns just `$1`…/`$#`,
+leaving `$0` untouched (unlike the existing `set_args`, used only for a
+script's own initial argv, which does set `$0` too). `set_cmd`
+(`builtins.rs`) now recognizes two triggers for it, matching real bash
+exactly: an explicit `--` (everything after becomes positional, even
+text that looks like a flag — `set -- -x` makes `$1` the literal `-x`,
+not the xtrace flag), and a bare first word that isn't `-`/`+`-prefixed
+(`set a b c` works with no `--` at all) — both consume the rest of the
+argument list as the new positional parameters. A flag preceding either
+trigger still applies first (`set -e -- a b c` both turns on `errexit`
+*and* reassigns).
+
+**A real bug fixed along the way, in behavior this item's own
+implementation could otherwise have newly introduced**: an unrecognized
+flag (`set -z a b`) or an invalid `-o`/`+o` option name must be a hard
+stop — verified directly that real bash leaves `$1`/`$2` completely
+untouched in both cases, rather than treating whatever follows the bad
+flag as the new positional parameter list. The pre-existing code for
+both error cases only set a status flag and *kept looping* rather than
+returning immediately; that was harmless before (there was nothing past
+it to accidentally trigger), but would have let a genuinely invalid
+`set` invocation silently corrupt `$1`/`$2`/`$#` once positional
+reassignment existed. Both error paths now return immediately.
+
+Verified directly against real bash across: `set -- args`, the
+no-`--`-needed bare form, `set --` alone (clears positional parameters),
+`$0` staying untouched, `--`-then-flag-looking-text staying literal, a
+preceding flag still applying, the textbook post-`getopts` idiom, and
+both hard-error cases leaving `$1`/`$2` alone. Not matched, an accepted
+cosmetic difference: rush's own exit status for these `set` error cases
+(1) versus real bash's (2) — an existing convention throughout this
+shell (own phrasing/status for its own error conditions rather than
+mirroring bash's internal ones), not something this item changed.
+**Effort: S**, as estimated.
 
 ### C21 — Trap signals beyond `EXIT`/`INT` actually firing (tracked) ✅ done
 `TERM`/`HUP` are POSIX-mandated; `ERR`/`DEBUG` are bash/ksh/zsh extensions.

@@ -778,6 +778,44 @@ fn command_v_type_and_hash_see_a_plain_path_extension_and_spawning_honors_it_too
 
 #[cfg(unix)]
 #[test]
+fn unset_path_actually_breaks_resolving_a_bare_command_name() {
+    // C40: `unset`-ing an inherited/exported variable like `PATH` only
+    // deleted rush's own internal record of it — a spawned child, and
+    // rush's own resolution of *new* spawns, still fell back to the real
+    // OS environment's untouched value. Real bash's child genuinely no
+    // longer has it: `ls` (a bare name, needing a `$PATH` search) now
+    // fails with status 127, matching bash exactly, while a direct path
+    // (no search needed) keeps working.
+    let (_, status) = rush("unset PATH; ls / >/dev/null 2>&1");
+    assert_eq!(status, 127);
+
+    let (out, status) = rush("unset PATH; /bin/ls / >/dev/null; echo status=$?");
+    assert_eq!(out, "status=0\n");
+    assert_eq!(status, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_cd_honors_an_unexported_home_and_breaks_when_home_is_unset() {
+    // The same root cause (a `std::env` fallback masking `vars`'s own,
+    // possibly-`unset` value) also affected `cd`'s home-directory case, a
+    // narrower but related bug found alongside C40: a bare `cd` used to
+    // read `std::env::var("HOME")` directly, never checking `vars` first
+    // at all — so a plain (non-`export`ed) `HOME=/some/dir` reassignment
+    // was invisible to it, and `unset HOME` didn't stop it either.
+    let dir = std::env::temp_dir().join(format!("rush_c40_home_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, _) = rush(&format!("HOME={}; cd; pwd", dir.to_str().unwrap()));
+    assert_eq!(out, format!("{}\n", dir.to_str().unwrap()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let (out, status) = rush("unset HOME; cd; echo status=$?");
+    assert_eq!(out, "status=1\n");
+    assert_eq!(status, 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn wait_builtin_and_last_bg_pid() {
     // `$!` is unset until something's been backgrounded.
     assert_eq!(rush("x=\"[$!]\"; echo \"$x\"").0, "[]\n");

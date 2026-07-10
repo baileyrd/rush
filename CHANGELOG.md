@@ -1198,3 +1198,58 @@ reassigning anything.
   post-`getopts` idiom, and both hard-error cases. Adds 1 new
   integration test covering all of the above; full suite and clippy stay
   clean.
+
+### Fix: `unset` of an inherited/exported variable still reached a spawned child (C40)
+Closes out Tier I completely, 10 of 10 — every tier tracked in
+`docs/CAPABILITY_GAPS.md` is now done. `unset`-ing a variable that came
+from the inherited process environment (`PATH`, or anything else
+genuinely exported) used to only delete rush's own internal record of
+it; a spawned child still inherited the original OS-level value
+regardless.
+
+- **Child environment**: `command.env_clear()` before
+  `command.envs(vars::exported())`, at both spawn sites (`build_stage`
+  and `exec_cmd`). Since `main.rs` already seeds every inherited
+  environment variable into `vars` at startup (C36), `vars::exported()`
+  is a complete, accurate picture of what a child's environment should
+  be — rebuilding it from scratch, instead of layering onto `Command`'s
+  default full-environment inheritance, is what makes `unset` actually
+  take effect.
+- **A deeper piece the environment fix alone didn't cover**:
+  `Command::new(name)` resolves a bare program name using the *real*
+  process environment's `PATH` at spawn time, entirely independent of
+  whatever's configured for the child — so rush's own attempt to
+  *locate* the command still silently succeeded via the untouched real
+  environment even with the child's own environment now correct. New
+  `exec::resolve_program` resolves a bare name via
+  `builtins::resolve_in_path` (rush's own, `vars`-aware `$PATH` search)
+  first, so `Command`'s built-in search never runs; a name that doesn't
+  resolve there gets a trailing `/` appended (guaranteed to fail with
+  `NotFound`, and — having a `/` — also skips `Command`'s own search),
+  routing it through C37's existing not-found handling rather than a
+  second error path. A direct path is left alone, preserving C37's
+  126-vs-127 distinction for that case unchanged.
+- **A related, broader cleanup surfaced by the same investigation**:
+  half a dozen other "read this variable" call sites (`expand.rs`'s
+  central `var_raw`, `arith.rs`'s arithmetic lookup, `PS1`/`PS3`/`PS4`,
+  `IFS`, and a bare `cd`'s `$HOME` fallback, which previously didn't
+  check `vars` at all) had the identical `vars::get(name).or_else(||
+  std::env::var(name).ok())` pattern — harmless before C36, actively
+  wrong after it (silently resurrecting an unset variable's original
+  value). All now use `vars::get` alone. `~` (tilde expansion) keeps a
+  deliberate exception: verified directly that real bash's own `~`
+  *does* follow a plain, unexported `HOME=` reassignment (previously
+  rush didn't honor this either) but *keeps resolving* even after
+  `unset HOME`, unlike an ordinary variable.
+- Explicitly out of scope: `unset PS4` still traces with rush's
+  hardcoded `+ ` default rather than real bash's genuinely empty prefix
+  — a different root cause (a shell-internal default bash treats as
+  real, seeded-at-startup state, not environment inheritance), left for
+  its own follow-up.
+- Verified directly against real bash across: `unset PATH` breaking a
+  bare command name while a direct path keeps working, `PATH`
+  reassignment still resolving new commands, `unset IFS` reverting to
+  default splitting, a bare `cd` following a plain `HOME=` reassignment
+  and erroring after `unset HOME`, and `~` still resolving after `unset
+  HOME` while following an assignment. Adds 2 new integration tests;
+  full suite and clippy stay clean (Windows cross-compile checked too).

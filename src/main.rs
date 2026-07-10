@@ -43,11 +43,13 @@ fn rc_path() -> Option<PathBuf> {
     Some(p)
 }
 
-/// The interactive prompt: `$PS1` (shell variable first, then environment —
-/// same precedence as `$VAR` expansion) with its escapes expanded, or the
-/// original hardcoded default if `PS1` isn't set.
+/// The interactive prompt: `$PS1` with its escapes expanded, or the original
+/// hardcoded default if `PS1` isn't set. `vars::get` alone is a complete
+/// answer — every inherited environment variable (including a real `PS1`)
+/// is seeded into it at startup (C36), and falling back to `std::env::var`
+/// on top would resurrect its original value even after `unset` (C40).
 fn prompt() -> String {
-    match crate::vars::get("PS1").or_else(|| std::env::var("PS1").ok()) {
+    match crate::vars::get("PS1") {
         Some(ps1) => expand_ps1(&ps1),
         None => default_prompt(),
     }

@@ -43,7 +43,9 @@ pub enum Token {
     Pipe,             // |
     Redirect(Redir),  // < > >> 2> 2>> 2>&1 &> …
     Semi,             // ;
-    DSemi,            // ;; (case item terminator)
+    DSemi,            // ;; (case item terminator: stop)
+    SemiAmp,          // ;& (case item terminator: fall through unconditionally)
+    DSemiAmp,         // ;;& (case item terminator: resume pattern testing)
     And,              // &&
     Or,               // ||
     Amp,              // & (single — background)
@@ -149,7 +151,15 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                 chars.next();
                 if chars.peek() == Some(&';') {
                     chars.next();
-                    tokens.push(Token::DSemi);
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        tokens.push(Token::DSemiAmp);
+                    } else {
+                        tokens.push(Token::DSemi);
+                    }
+                } else if chars.peek() == Some(&'&') {
+                    chars.next();
+                    tokens.push(Token::SemiAmp);
                 } else {
                     tokens.push(Token::Semi);
                 }

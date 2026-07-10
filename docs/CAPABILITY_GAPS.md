@@ -39,12 +39,12 @@ largest tier) is now underway: indexed arrays (C22) — `arr=(a b c)`,
 `unset 'arr[i]'`, `local arr=(...)` — are done, associative arrays
 (C23) — a new `declare -A` builtin, `arr[key]=`/`arr[key]+=`,
 `arr+=([k]=v ...)` merge-by-key, `${arr[@]}`/`${!arr[@]}` — followed on
-top of them, and brace expansion (C24) — `{a,b,c}`, `{1..5}`,
-`{a..z..2}`, nesting, cross products — closes out what had been the
-single most dangerous *silent* gap in this whole document (`mkdir
-{a,b,c}` used to make one wrongly-named directory instead of three, with
-no warning at all), the first real dent in what's otherwise still a
-dash-shaped core.
+top of them, brace expansion (C24) — `{a,b,c}`, `{1..5}`, `{a..z..2}`,
+nesting, cross products — closed out what had been the single most
+dangerous *silent* gap in this whole document (`mkdir {a,b,c}` used to
+make one wrongly-named directory instead of three, with no warning at
+all), and `case` fallthrough (C25) — `;&`/`;;&` — rounded out `case`
+itself, the first real dent in what's otherwise still a dash-shaped core.
 
 ---
 
@@ -70,6 +70,7 @@ applicable to that shell's own model.
 | Indexed arrays | ✅¶ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Associative arrays (`declare -A`) | ✅** | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ✅†† | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `case` fallthrough `;&` / `;;&` | ✅ | ❌ | ✅ | ✅ | ✅ | — |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
@@ -128,7 +129,7 @@ statements' own values.
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 4 (4 done — complete)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (3 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (4 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -938,10 +939,33 @@ assignment-vs-argument-word distinction, and the `$`-expansion ordering —
 was verified directly against real bash across more than 60 scenarios,
 matching exactly.
 
-### C25 — `case` fallthrough: `;&` / `;;&`
-Present in bash 4+/ksh93/zsh (not POSIX). Moderate-value convenience; the
-lexer already recognizes `;;`, so this is an incremental addition rather
-than new machinery. **Effort: S.**
+### C25 — `case` fallthrough: `;&` / `;;&` ✅ done
+Present in bash 4+/ksh93/zsh (not POSIX). Two new lexer tokens
+(`Token::SemiAmp` for `;&`, `Token::DSemiAmp` for `;;&`, alongside the
+existing `Token::DSemi` for `;;`) and a new `CaseTerm` enum
+(`Break`/`FallThrough`/`Continue`) recording which terminator closed each
+`Compound::Case` item — defaulting to `Break` when the last item before
+`esac` omits one, same as today.
+
+**Semantics** (`exec.rs`), verified directly against real bash: `;;`
+(`Break`) stops — the case's result is whatever its own body's last
+command returned. `;&` (`FallThrough`) unconditionally runs the *next*
+item's body too, with no pattern test at all, and chains through that
+item's own terminator in turn (`a) ..;& b) ..;& c) ..;;` on a subject
+matching `a` runs all three bodies in order). `;;&` (`Continue`) resumes
+*pattern* testing starting at the next item — not unconditional — running
+the first one (if any) whose pattern matches, same as if the whole `case`
+restarted from there (`a) ..;;& b) ..;; a) ..;;` on subject `a` runs the
+first and third bodies, skipping `b`, since only the third item's pattern
+matches on the resumed scan). `$?` after the whole `case` is always the
+last body that actually ran, whichever terminator chain led there.
+
+Every scenario — a single `;&`, a chain of several in a row, `;;&`
+finding a later match vs. finding none, a trailing `;;&` on the last item
+before `esac` (nothing left to resume into — stops, same as `;;`), exit
+status propagation through a fallthrough chain, and the terminator-less
+last-item default — was verified directly against real bash across 10
+scenarios, matching exactly.
 
 ### C26 — `select` (numbered-menu prompt)
 Specified by POSIX and implemented by bash/ksh93/zsh — though dash,

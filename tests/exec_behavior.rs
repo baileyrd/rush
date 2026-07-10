@@ -1149,6 +1149,37 @@ fn heredoc_trailing_a_compound_command_feeds_it() {
 }
 
 #[test]
+fn case_semi_amp_falls_through_unconditionally() {
+    // `;&` runs the *next* item's body too, without testing its pattern.
+    assert_eq!(rush("case a in a) echo one;& b) echo two;; esac").0, "one\ntwo\n");
+    // Chains through multiple `;&` in a row.
+    assert_eq!(
+        rush("case a in a) echo one;& b) echo two;& c) echo three;; esac").0,
+        "one\ntwo\nthree\n"
+    );
+    // `$?` after the whole `case` is the *last* body that actually ran.
+    assert_eq!(rush("case a in a) false;& b) echo two;; esac; echo status:$?").0, "two\nstatus:0\n");
+}
+
+#[test]
+fn case_dsemi_amp_resumes_pattern_testing() {
+    // `;;&` resumes testing *subsequent* patterns (not unconditional) —
+    // runs the first one (if any) that matches, same as if the case
+    // restarted right after the current item.
+    assert_eq!(rush("case a in a) echo one;;& b) echo two;; a) echo three;; esac").0, "one\nthree\n");
+    // No later pattern matches: nothing else runs.
+    assert_eq!(rush("case a in a) echo one;;& b) echo two;; esac").0, "one\n");
+    // A trailing `;;&` at the very end of the `case` (no items left to
+    // resume into) just stops, like `;;` would.
+    assert_eq!(rush(r#"case a in a) echo one;;& esac; echo "after:$?""#).0, "one\nafter:0\n");
+}
+
+#[test]
+fn case_terminator_omitted_on_last_item_defaults_to_break() {
+    assert_eq!(rush("case a in a) echo one;;esac").0, "one\n");
+}
+
+#[test]
 fn brace_expansion_comma_lists_and_cross_products() {
     // A plain comma-list turns one word into several argv words.
     assert_eq!(rush("echo {a,b,c}").0, "a b c\n");

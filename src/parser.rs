@@ -125,10 +125,13 @@ pub enum Compound {
         has_in: bool,
         body: CommandList,
     },
-    /// `case WORD in PATTERN|… ) BODY ;; … esac`.
+    /// `case WORD in PATTERN|… ) BODY ;; … esac`. Each item's own terminator
+    /// (`;;`/`;&`/`;;&`, defaulting to `;;` if omitted on the last item
+    /// before `esac`) decides what happens after its body runs — see
+    /// [`CaseTerm`].
     Case {
         word: Word,
-        items: Vec<(Vec<Word>, CommandList)>,
+        items: Vec<(Vec<Word>, CommandList, CaseTerm)>,
     },
     /// A brace group `{ list; }` — runs the list in the current shell.
     Group(CommandList),
@@ -136,6 +139,21 @@ pub enum Compound {
     Subshell(CommandList),
     /// A function definition `name() { list; }`.
     FuncDef { name: String, body: CommandList },
+}
+
+/// How a `case` item's body hands off to the next item, once its own body
+/// has run (bash 4+/ksh93/zsh — not POSIX, which only has `;;`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseTerm {
+    /// `;;` — stop; this is the result of the whole `case`.
+    Break,
+    /// `;&` — unconditionally run the *next* item's body too, without
+    /// testing its pattern (and chaining again through *its* terminator).
+    FallThrough,
+    /// `;;&` — resume pattern testing at the next item, running the first
+    /// one (if any) whose pattern matches — same as if the whole `case`
+    /// restarted from there.
+    Continue,
 }
 
 /// A parse failure. `Incomplete` means the input is a valid prefix that needs
@@ -219,8 +237,9 @@ impl Parser {
     /// A list ends at end of input or a reserved word that closes a construct
     /// (`then`, `fi`, `do`, …) — anything that isn't a command starter.
     fn at_list_end(&self) -> bool {
-        // `;;` closes a `case` item's body; `)` closes a subshell.
-        if matches!(self.peek(), Some(Token::DSemi | Token::RParen)) {
+        // `;;`/`;&`/`;;&` all close a `case` item's body; `)` closes a
+        // subshell.
+        if matches!(self.peek(), Some(Token::DSemi | Token::SemiAmp | Token::DSemiAmp | Token::RParen)) {
             return true;
         }
         match self.peek_keyword() {
@@ -491,10 +510,24 @@ impl Parser {
             }
 
             let body = self.parse_list()?;
-            if matches!(self.peek(), Some(Token::DSemi)) {
-                self.pos += 1;
-            }
-            items.push((patterns, body));
+            let term = match self.peek() {
+                Some(Token::DSemi) => {
+                    self.pos += 1;
+                    CaseTerm::Break
+                }
+                Some(Token::SemiAmp) => {
+                    self.pos += 1;
+                    CaseTerm::FallThrough
+                }
+                Some(Token::DSemiAmp) => {
+                    self.pos += 1;
+                    CaseTerm::Continue
+                }
+                // No terminator at all only happens on the last item before
+                // `esac` — same as an explicit `;;`.
+                _ => CaseTerm::Break,
+            };
+            items.push((patterns, body, term));
         }
 
         self.expect_keyword("esac")?;
@@ -592,6 +625,8 @@ fn describe(tok: &Token) -> String {
         Token::Amp => "&".into(),
         Token::Semi => ";".into(),
         Token::DSemi => ";;".into(),
+        Token::SemiAmp => ";&".into(),
+        Token::DSemiAmp => ";;&".into(),
         Token::LParen => "(".into(),
         Token::RParen => ")".into(),
         Token::Redirect(_) => "redirection".into(),

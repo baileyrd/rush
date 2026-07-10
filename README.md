@@ -49,7 +49,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Process substitution | ✅ | `<(cmd)`/`>(cmd)` via a real pipe + `/dev/fd/N`, non-blocking and concurrent (Unix only) |
 | Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask` on Unix) |
 | Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
-| `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions |
+| `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions; clustered flags (`set -euo pipefail`) parse as in bash |
 | `set -u` (nounset) | ✅ | referencing an unset variable is an error; `:-`/`:=`/`:+`/`:?` and `$@`/`$*`/`$#`/`$?`/`$$` are exempt |
 | `set -o pipefail` | ✅ | a pipeline's status is the rightmost non-zero stage, not just its last; applies inside `$(...)` too |
 | `set -x` (xtrace) | ✅ | echoes each command (`$PS4`-prefixed) before running it; nesting in `$(...)` repeats `$PS4`'s first character |
@@ -61,7 +61,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Brace expansion | ✅ | `{a,b,c}` (comma-lists, nesting, cross products), `{1..5}`/`{a..z..2}` (numeric/letter ranges, zero-padding); command arguments, `for` word lists, array literals, `local`/`declare` |
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
-| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, `${V#pat}`/`##`/`%`/`%%` (prefix/suffix pattern removal), tilde, command substitution; unquoted results field-split on `$IFS` |
+| Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `$$`/`$PPID`/`$-`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, `${V#pat}`/`##`/`%`/`%%` (prefix/suffix pattern removal), tilde, command substitution; unquoted results field-split on `$IFS` |
 | Arithmetic (`$((...))`, `((expr))`) | ✅ | `+ - * / % **`, bitwise `& \| ^ ~ << >>`, comparisons, `&& \|\| !`, ternary `?:`, assignment (`= += -= *= /= %= <<= >>= &= ^= \|=`), `++`/`--` (pre/post), parentheses, variables; standalone `((expr))` command, `for ((init;cond;update))` |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |

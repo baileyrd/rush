@@ -1253,3 +1253,31 @@ regardless.
   and erroring after `unset HOME`, and `~` still resolving after `unset
   HOME` while following an assignment. Adds 2 new integration tests;
   full suite and clippy stay clean (Windows cross-compile checked too).
+
+### Fix: `$$`, `$PPID`, and `$-` didn't expand at all (C41)
+First item landed from the fresh C41–C73 comparison pass. `echo $$`
+printed the literal two-character text `$$` (breaking the ubiquitous
+`tmpfile=/tmp/x.$$` idiom silently), and `$PPID`/`$-` expanded to empty.
+
+- **`$$` / `${$}`** — the shell's own pid, from `std::process::id()`,
+  as new arms in `expand.rs`'s `$`-scanner and `expand_braced`'s
+  special-parameter table.
+- **`$PPID`** — seeded once at startup (`libc::getppid()`, Unix) as an
+  ordinary non-exported shell variable, *after* the environment-seeding
+  loop so a stale exported `PPID` from a parent process can't shadow the
+  real value (verified: bash wins that same race the same way).
+- **`$-` / `${-}`** — assembled by the new `vars::option_flags()` from
+  the tracked option flags: `e` (errexit), `i` (interactive, a new flag
+  set on REPL entry), `u` (nounset), `x` (xtrace). `set -o pipefail`
+  contributes no letter, matching real bash.
+- **A real adjacent bug found while verifying `$-`**: `set` never
+  parsed clustered short flags — `set -eu` and even `set -euo pipefail`
+  (the near-universal script header) errored with `not supported`.
+  `set_cmd` now applies a flag word's letters in sequence, with `o`
+  consuming the next word even mid-cluster — and, matching real bash
+  exactly (verified directly), applies *nothing* when any flag in the
+  invocation is invalid: partial application would have errexit-killed
+  the shell on `set`'s own failure for `set -eu -z`.
+- Verified directly against real bash (plus dash/ksh, installed and
+  invoked directly) across all of the above. Adds 1 unit test and 5
+  integration tests; full suite and clippy stay clean.

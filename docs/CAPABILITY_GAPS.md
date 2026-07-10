@@ -134,8 +134,7 @@ comparison shells — dash, bash, zsh, ksh93, and fish were all actually
 installed and invoked directly, not just checked against documentation,
 a strictly higher bar than this document's original methodology)
 surfaced 33 new, previously-undocumented gaps, C41–C73, spanning all
-five tiers — none of these are done; they're freshly discovered and
-open. The headline finding is **C55: rush has no `[[ ]]` extended-test
+five tiers. The headline finding is **C55: rush has no `[[ ]]` extended-test
 construct at all** — no lexer tokens, no parser production, nothing;
 `[[ foo = foo ]]` is "command not found," and `<`/`>` inside one are
 silently misparsed as ordinary file redirections. Close behind it:
@@ -144,14 +143,15 @@ missing**, despite being POSIX-mandated and present in all five
 comparison shells including dash — and worse than a mere missing
 feature, `readonly x=1` treats `x=1` as an argument to the unrecognized
 command, so the assignment itself is silently lost. And **C41: `$`
-(the shell's own PID), `$PPID`, and `$-` don't expand at all**, despite
+(the shell's own PID), `$PPID`, and `$-` didn't expand at all**, despite
 `$`/`$-` being POSIX-mandated and `$PPID` being near-universal — arguably
 the highest-impact single item in the whole fresh pass, given how often
-`$$` shows up in temp-file-naming idioms. The remaining 30 items are
-documented tier-by-tier below in the same style as C1–C40, each with a
-directly-verified repro and an S/M/L effort estimate; none of them have
-been implemented as part of this pass, which was scoped to discovery and
-documentation only.
+`$$` shows up in temp-file-naming idioms; C41 is now done (the first of
+the fresh pass to land, and fixing it exposed and fixed a real adjacent
+`set` bug — clustered flags like `set -euo pipefail` didn't parse at
+all; see its write-up). The remaining items are documented tier-by-tier
+below in the same style as C1–C40, each with a directly-verified repro
+and an S/M/L effort estimate.
 
 ---
 
@@ -190,7 +190,7 @@ applicable to that shell's own model.
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
 | `[[ ]]` extended test | ❌× | ❌ | ✅ | ✅ | ✅ | ❌ |
 | `readonly` / read-only vars | ❌×× | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `$`/`$PPID`/`$-` special vars | ❌××× | ✅ | ✅ | ✅ | ✅ | 🟡 |
+| `$`/`$PPID`/`$-` special vars | ✅××× | ✅ | ✅ | ✅ | ✅ | 🟡 |
 
 \* Done for the interactive/script job-control path; a compound as one stage
 among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
@@ -303,27 +303,29 @@ is "command not found," and the assignment itself is silently lost since
 `x=1` is parsed as an argument to the missing command rather than
 executed (C45).
 
-××× None of `$` (the shell's own PID), `$PPID` (parent PID), or `$-`
-(active option flags) expand — `expand.rs`'s `$`-scanner has no arm for
-any of them, so each prints as a literal string or empty. fish exposes
-the same information under its own differently-named variables
-(`$fish_pid`, no direct `$-` equivalent), so its own model only
-partially overlaps rather than matching the POSIX/bash-family syntax
-directly (C41).
+××× All three expand now (C41, done): `$`/`${$}` from
+`std::process::id()`, `$PPID` seeded once at startup from
+`libc::getppid()` (Unix), and `$-`/`${-}` assembled from the tracked
+option flags (`e`/`i`/`u`/`x`; pipefail is letterless, same as bash).
+fish exposes the same information under its own differently-named
+variables (`$fish_pid`, no direct `$-` equivalent), so its own model
+only partially overlaps rather than matching the POSIX/bash-family
+syntax directly.
 
 ---
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 14 (10 done, 4 open — C41–C44)
+- **Tier I — correctness/POSIX risk:** 14 (11 done, 3 open — C42–C44)
 - **Tier II — missing standard builtins:** 17 (12 done, 5 open — C45–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
-line" above) plus 33 newly-discovered, currently-open items (C41–C73)
-from a fresh live comparison pass against dash/bash/ksh93/zsh/fish.
+line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41 is now
+done and the remaining 32 are open.
 
 ---
 
@@ -675,7 +677,7 @@ estimated — ended up needing the parent-side resolution fix and the
 broader fallback cleanup alongside the originally-scoped environment fix
 to fully close the gap the reproduction actually described.
 
-### C41 — `$$`, `$PPID`, `$-` don't expand (tracked)
+### C41 — `$$`, `$PPID`, `$-` don't expand ✅ done
 POSIX-mandated (`$$`, `$-`); `$PPID` a near-universal extension. Present
 in bash/dash/ksh/zsh (`$PPID` not in dash). Rush's `$`-scanner
 (`expand.rs`) has no arm for a second `$`, an unnamed-variable `PPID`
@@ -690,6 +692,53 @@ document — surprising precisely because it's this basic. **Effort: S** —
 once; `$-` is a one-line assembly from the flags `vars.rs` already tracks
 for `errexit`/`nounset`/`xtrace`/`pipefail` (plus `i` for interactive
 mode).
+
+Implemented, exactly per the sketch above. `$$` and `$-` got their own
+arms in `expand.rs`'s `$`-scanner (before, both fell through to the
+literal-`$` default), plus the braced spellings `${$}`/`${-}` in
+`expand_braced`'s special-parameter table — all four verified directly
+against real bash. `$PPID` needed no scanner change at all: `main.rs`
+seeds it once at startup via `libc::getppid()` as an ordinary
+non-exported shell variable (bash doesn't export it either), placed
+*after* the environment-seeding loop so a stale `PPID` exported by some
+parent process can't shadow the real value — bash wins that same race the
+same way (verified: `PPID=12345 bash -c 'echo $PPID'` prints the real
+ppid). `$-` assembles from `vars::option_flags()`: `e`/`u`/`x` from the
+existing errexit/nounset/xtrace thread-locals plus `i` from a new
+interactive flag set on REPL entry; `set -o pipefail` contributes no
+letter, matching real bash (verified: no new letter appears in `$-`
+there either).
+
+Verifying `$-` exposed a real, separate pre-existing bug in `set`
+itself: **clustered short flags didn't parse at all** — `set -eu`, and
+even `set -euo pipefail`, the near-universal script header this
+document's own Tier III narrative celebrates landing, errored with
+`set: -euo: not supported`; only one-flag-per-word spellings (`set -e;
+set -u`) ever worked, and no test had ever combined them. Fixed in
+`set_cmd` (`builtins.rs`): a `-`/`+` word's letters now apply in
+sequence, with `o` consuming the next word as its option name even
+mid-cluster. Probing real bash for the error path surfaced a second
+subtlety: bash applies *nothing* when any flag in the invocation is
+invalid (`set -eu -z` leaves errexit and nounset both off — verified
+directly), so `set_cmd` now collects flag changes and applies them only
+once the whole invocation validates. That rollback matters more than it
+looks: partial application would have turned errexit on before `set`'s
+own failure returned nonzero, errexit-killing the shell on the spot
+(reproduced against the naive left-to-right implementation before the
+fix).
+
+Verified against bash (and dash/ksh where applicable, all installed and
+invoked directly): `$$`/`${$}` print the shell's real pid (child of the
+invoking process — checked exactly in the integration test, where the
+invoker is the test process itself), `tmpfile=/tmp/x.$$` composes,
+`$PPID` matches the invoker's pid, `$-` is empty by default and
+gains/loses letters through `set -eu`/`set +e`, `set -euo pipefail`
+works, and `set -e a b` both applies the flag and reassigns `$1`.
+Regression tests: a unit test for `option_flags`' assembly order and
+pipefail's letterlessness (`vars.rs`), plus five integration tests
+(`tests/exec_behavior.rs`) covering `$$`/`${$}`/quoted `$$`, `$PPID`
+(including the stale-inherited-`PPID` shadowing case), `$-` lifecycle,
+clustered `set` flags, and the invalid-flag full-rollback semantics.
 
 ### C42 — POSIX bracket character classes (`[[:alpha:]]`, `[[:digit:]]`, …) in globs/`case` (tracked)
 POSIX-mandated; present in dash/bash/ksh/zsh (this one genuinely works in
@@ -2412,8 +2461,9 @@ some natural orderings:
   `completion.rs` already has the `Hinter` trait wired up as a no-op.
 - **C41 (`$`/`$PPID`/`$-`) and C45 (`readonly`) are the two highest-leverage
   items in the fresh C41–C73 pass** — both are POSIX-mandated, present in
-  all five comparison shells including dash, and currently fail silently
-  or wrongly rather than just being unsupported.
+  all five comparison shells including dash, and fail(ed) silently
+  or wrongly rather than just being unsupported. C41 is done; C45 is the
+  natural next pick.
 - **C55 (`[[ ]]`) is the single largest undertaking in the whole document**
   — new lexer tokens, a new recursive parser production, and a new
   evaluator — but it's also a prerequisite for C56 (`=~` regex), so it's

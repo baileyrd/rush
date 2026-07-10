@@ -127,6 +127,9 @@ thread_local! {
     // `$!`: the most recently backgrounded job's own last-stage pid (see
     // `set_last_bg_pid`).
     static LAST_BG_PID: RefCell<Option<i32>> = const { RefCell::new(None) };
+    // Whether this shell is running its interactive REPL — `$-` includes
+    // `i` when set (see `option_flags`).
+    static INTERACTIVE: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
@@ -165,6 +168,37 @@ pub fn set_xtrace(on: bool) {
 
 pub fn xtrace() -> bool {
     XTRACE.with(|e| *e.borrow())
+}
+
+pub fn set_interactive(on: bool) {
+    INTERACTIVE.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn interactive() -> bool {
+    INTERACTIVE.with(|e| *e.borrow())
+}
+
+/// The `$-` special parameter: one letter per currently-set single-letter
+/// option, assembled from the flags this module tracks — `e` (errexit),
+/// `i` (interactive), `u` (nounset), `x` (xtrace). `set -o pipefail` has no
+/// single-letter spelling in real bash and so never appears here either
+/// (verified directly: `bash -c 'set -o pipefail; echo $-'` shows no new
+/// letter).
+pub fn option_flags() -> String {
+    let mut flags = String::new();
+    if errexit() {
+        flags.push('e');
+    }
+    if interactive() {
+        flags.push('i');
+    }
+    if nounset() {
+        flags.push('u');
+    }
+    if xtrace() {
+        flags.push('x');
+    }
+    flags
 }
 
 pub fn trace_depth() -> u32 {
@@ -1157,5 +1191,24 @@ mod tests {
 
         assert_eq!(assoc_get("RUSH_LOCAL_ASSOC", "a").as_deref(), Some("outer"));
         unset("RUSH_LOCAL_ASSOC");
+    }
+
+    // C41: `$-` assembles one letter per set option, in a fixed order —
+    // thread-locals are per-test-thread, so this starts from all-off.
+    #[test]
+    fn option_flags_assembles_set_options() {
+        assert_eq!(option_flags(), "");
+        set_errexit(true);
+        set_xtrace(true);
+        assert_eq!(option_flags(), "ex");
+        set_nounset(true);
+        set_interactive(true);
+        assert_eq!(option_flags(), "eiux");
+        set_errexit(false);
+        assert_eq!(option_flags(), "iux");
+        // pipefail has no single-letter spelling — it never appears
+        // (verified against real bash).
+        set_pipefail(true);
+        assert_eq!(option_flags(), "iux");
     }
 }

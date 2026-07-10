@@ -1846,3 +1846,75 @@ fn backgrounding_an_unknown_command_does_not_abort_the_script_either() {
     assert_eq!(out, "done\n");
     assert_eq!(status, 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn dollar_dollar_expands_to_the_shell_pid() {
+    // C41: `echo $$` used to print the literal two-character text `$$`
+    // (and `${$}` errored as a bad substitution) — the single most common
+    // special-parameter idiom in real scripts (`tmpfile=/tmp/x.$$`).
+    let (out, _) = rush(r#"echo $$; echo ${$}; echo "quoted=$$""#);
+    let mut lines = out.lines();
+    let pid = lines.next().unwrap();
+    assert!(pid.parse::<u32>().is_ok(), "not a pid: {pid:?}");
+    assert_eq!(lines.next().unwrap(), pid); // `${$}` — same value
+    assert_eq!(lines.next().unwrap(), format!("quoted={pid}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ppid_expands_to_the_invoking_process() {
+    // C41: `$PPID` used to expand to empty. The process spawning `rush -c`
+    // here is this very test process, so the value is exactly checkable.
+    let (out, _) = rush("echo $PPID");
+    assert_eq!(out.trim(), std::process::id().to_string());
+
+    // Seeded *after* the inherited environment, so a stale `PPID` exported
+    // by a parent shell can't shadow the real value (bash behaves the same).
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg("echo $PPID")
+        .env("PPID", "12345")
+        .output()
+        .expect("spawn rush");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        std::process::id().to_string()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dollar_dash_reflects_currently_set_options() {
+    // C41: `$-` used to expand to empty always. One letter per set option;
+    // `set +e` removes its letter again; `${-}` is the braced spelling.
+    let (out, _) = rush("echo [$-]; set -eu; echo [$-]; set +e; echo [${-}]");
+    assert_eq!(out, "[]\n[eu]\n[u]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn set_accepts_clustered_short_flags() {
+    // Found while verifying C41's `$-`: `set -eu` / `set -euo pipefail` —
+    // the near-universal script header — errored with "not supported";
+    // only one flag per word ever parsed.
+    let (out, status) = rush("set -euo pipefail; echo [$-]");
+    assert_eq!(out, "[eu]\n");
+    assert_eq!(status, 0);
+
+    // Flags before the first bare word still apply, and the word starts
+    // the new positional parameters (same as real bash).
+    let (out, _) = rush("set -ex a b; echo \"1=$1 2=$2\"");
+    assert!(out.contains("1=a 2=b"), "got: {out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn set_applies_nothing_when_any_flag_is_invalid() {
+    // Real bash rolls the whole invocation back: `set -eu -z` applies
+    // neither `-e` nor `-u` (verified directly) — partial application
+    // would errexit-kill the shell on `set`'s own failure here.
+    let (out, status) = rush("set -eu -z 2>/dev/null; echo [$-] survived");
+    assert_eq!(out, "[] survived\n");
+    assert_eq!(status, 0);
+}

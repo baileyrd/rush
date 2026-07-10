@@ -401,7 +401,7 @@ pub fn reap_background() {
 // ---- builtins: jobs / fg / bg ------------------------------------------------
 
 /// Names dispatched by `builtin`, for `builtins::is_builtin`/`all_names`.
-pub(crate) const NAMES: &[&str] = &["jobs", "fg", "bg", "kill", "wait"];
+pub(crate) const NAMES: &[&str] = &["jobs", "fg", "bg", "kill", "wait", "disown"];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
     NAMES.contains(&name)
@@ -410,11 +410,12 @@ pub(crate) fn is_builtin(name: &str) -> bool {
 /// Dispatch the job-control builtins. Returns `Some(code)` if handled.
 pub fn builtin(argv: &[String]) -> Option<i32> {
     match argv.first().map(String::as_str)? {
-        "jobs" => Some(jobs_cmd()),
+        "jobs" => Some(jobs_cmd(argv)),
         "fg" => Some(fg_cmd(argv)),
         "bg" => Some(bg_cmd(argv)),
         "kill" => Some(kill_cmd(argv)),
         "wait" => Some(wait_cmd(argv)),
+        "disown" => Some(disown_cmd(argv)),
         _ => None,
     }
 }
@@ -431,11 +432,40 @@ fn wait_cmd(argv: &[String]) -> i32 {
         wait_all();
         return 0;
     }
+    // `wait -n` (C64): block until whichever child finishes *next* —
+    // the bounded-parallelism worker-pool idiom — reporting its status.
+    if argv.get(1).map(String::as_str) == Some("-n") {
+        return wait_next();
+    }
     let mut status = 0;
     for target in &argv[1..] {
         status = wait_one(target);
     }
     status
+}
+
+/// `wait -n`: block until any child exits, record it, and return its
+/// exit status; 127 when there are no children left to wait for.
+fn wait_next() -> i32 {
+    loop {
+        let mut status: c_int = 0;
+        let wpid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if wpid == -1 {
+            if retry_after_interrupt() {
+                continue;
+            }
+            return 127; // ECHILD: nothing to wait for
+        }
+        if wpid == 0 {
+            return 127;
+        }
+        if wifstopped(status) || wifcontinued(status) {
+            update_by_pid(wpid, status);
+            continue;
+        }
+        update_by_pid(wpid, status);
+        return exit_code(status);
+    }
 }
 
 /// Block until every job this shell currently knows isn't finished has
@@ -514,6 +544,42 @@ fn wait_one(target: &str) -> i32 {
 /// `kill [-SIG] %job|pid …` — signal a job (by `%n`) or process. The default
 /// signal is `TERM`; `-9`, `-KILL`, `-SIGKILL`, etc. are accepted.
 fn kill_cmd(argv: &[String]) -> i32 {
+    // `kill -l` (C64): list signal names — bare, numbered like bash's
+    // own table; `kill -l TERM` → its number, `kill -l 15` → its name.
+    if argv.get(1).map(String::as_str) == Some("-l") {
+        match argv.get(2) {
+            None => {
+                let names: Vec<String> =
+                    SIGNAL_TABLE.iter().map(|(n, s)| format!("{s}) SIG{n}")).collect();
+                println!("{}", names.join(" "));
+                return 0;
+            }
+            Some(spec) => {
+                if let Ok(n) = spec.parse::<c_int>() {
+                    match SIGNAL_TABLE.iter().find(|&&(_, s)| s == n) {
+                        Some((name, _)) => {
+                            println!("{name}");
+                            return 0;
+                        }
+                        None => {
+                            eprintln!("kill: {spec}: invalid signal specification");
+                            return 1;
+                        }
+                    }
+                }
+                match parse_signal(spec) {
+                    Some(s) => {
+                        println!("{s}");
+                        return 0;
+                    }
+                    None => {
+                        eprintln!("kill: {spec}: invalid signal specification");
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
     let mut sig = libc::SIGTERM;
     let mut start = 1;
     if let Some(first) = argv.get(1).and_then(|a| a.strip_prefix('-')) {
@@ -568,30 +634,80 @@ pub fn ids() -> Vec<usize> {
     STATE.with(|s| s.borrow().jobs.iter().map(|j| j.id).collect())
 }
 
+/// The signal-name table `kill` (and `kill -l`) uses (C64) — expanded
+/// from the original seven names to the full set a script plausibly
+/// sends, each mapped to its real `libc` constant.
+pub(crate) const SIGNAL_TABLE: &[(&str, c_int)] = &[
+    ("HUP", libc::SIGHUP),
+    ("INT", libc::SIGINT),
+    ("QUIT", libc::SIGQUIT),
+    ("ILL", libc::SIGILL),
+    ("TRAP", libc::SIGTRAP),
+    ("ABRT", libc::SIGABRT),
+    ("BUS", libc::SIGBUS),
+    ("FPE", libc::SIGFPE),
+    ("KILL", libc::SIGKILL),
+    ("USR1", libc::SIGUSR1),
+    ("SEGV", libc::SIGSEGV),
+    ("USR2", libc::SIGUSR2),
+    ("PIPE", libc::SIGPIPE),
+    ("ALRM", libc::SIGALRM),
+    ("TERM", libc::SIGTERM),
+    ("CHLD", libc::SIGCHLD),
+    ("CONT", libc::SIGCONT),
+    ("STOP", libc::SIGSTOP),
+    ("TSTP", libc::SIGTSTP),
+    ("TTIN", libc::SIGTTIN),
+    ("TTOU", libc::SIGTTOU),
+];
+
 fn parse_signal(name: &str) -> Option<c_int> {
     if let Ok(n) = name.parse::<c_int>() {
         return Some(n);
     }
     let upper = name.to_ascii_uppercase();
-    match upper.strip_prefix("SIG").unwrap_or(&upper) {
-        "TERM" => Some(libc::SIGTERM),
-        "KILL" => Some(libc::SIGKILL),
-        "INT" => Some(libc::SIGINT),
-        "HUP" => Some(libc::SIGHUP),
-        "QUIT" => Some(libc::SIGQUIT),
-        "STOP" => Some(libc::SIGSTOP),
-        "CONT" => Some(libc::SIGCONT),
-        _ => None,
-    }
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    SIGNAL_TABLE.iter().find(|(n, _)| *n == bare).map(|&(_, s)| s)
 }
 
-fn jobs_cmd() -> i32 {
+/// `jobs [-l|-p]` (C64): `-l` adds the process-group id to each line,
+/// `-p` prints just the pgids — both pure formatting over data the job
+/// table already tracks.
+fn jobs_cmd(argv: &[String]) -> i32 {
+    let (long, pids_only) = match argv.get(1).map(String::as_str) {
+        Some("-l") => (true, false),
+        Some("-p") => (false, true),
+        Some(other) => {
+            eprintln!("jobs: {other}: invalid option");
+            return 2;
+        }
+        None => (false, false),
+    };
     STATE.with(|s| {
         for j in &s.borrow().jobs {
-            println!("[{}]  {}\t{}", j.id, state_label(j.state), j.cmd);
+            if pids_only {
+                println!("{}", j.pgid);
+            } else if long {
+                println!("[{}]  {} {}\t{}", j.id, j.pgid, state_label(j.state), j.cmd);
+            } else {
+                println!("[{}]  {}\t{}", j.id, state_label(j.state), j.cmd);
+            }
         }
     });
     0
+}
+
+/// `disown [%n|n]` (C64): drop a job (the most recent one when no spec
+/// is given) from the shell's job table — it keeps running, but `jobs`/
+/// `wait`/`fg` no longer know it and the shell won't touch it on exit.
+fn disown_cmd(argv: &[String]) -> i32 {
+    match take_selected(argv) {
+        Some(_) => 0,
+        None => {
+            eprintln!("disown: current: no such job");
+            1
+        }
+    }
 }
 
 fn fg_cmd(argv: &[String]) -> i32 {

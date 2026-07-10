@@ -43,10 +43,33 @@ pub fn install_signal_handlers() {
 
 #[cfg(unix)]
 fn signal_name(sig: libc::c_int) -> Option<&'static str> {
-    match sig {
-        libc::SIGTERM => Some("TERM"),
-        libc::SIGHUP => Some("HUP"),
-        _ => None,
+    crate::job::SIGNAL_TABLE.iter().find(|&&(_, s)| s == sig).map(|&(n, _)| n)
+}
+
+/// Signals whose handler is installed *on trap registration* (C64) — the
+/// catchable, non-job-control set beyond the always-installed
+/// `TERM`/`HUP`. `INT` stays with the interactive machinery, and the
+/// job-control/stop signals are deliberately left alone.
+#[cfg(unix)]
+const DYNAMIC_TRAP_SIGNALS: &[&str] = &["QUIT", "ABRT", "ALRM", "USR1", "USR2", "PIPE"];
+
+/// Install `record_signal` for a dynamically-trapped signal, or restore
+/// the default disposition when its trap is removed. `TERM`/`HUP` keep
+/// their always-installed handlers (the 128+sig default-exit behavior
+/// depends on them).
+#[cfg(unix)]
+fn sync_signal_disposition(name: &str, trapped: bool) {
+    if !DYNAMIC_TRAP_SIGNALS.contains(&name) {
+        return;
+    }
+    if let Some(&(_, sig)) = crate::job::SIGNAL_TABLE.iter().find(|(n, _)| *n == name) {
+        unsafe {
+            if trapped {
+                libc::signal(sig, record_signal as *const () as libc::sighandler_t);
+            } else {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+        }
     }
 }
 
@@ -126,12 +149,16 @@ pub fn normalize_signal_spec(spec: &str) -> Option<&'static str> {
 
 pub fn set(name: &str, command: &str) {
     TRAPS.with(|t| t.borrow_mut().insert(name.to_string(), command.to_string()));
+    #[cfg(unix)]
+    sync_signal_disposition(name, true);
 }
 
 pub fn unset(name: &str) {
     TRAPS.with(|t| {
         t.borrow_mut().remove(name);
     });
+    #[cfg(unix)]
+    sync_signal_disposition(name, false);
 }
 
 pub fn all() -> Vec<(String, String)> {

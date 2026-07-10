@@ -2730,3 +2730,29 @@ fn printf_percent_q() {
     let (out, _) = rush(r#"v=$(printf "x\ny"); q=$(printf '%q' "$v"); eval "w=$q"; [ "$w" = "$v" ] && echo roundtrip"#);
     assert_eq!(out, "roundtrip\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn job_control_niceties() {
+    // C64: jobs -l/-p, kill -l + the fuller signal table, wait -n, disown.
+    let (out, _) = rush("kill -l TERM; kill -l 15; kill -l 9; kill -l SIGUSR1");
+    assert_eq!(out, "15\nTERM\nKILL\n10\n");
+    let (out, _) = rush("kill -l");
+    assert!(out.contains("15) SIGTERM") && out.contains("10) SIGUSR1"), "got: {out:?}");
+
+    // jobs -p prints just the pgid; -l includes it in the long line.
+    let (out, _) = rush("sleep 2 & p=$(jobs -p); [ \"$p\" -gt 0 ] && echo p-ok; l=$(jobs -l); case $l in \"[1]  $p Running\"*) echo l-ok;; esac; kill %1");
+    assert_eq!(out, "p-ok\nl-ok\n");
+
+    // wait -n returns the next-finished child's status; 127 with none.
+    let (out, _) = rush("sh -c 'exit 7' & wait -n; echo st=$?; wait -n; echo none=$?");
+    assert_eq!(out, "st=7\nnone=127\n");
+
+    // A previously-unknown signal name now works end-to-end.
+    let (out, _) = rush("trap 'echo usr1' USR1; kill -USR1 $$; sleep 0; echo after");
+    assert_eq!(out, "usr1\nafter\n");
+
+    // disown removes the job from the table; it keeps running.
+    let (out, _) = rush("sleep 2 & pid=$!; disown; jobs; kill %1 2>/dev/null; echo kill-st=$?; kill $pid; echo done");
+    assert_eq!(out, "kill-st=1\ndone\n");
+}

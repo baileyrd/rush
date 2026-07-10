@@ -138,11 +138,11 @@ five tiers. The headline finding is **C55: rush has no `[[ ]]` extended-test
 construct at all** — no lexer tokens, no parser production, nothing;
 `[[ foo = foo ]]` is "command not found," and `<`/`>` inside one are
 silently misparsed as ordinary file redirections. Close behind it:
-**C45, `readonly`/`declare -r` (read-only variables) is entirely
+**C45, `readonly`/`declare -r` (read-only variables) was entirely
 missing**, despite being POSIX-mandated and present in all five
 comparison shells including dash — and worse than a mere missing
-feature, `readonly x=1` treats `x=1` as an argument to the unrecognized
-command, so the assignment itself is silently lost. And **C41: `$`
+feature, `readonly x=1` treated `x=1` as an argument to the unrecognized
+command, so the assignment itself was silently lost; now done. And **C41: `$`
 (the shell's own PID), `$PPID`, and `$-` didn't expand at all**, despite
 `$`/`$-` being POSIX-mandated and `$PPID` being near-universal — arguably
 the highest-impact single item in the whole fresh pass, given how often
@@ -189,7 +189,7 @@ applicable to that shell's own model.
 | History autosuggestion | ✅*** | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
 | `[[ ]]` extended test | ❌× | ❌ | ✅ | ✅ | ✅ | ❌ |
-| `readonly` / read-only vars | ❌×× | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `readonly` / read-only vars | ✅×× | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `$`/`$PPID`/`$-` special vars | ✅××× | ✅ | ✅ | ✅ | ✅ | 🟡 |
 
 \* Done for the interactive/script job-control path; a compound as one stage
@@ -299,10 +299,10 @@ built on `test`/`[` plus `and`/`or`, not a bash-style extended test). The
 single largest gap surfaced by this document's fresh comparison pass
 (C55).
 
-×× `readonly`/`declare -r` register nowhere in `vars.rs` — `readonly x=1`
-is "command not found," and the assignment itself is silently lost since
-`x=1` is parsed as an argument to the missing command rather than
-executed (C45).
+×× Done (C45): `readonly`/`declare -r`/`local -r` all mark the flag,
+every mutation path rejects it (a bare assignment fatally, matching
+bash's non-interactive abort; builtin-mediated attempts with status 1),
+and `readonly`/`readonly -p` list in bash's own `declare -r` format.
 
 ××× All three expand now (C41, done): `$`/`${$}` from
 `std::process::id()`, `$PPID` seeded once at startup from
@@ -318,15 +318,15 @@ syntax directly.
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
-- **Tier II — missing standard builtins:** 17 (12 done, 5 open — C45–C49)
+- **Tier II — missing standard builtins:** 17 (13 done, 4 open — C46–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C44 are
-now done (re-closing Tier I completely) and the remaining 29 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C45 are
+now done (re-closing Tier I completely) and the remaining 28 are open.
 
 ---
 
@@ -1208,7 +1208,7 @@ malformed mode fails with status 1 without touching the mask. Symbolic
 overwhelming common case in real scripts, matching this item's **Effort:
 S** scope.
 
-### C45 — `readonly` / `declare -r` (read-only variables) entirely missing (tracked)
+### C45 — `readonly` / `declare -r` (read-only variables) entirely missing ✅ done
 POSIX-mandated special builtin; present in every comparison shell,
 **including dash** — this is a POSIX baseline feature, not a bash-family
 extension, the same class as `read`/`printf`/`shift` this tier already
@@ -1224,6 +1224,41 @@ status, matching every comparison shell) by `vars::set`/`assign`/
 `unset`/array-mutation; a new `readonly` builtin mirroring `export`'s own
 structure (plus `readonly -p` listing, `readonly -a`/`-A`), and wiring
 `declare -r`/`local -r` to the same flag.
+
+Implemented on C43's attribute machinery: `readonly` is a new field on
+`Attrs` (so it can mark a still-unset name — `readonly z; z=1` errors
+while `${z+set}` stays empty, verified against bash), enforced by a
+shared `readonly_rejected` guard on every mutation path in `vars.rs`
+(`set`, `set_exported`, `append_scalar`, whole-array/assoc replacement,
+element writes, `+=` merges) plus a refusal in `unset`. The `readonly`
+builtin routes through the same decl path as `local`/`declare` (so
+`readonly arr=(a b)` array literals survive, and `-a`/`-A` compose);
+`declare -r`/`local -r` reach the same flag via the C43 flag cluster —
+with `-r` deliberately installing *after* the initializer applies
+(unlike `-u`/`-l`/`-i`, which install before), so `readonly x=1` /
+`declare -r x=5` / `local -r v=5` can each still set their own value.
+`readonly`/`readonly -p` list every read-only name in bash's own
+`declare -r x="1"` format (`-ar`/`-Ar` for arrays, bare for unset).
+
+The fatality split was probed against real bash case-by-case, and it's
+sharper than expected: a *bare assignment* to a readonly name (`x=2`,
+`x+=2`, `arr[0]=c`, a readonly `for` variable) **aborts the whole
+non-interactive script** (status 1) — while *builtin-mediated* attempts
+(`unset x`, `export x=2`, `local x`, `readonly x=9`) fail with status 1
+and the script continues. Rush matches both halves: the fatal path
+rides the same error channel as an expansion failure; the builtin paths
+pre-check and report. Two more probed subtleties: a bare `export x` on
+a readonly name succeeds (it only adds the export flag), and a *prefix*
+assignment (`x=2 cmd`) errors but still runs the command with the
+refused assignment dropped from the child environment — bash does
+exactly this (verified with a child echoing `$x`).
+
+Verified against real bash across all fourteen probe scenarios (and
+dash for the POSIX-baseline abort). Regression tests: two unit tests
+(`vars.rs` — mutation rejection, listing format) and four integration
+tests (`tests/exec_behavior.rs` — assign-and-lock plus fatality,
+builtin-mediated non-fatality, listing/`declare -r`/`local -r`, prefix
+assignment).
 
 ### C46 — `ulimit` entirely missing (tracked)
 Present in every comparison shell **including dash** — like C45, this is
@@ -2553,11 +2588,10 @@ some natural orderings:
   flag-storage pattern.
 - **C33 (autosuggestions)** is the standout cheap win in Tier V given
   `completion.rs` already has the `Hinter` trait wired up as a no-op.
-- **C41 (`$`/`$PPID`/`$-`) and C45 (`readonly`) are the two highest-leverage
-  items in the fresh C41–C73 pass** — both are POSIX-mandated, present in
-  all five comparison shells including dash, and fail(ed) silently
-  or wrongly rather than just being unsupported. C41 is done; C45 is the
-  natural next pick.
+- **C41 (`$`/`$PPID`/`$-`) and C45 (`readonly`) were the two
+  highest-leverage items in the fresh C41–C73 pass** — both POSIX-mandated,
+  present in all five comparison shells including dash, and failing
+  silently or wrongly rather than just being unsupported. Both are done.
 - **C55 (`[[ ]]`) is the single largest undertaking in the whole document**
   — new lexer tokens, a new recursive parser production, and a new
   evaluator — but it's also a prerequisite for C56 (`=~` regex), so it's

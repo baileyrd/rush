@@ -53,11 +53,17 @@ pub struct Attrs {
     /// (variable names resolve, an unset name is 0), and `+=` becomes
     /// arithmetic addition.
     pub integer: bool,
+    /// `readonly`/`declare -r` (C45): every mutation — assignment, `+=`,
+    /// element writes, `unset` — is rejected. Like the other attributes,
+    /// this can mark a name that has no value yet (`readonly z; z=1` still
+    /// errors, and `${z+set}` stays empty until then — verified against
+    /// real bash).
+    pub readonly: bool,
 }
 
 impl Attrs {
     pub fn any(&self) -> bool {
-        self.upper || self.lower || self.integer
+        self.upper || self.lower || self.integer || self.readonly
     }
 }
 
@@ -411,6 +417,9 @@ pub fn is_assoc(name: &str) -> bool {
 /// real bash too, verified directly: `declare -u u=x; unset u; u=abc`
 /// leaves `abc` untransformed).
 pub fn unset(name: &str) {
+    if is_readonly(name) {
+        return; // the `unset` builtin pre-checks and prints; nothing else may drop a readonly name
+    }
     VARS.with(|v| {
         v.borrow_mut().remove(name);
     });
@@ -434,6 +443,52 @@ pub fn attrs_of(name: &str) -> Attrs {
     ATTRS.with(|a| a.borrow().get(name).copied().unwrap_or_default())
 }
 
+/// Whether `name` is marked read-only (`readonly`/`declare -r`, C45).
+pub fn is_readonly(name: &str) -> bool {
+    attrs_of(name).readonly
+}
+
+/// The shared rejection for every mutation path (C45): if `name` is
+/// read-only, print the same diagnostic real bash uses and report `true`
+/// (mutation must be dropped). Callers that need a *different* message or
+/// exit status (`unset`, `local`, the fatal bare-assignment path in
+/// `exec.rs`) pre-check `is_readonly` themselves instead, so nothing
+/// double-prints.
+fn readonly_rejected(name: &str) -> bool {
+    if is_readonly(name) {
+        eprintln!("rush: {name}: readonly variable");
+        return true;
+    }
+    false
+}
+
+/// Every read-only name with a `declare`-style display line, sorted —
+/// `readonly`/`readonly -p`'s listing, in real bash's own output format
+/// (`declare -r x="1"`, `declare -ar`/`-Ar` for arrays, bare `declare -r
+/// name` for a readonly name that is still unset).
+pub fn readonly_listing() -> Vec<String> {
+    let mut names: Vec<String> =
+        ATTRS.with(|a| a.borrow().iter().filter(|(_, at)| at.readonly).map(|(n, _)| n.clone()).collect());
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            VARS.with(|v| match v.borrow().get(&name).map(|x| &x.value) {
+                None => format!("declare -r {name}"),
+                Some(VarValue::Scalar(s)) => format!("declare -r {name}=\"{s}\""),
+                Some(VarValue::Array(a)) => {
+                    let elems: Vec<String> = a.iter().map(|(i, v)| format!("[{i}]=\"{v}\"")).collect();
+                    format!("declare -ar {name}=({})", elems.join(" "))
+                }
+                Some(VarValue::Assoc(a)) => {
+                    let elems: Vec<String> = a.iter().map(|(k, v)| format!("[{k}]=\"{v}\"")).collect();
+                    format!("declare -Ar {name}=({})", elems.join(" "))
+                }
+            })
+        })
+        .collect()
+}
+
 /// Merge newly-declared attributes into `name`'s existing ones (`declare
 /// -u x` after `declare -i x` keeps both). `-u` and `-l` displace each
 /// other when declared *separately* (verified: `declare -l x; declare -u
@@ -445,6 +500,9 @@ pub fn set_attrs(name: &str, new: Attrs) {
         let cur = m.entry(name.to_string()).or_default();
         if new.integer {
             cur.integer = true;
+        }
+        if new.readonly {
+            cur.readonly = true;
         }
         match (new.upper, new.lower) {
             (true, true) => {
@@ -514,6 +572,9 @@ fn transformed(name: &str, value: &str) -> Option<String> {
 /// `arr[1]`/`arr[2]` alone, verified directly for both array kinds); a
 /// plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     let Some(value) = transformed(name, value) else {
         return;
     };
@@ -542,6 +603,9 @@ pub fn set(name: &str, value: &str) {
 /// `exported`), so this niche interaction with a pre-existing array isn't
 /// specially handled.
 pub fn set_exported(name: &str, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     let Some(value) = transformed(name, value) else {
         return;
     };
@@ -567,6 +631,9 @@ pub fn export(name: &str) {
 /// (arrays are never actually exported — see `exported` — but there's no
 /// reason to drop the flag if a future export-arrays feature needs it).
 pub fn set_array(name: &str, elements: Vec<String>) {
+    if readonly_rejected(name) {
+        return;
+    }
     // Attributes apply per element (`declare -au arr=(a b)` uppercases
     // both, verified against bash); an element `-i` can't evaluate keeps
     // its raw text rather than dropping the whole assignment.
@@ -587,6 +654,9 @@ pub fn set_array(name: &str, elements: Vec<String>) {
 /// associative-array analogue of `set_array`. Later pairs win over earlier
 /// ones for a repeated key, matching an ordinary map build.
 pub fn set_assoc(name: &str, pairs: Vec<(String, String)>) {
+    if readonly_rejected(name) {
+        return;
+    }
     let assoc: BTreeMap<String, String> = pairs.into_iter().collect();
     VARS.with(|v| {
         let mut m = v.borrow_mut();
@@ -695,6 +765,9 @@ pub fn array_len(name: &str) -> usize {
 /// `index` itself *is* 0, which just overwrites it) — both verified
 /// directly against real bash.
 pub fn array_set(name: &str, index: usize, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     let Some(value) = transformed(name, value) else {
         return;
     };
@@ -733,6 +806,9 @@ pub fn array_set(name: &str, index: usize, value: &str) {
 /// nothing to append *to*), same auto-vivify/scalar-promotion rules as
 /// `array_set`, both verified directly against real bash.
 pub fn array_append_index(name: &str, index: usize, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -766,6 +842,9 @@ pub fn array_append_index(name: &str, index: usize, value: &str) {
 /// to an array first, its old value kept at index 0, then the new elements
 /// appended from index 1 — matching real bash exactly (verified directly).
 pub fn array_append(name: &str, elements: Vec<String>) {
+    if readonly_rejected(name) {
+        return;
+    }
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -808,6 +887,9 @@ pub fn array_append(name: &str, elements: Vec<String>) {
 /// other element untouched. Creates a fresh scalar if `name` didn't exist
 /// yet.
 pub fn append_scalar(name: &str, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     // Attribute-aware paths (C43): under `-i`, `+=` is arithmetic
     // *addition* (`declare -i n=5; n+=3` → 8, verified against bash);
     // under `-u`/`-l`, the appended text is case-mapped too, which routing
@@ -872,6 +954,9 @@ pub fn assoc_unset_key(name: &str, key: &str) {
 /// entry point; calling this directly on a non-associative name would
 /// silently convert it, which is why it's not `pub`).
 fn assoc_set(name: &str, key: &str, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     let Some(value) = transformed(name, value) else {
         return;
     };
@@ -896,6 +981,9 @@ fn assoc_set(name: &str, key: &str, value: &str) {
 /// `arr[key]+=value` on an associative array — append to that key's own
 /// string (or set it, if nothing's there yet).
 fn assoc_append_key(name: &str, key: &str, value: &str) {
+    if readonly_rejected(name) {
+        return;
+    }
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -921,6 +1009,9 @@ fn assoc_append_key(name: &str, key: &str, value: &str) {
 /// to `-A`'s shape) — but for exhaustiveness/robustness, a `Scalar`/`Array`
 /// target is just replaced outright rather than corrupted in place.
 pub fn assoc_merge(name: &str, pairs: Vec<(String, String)>) {
+    if readonly_rejected(name) {
+        return;
+    }
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -1015,10 +1106,16 @@ pub fn pop_local_frame() {
 pub fn declare_local_attrs(name: &str, value: Option<&str>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
-        reset_attrs(name, attrs);
+        // `-r` installs only *after* the initializer applies, so
+        // `local -r v=x` can still set its own value (C45); the other
+        // attributes install first so the initializer transforms (C43).
+        reset_attrs(name, Attrs { readonly: false, ..attrs });
         match value {
             Some(v) => set(name, v),
             None => remove_value(name),
+        }
+        if attrs.readonly {
+            set_attrs(name, Attrs { readonly: true, ..Default::default() });
         }
     }
     declared
@@ -1030,8 +1127,11 @@ pub fn declare_local_attrs(name: &str, value: Option<&str>, attrs: Attrs) -> boo
 pub fn declare_local_array_attrs(name: &str, elements: Vec<String>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
-        reset_attrs(name, attrs);
+        reset_attrs(name, Attrs { readonly: false, ..attrs });
         set_array(name, elements);
+        if attrs.readonly {
+            set_attrs(name, Attrs { readonly: true, ..Default::default() });
+        }
     }
     declared
 }
@@ -1041,8 +1141,11 @@ pub fn declare_local_array_attrs(name: &str, elements: Vec<String>, attrs: Attrs
 pub fn declare_local_assoc_attrs(name: &str, pairs: Vec<(String, String)>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
-        reset_attrs(name, attrs);
+        reset_attrs(name, Attrs { readonly: false, ..attrs });
         set_assoc(name, pairs);
+        if attrs.readonly {
+            set_attrs(name, Attrs { readonly: true, ..Default::default() });
+        }
     }
     declared
 }
@@ -1463,5 +1566,49 @@ mod tests {
         set("RUSH_ATTR_LOCAL", "plain");
         assert_eq!(get("RUSH_ATTR_LOCAL").as_deref(), Some("plain"));
         unset("RUSH_ATTR_LOCAL");
+    }
+    // C45: readonly rejects every mutation path; `unset` refuses too.
+    #[test]
+    fn readonly_rejects_mutation() {
+        unset("RUSH_RO");
+        set("RUSH_RO", "1");
+        set_attrs("RUSH_RO", Attrs { readonly: true, ..Default::default() });
+        assert!(is_readonly("RUSH_RO"));
+
+        set("RUSH_RO", "2");
+        append_scalar("RUSH_RO", "x");
+        set_array("RUSH_RO", vec!["a".into()]);
+        array_set("RUSH_RO", 0, "b");
+        unset("RUSH_RO");
+        assert_eq!(get("RUSH_RO").as_deref(), Some("1"));
+        assert!(is_readonly("RUSH_RO"));
+
+        // Cleanup has to bypass the public API deliberately.
+        ATTRS.with(|a| {
+            a.borrow_mut().remove("RUSH_RO");
+        });
+        unset("RUSH_RO");
+        assert_eq!(get("RUSH_RO"), None);
+    }
+
+    // C45: the listing prints bash's own `declare -r` format, sorted.
+    #[test]
+    fn readonly_listing_formats_like_bash() {
+        set("RUSH_RO_LIST_B", "two words");
+        set_attrs("RUSH_RO_LIST_B", Attrs { readonly: true, ..Default::default() });
+        set_attrs("RUSH_RO_LIST_A", Attrs { readonly: true, ..Default::default() });
+
+        let lines = readonly_listing();
+        assert!(lines.contains(&"declare -r RUSH_RO_LIST_A".to_string()), "got: {lines:?}");
+        assert!(lines.contains(&"declare -r RUSH_RO_LIST_B=\"two words\"".to_string()), "got: {lines:?}");
+        let a = lines.iter().position(|l| l.contains("RUSH_RO_LIST_A")).unwrap();
+        let b = lines.iter().position(|l| l.contains("RUSH_RO_LIST_B")).unwrap();
+        assert!(a < b, "sorted order");
+
+        ATTRS.with(|m| {
+            m.borrow_mut().remove("RUSH_RO_LIST_A");
+            m.borrow_mut().remove("RUSH_RO_LIST_B");
+        });
+        unset("RUSH_RO_LIST_B");
     }
 }

@@ -51,7 +51,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "declare",
+    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "declare", "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -469,13 +469,22 @@ fn pwd() -> i32 {
 /// `export NAME` marks an existing variable exported; `export NAME=value` sets
 /// and exports it. The `NAME=value` arg arrives already expanded.
 fn export(argv: &[String]) -> i32 {
+    let mut status = 0;
     for arg in &argv[1..] {
         match arg.split_once('=') {
+            // `export x=2` on a readonly `x` fails with status 1 but does
+            // NOT abort the script (unlike a bare assignment) — verified
+            // against real bash. A bare `export x` on a readonly name is
+            // fine (it only adds the export flag).
+            Some((name, _)) if crate::vars::is_readonly(name) => {
+                eprintln!("export: {name}: readonly variable");
+                status = 1;
+            }
             Some((name, value)) => crate::vars::set_exported(name, value),
             None => crate::vars::export(arg),
         }
     }
-    0
+    status
 }
 
 /// `read [-r] [name...]` — read one line from stdin, splitting it into
@@ -890,15 +899,33 @@ fn return_cmd(argv: &[String]) -> i32 {
 /// emptying it — see `vars::array_unset_index`/`vars::assoc_unset_key`).
 fn unset(argv: &[String]) -> i32 {
     use crate::expand::UnsetTarget;
+    let mut status = 0;
     for name in &argv[1..] {
         match crate::expand::parse_array_unset_index(name) {
-            Ok(Some(UnsetTarget::Index(array, index))) => crate::vars::array_unset_index(&array, index),
-            Ok(Some(UnsetTarget::Key(array, key))) => crate::vars::assoc_unset_key(&array, &key),
-            Ok(None) => crate::vars::unset(name),
+            Ok(target) => {
+                // Readonly names can't be unset — whole variable or one
+                // element alike. Status 1 and continue (not fatal),
+                // message matching real bash's own.
+                let base = match &target {
+                    Some(UnsetTarget::Index(array, _)) => array.as_str(),
+                    Some(UnsetTarget::Key(array, _)) => array.as_str(),
+                    None => name.as_str(),
+                };
+                if crate::vars::is_readonly(base) {
+                    eprintln!("unset: {base}: cannot unset: readonly variable");
+                    status = 1;
+                    continue;
+                }
+                match target {
+                    Some(UnsetTarget::Index(array, index)) => crate::vars::array_unset_index(&array, index),
+                    Some(UnsetTarget::Key(array, key)) => crate::vars::assoc_unset_key(&array, &key),
+                    None => crate::vars::unset(name),
+                }
+            }
             Err(e) => eprintln!("unset: {name}: {e}"),
         }
     }
-    0
+    status
 }
 
 /// `shift [n]` — drop the first `n` (default 1) positional parameters,
@@ -952,6 +979,14 @@ pub(crate) fn local_from_decls(
     }
     let mut status = 0;
     for (name, op) in decls {
+        // Shadowing a readonly name with a local fails with status 1 and
+        // continues — verified against real bash ("local: x: readonly
+        // variable", C45).
+        if crate::vars::is_readonly(name) {
+            eprintln!("local: {name}: readonly variable");
+            status = 1;
+            continue;
+        }
         let declared = match op {
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Array(elements))) => {
                 crate::vars::declare_local_array_attrs(name, elements.clone(), attrs)
@@ -988,22 +1023,76 @@ pub(crate) fn declare_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,
 ) -> i32 {
+    let mut status = 0;
     for (name, op) in decls {
+        // Re-assigning an already-readonly name fails with status 1 and
+        // continues (not fatal) — verified against real bash (C45).
+        if op.is_some() && crate::vars::is_readonly(name) {
+            eprintln!("rush: {name}: readonly variable");
+            status = 1;
+            continue;
+        }
         // Attributes install *before* the initializer applies, so
-        // `declare -u u=hello` uppercases (C43). Separate invocations
-        // merge (`declare -i x` after `declare -u x` keeps both), same as
-        // real bash — see `vars::set_attrs`.
+        // `declare -u u=hello` uppercases (C43) — except `-r`, which
+        // installs *after* it, so `declare -r x=5` can still set its own
+        // value (C45). Separate invocations merge (`declare -i x` after
+        // `declare -u x` keeps both), same as real bash — see
+        // `vars::set_attrs`.
         if attrs.any() {
-            crate::vars::set_attrs(name, attrs);
+            crate::vars::set_attrs(name, crate::vars::Attrs { readonly: false, ..attrs });
         }
         if let Some(op) = op {
             crate::vars::assign(name, op);
+        }
+        if attrs.readonly {
+            crate::vars::set_attrs(name, crate::vars::Attrs { readonly: true, ..Default::default() });
         }
         // A bare `declare name` (no flags, no initializer) is a
         // documented no-op here — bash pre-declares it unset, which is
         // unobservable without a `declare -p` this codebase doesn't have.
     }
-    0
+    status
+}
+
+/// `readonly [name[=value]]...` — POSIX special builtin (C45): assigns
+/// (when a value is given) and marks each name read-only; every later
+/// mutation is rejected (see `vars::is_readonly` and its call sites).
+/// `readonly` with no operands, or `readonly -p`, lists every read-only
+/// variable in bash's own `declare -r name="value"` format. Routed through
+/// the same decl path as `local`/`declare` so array literals
+/// (`readonly arr=(a b)`) survive, and so `-a`/`-A` work.
+pub(crate) fn readonly_from_decls(
+    decls: &[(String, Option<crate::vars::AssignOp>)],
+    attrs: crate::vars::Attrs,
+) -> i32 {
+    // `-p` isn't in the decl flag-cluster set (it's print, not an
+    // attribute), so it arrives here as an ordinary operand.
+    let names_only: Vec<_> = decls.iter().filter(|(n, _)| n != "-p").collect();
+    if names_only.is_empty() {
+        for line in crate::vars::readonly_listing() {
+            println!("{line}");
+        }
+        return 0;
+    }
+    let mut status = 0;
+    for (name, op) in names_only {
+        // Re-assigning an already-readonly name fails with status 1 and
+        // continues — verified against real bash (`readonly x=9` on a
+        // readonly `x` errors, keeps the old value, keeps going).
+        if op.is_some() && crate::vars::is_readonly(name) {
+            eprintln!("rush: {name}: readonly variable");
+            status = 1;
+            continue;
+        }
+        if attrs.any() {
+            crate::vars::set_attrs(name, crate::vars::Attrs { readonly: false, ..attrs });
+        }
+        if let Some(op) = op {
+            crate::vars::assign(name, op);
+        }
+        crate::vars::set_attrs(name, crate::vars::Attrs { readonly: true, ..Default::default() });
+    }
+    status
 }
 
 /// `getopts optstring name [arg...]` — POSIX option parsing: `-a`, `-b

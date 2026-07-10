@@ -1012,7 +1012,10 @@ fn tilde_expand(text: &str) -> String {
 }
 
 /// Scan a string for `$VAR`, `${VAR}`, and `$(...)`, expanding each in place.
-fn expand_dollars(text: &str) -> Result<String, String> {
+/// `pub(crate)`, not just private: also used directly for `$PS3` (`select`'s
+/// prompt undergoes ordinary `$`/command-substitution expansion, unlike
+/// `$PS1`'s own bespoke backslash-escape codes in `main.rs`).
+pub(crate) fn expand_dollars(text: &str) -> Result<String, String> {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
 

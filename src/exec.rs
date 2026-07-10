@@ -260,6 +260,62 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             }
             Ok(status)
         }
+        // `select NAME [in WORDS]; do BODY; done`: prints `WORDS` as a
+        // numbered menu to stderr, then repeatedly prompts (`$PS3`, default
+        // `#? `) and reads a line, setting `$REPLY` to it *raw* — no
+        // `$IFS` splitting/trimming, unlike ordinary `read` (verified
+        // directly: three bare spaces as the whole line come back as three
+        // spaces in `$REPLY`). A blank line (zero-length, not merely
+        // all-whitespace) redisplays the menu and prompts again, without
+        // running `BODY`. Otherwise `NAME` becomes the word at that
+        // 1-based index if the line parses as one in range, or `""`
+        // otherwise (`$REPLY` is set either way); `BODY` runs once, same
+        // `break`/status semantics as `for`/`while`. EOF on read ends the
+        // whole construct with status 1, overriding whatever `BODY`'s
+        // last run returned — bash's own documented quirk, verified
+        // directly (unlike `while read line; do …; done`, whose status
+        // after its own final failing `read` stays whatever the loop
+        // body's last iteration returned).
+        Compound::Select { var, words, has_in, body } => {
+            let values = if *has_in { crate::expand::expand_words(words)? } else { crate::vars::args() };
+            if values.is_empty() {
+                return Ok(0);
+            }
+            let ps3 = match crate::vars::get("PS3").or_else(|| std::env::var("PS3").ok()) {
+                Some(ps3) => crate::expand::expand_dollars(&ps3)?,
+                None => "#? ".to_string(),
+            };
+            print_select_menu(&values);
+            let status = loop {
+                eprint!("{ps3}");
+                let (line, hit_eof) = crate::builtins::read_reply_line();
+                crate::vars::set("REPLY", &line);
+                if hit_eof {
+                    // A tidy-cursor touch bash's own `select` has too:
+                    // move off the unanswered prompt's line before the
+                    // whole construct ends, verified directly.
+                    eprintln!();
+                    break 1;
+                }
+                if line.is_empty() {
+                    print_select_menu(&values);
+                    continue;
+                }
+                let chosen = line
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|&n| n >= 1 && (n as usize) <= values.len())
+                    .map(|n| values[(n - 1) as usize].clone())
+                    .unwrap_or_default();
+                crate::vars::set(var, &chosen);
+                let status = exec_list(body)?;
+                if loop_step()? {
+                    break status;
+                }
+            };
+            Ok(status)
+        }
         Compound::Case { word, items } => {
             let subject = crate::expand::expand_to_string(word)?;
             let mut idx = None;
@@ -334,6 +390,18 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             crate::func::define(name, body.clone());
             Ok(0)
         }
+    }
+}
+
+/// `select`'s numbered menu, one entry per line: `N) word`. Real bash lays
+/// this out in columns sized to `$COLUMNS`; rush always uses a single
+/// column instead — an accepted, cosmetic scope narrowing (the functional
+/// behavior — numbering, `$REPLY`, `break`, exit status — is unaffected,
+/// and every real script reads `$REPLY`/`NAME`, not the menu's own
+/// layout).
+fn print_select_menu(values: &[String]) {
+    for (i, value) in values.iter().enumerate() {
+        eprintln!("{}) {value}", i + 1);
     }
 }
 
@@ -1366,6 +1434,7 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
                 Compound::Loop { until: false, .. } => "while ...".to_string(),
                 Compound::Loop { until: true, .. } => "until ...".to_string(),
                 Compound::For { .. } => "for ...".to_string(),
+                Compound::Select { .. } => "select ...".to_string(),
                 Compound::Case { .. } => "case ...".to_string(),
                 Compound::Group(_) => "{ ... }".to_string(),
                 Compound::Subshell(_) => "( ... )".to_string(),

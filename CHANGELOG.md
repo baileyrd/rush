@@ -750,3 +750,36 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   a trailing `;;&` on the last item (nothing left to resume into — stops,
   same as `;;`), exit-status propagation through a fallthrough chain, and
   the terminator-less last-item default — matching exactly.
+
+### `select` (C26)
+- **Grammar** (`parser.rs`): `select NAME [in WORDS]; do BODY; done` — a
+  new `Compound::Select` variant, same grammar/`has_in` convention as
+  `for` (an omitted `in` iterates `"$@"`; an explicit `in` with no words
+  is a real empty list).
+- **Execution** (`exec.rs`): an empty word list is a no-op, same as
+  `for`. Otherwise prints a numbered menu to *stderr*, then loops:
+  prints `$PS3` (default `"#? "`, `$`-expanded via `expand::
+  expand_dollars` — now `pub(crate)`, since `$PS1`'s own prompt
+  expansion is a separate, bespoke backslash-escape scheme in
+  `main.rs`), reads a line into `$REPLY` *raw* (no `$IFS`
+  splitting/trimming at all, unlike ordinary `read`, though it does
+  share `read`'s own backslash-continuation processing via a new
+  `builtins::read_reply_line`). A genuinely empty line redisplays the
+  menu and prompts again without running `BODY`; otherwise the line,
+  parsed as a base-10 integer in `1..=len(words)`, sets `NAME` to that
+  word (or `""` if out of range/unparseable) and `BODY` runs once, with
+  the same `break`/status machinery `for`/`while` use. EOF ends the
+  whole construct with status `1`, overriding `BODY`'s last status — a
+  real bash quirk, verified directly.
+- Explicitly out of scope, an accepted cosmetic (not functional)
+  narrowing: real bash lays the menu out in columns sized to
+  `$COLUMNS`; rush always prints one entry per line.
+- Verified directly against real bash across more than a dozen
+  scenarios — index parsing (whitespace/sign/leading-zero tolerance,
+  out-of-range/unparseable → empty `NAME`), blank-line redisplay vs. an
+  all-whitespace line (which *does* run the body, unlike blank), `$PS3`
+  default/custom/`$`-expansion, `break`'s exit status, and the
+  EOF-forces-status-1 override — matching exactly.
+- Found while verifying this item: `set -- args…`/`set args…` doesn't
+  reassign positional parameters at all in rush — general, not specific
+  to `select`, tracked as C39 (open, not fixed in this change).

@@ -125,6 +125,16 @@ pub enum Compound {
         has_in: bool,
         body: CommandList,
     },
+    /// `select NAME [in WORDS]; do BODY; done` (bash/ksh93/zsh — not POSIX
+    /// sh/dash). Same `has_in`/`words` convention as `For`. Not a real
+    /// loop condition — see `exec.rs`'s own doc comment on how it reads a
+    /// selection each round and when it stops.
+    Select {
+        var: String,
+        words: Vec<Word>,
+        has_in: bool,
+        body: CommandList,
+    },
     /// `case WORD in PATTERN|… ) BODY ;; … esac`. Each item's own terminator
     /// (`;;`/`;&`/`;;&`, defaulting to `;;` if omitted on the last item
     /// before `esac`) decides what happens after its body runs — see
@@ -175,7 +185,7 @@ impl fmt::Display for ParseError {
 
 pub(crate) const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case",
-    "esac", "{", "}",
+    "esac", "select", "{", "}",
 ];
 
 pub fn parse(input: &str) -> Result<CommandList, ParseError> {
@@ -304,6 +314,7 @@ impl Parser {
                 Some("while") => self.parse_loop(false)?,
                 Some("until") => self.parse_loop(true)?,
                 Some("for") => self.parse_for()?,
+                Some("select") => self.parse_select()?,
                 Some("case") => self.parse_case()?,
                 Some("{") => self.parse_group()?,
                 // A closing keyword here means a body was empty (e.g. `if; then`).
@@ -479,6 +490,31 @@ impl Parser {
         Ok(Compound::For { var, words, has_in, body })
     }
 
+    /// `select NAME [in WORDS]; do BODY; done` — identical grammar to
+    /// `for`, just a different reserved word and result variant.
+    fn parse_select(&mut self) -> Result<Compound, ParseError> {
+        self.expect_keyword("select")?;
+        let var = self.expect_name()?;
+
+        let mut words = Vec::new();
+        let has_in = self.peek_keyword() == Some("in");
+        if has_in {
+            self.pos += 1;
+            while let Some(Token::Word(_)) = self.peek() {
+                let Some(Token::Word(w)) = self.advance() else {
+                    unreachable!()
+                };
+                words.push(w);
+            }
+        }
+
+        self.skip_separators();
+        self.expect_keyword("do")?;
+        let body = self.parse_list()?;
+        self.expect_keyword("done")?;
+        Ok(Compound::Select { var, words, has_in, body })
+    }
+
     fn parse_case(&mut self) -> Result<Compound, ParseError> {
         self.expect_keyword("case")?;
         let word = self.expect_word_token()?;
@@ -607,7 +643,7 @@ fn as_keyword(tok: &Token) -> Option<&'static str> {
 
 /// Reserved words that begin a command (vs. ones that close a construct).
 fn is_command_start(kw: &str) -> bool {
-    matches!(kw, "if" | "while" | "until" | "for" | "case" | "{")
+    matches!(kw, "if" | "while" | "until" | "for" | "select" | "case" | "{")
 }
 
 fn is_name(s: &str) -> bool {
@@ -815,6 +851,34 @@ mod tests {
                 _ => panic!(),
             },
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn select_clause() {
+        let p = parse_ok("select x in a b c; do echo $x; done");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.compound.as_ref() {
+                Compound::Select { var, words, has_in, .. } => {
+                    assert_eq!(var, "x");
+                    assert_eq!(words.len(), 3);
+                    assert!(has_in);
+                }
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
+        }
+        // Omitted `in`, same convention as `for`.
+        let p = parse_ok("select x; do echo $x; done");
+        match first_cmd(&p) {
+            RawCommand::Compound(c) => match c.compound.as_ref() {
+                Compound::Select { words, has_in, .. } => {
+                    assert!(words.is_empty());
+                    assert!(!has_in);
+                }
+                _ => panic!(),
+            },
+            _ => panic!("expected compound"),
         }
     }
 

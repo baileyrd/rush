@@ -520,6 +520,20 @@ fn read_cmd(argv: &[String]) -> i32 {
     if hit_eof { 1 } else { 0 }
 }
 
+/// `select`'s own line read: same backslash-continuation processing as
+/// plain `read` (`read_logical_line(false)`, verified directly — `a\<NL>b`
+/// still joins into `ab`), but the raw line becomes `$REPLY` *unsplit* and
+/// *untrimmed* — unlike ordinary `read`'s "last name absorbs the remainder,
+/// trimmed of surrounding `$IFS` whitespace" rule (verified directly: three
+/// bare spaces as the whole line come back in `$REPLY` as three spaces,
+/// where `read reply` on the same input would trim it to empty). "Blank"
+/// (for the menu-redisplay rule) is the caller's job: it means this
+/// returned line is zero-length, not merely all-whitespace.
+pub(crate) fn read_reply_line() -> (String, bool) {
+    let (line, _protected, hit_eof) = read_logical_line(false);
+    (String::from_utf8_lossy(&line).into_owned(), hit_eof)
+}
+
 /// Read one logical line from stdin, byte at a time (see `read_cmd`'s doc for
 /// why). In raw mode, a physical newline always ends the line. Otherwise,
 /// backslash processing runs *during* the read: `\<newline>` is a line

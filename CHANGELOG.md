@@ -1652,3 +1652,9 @@ with an unmatched quote's tail red; comments dimmed; `$var` cyan;
 operators magenta. A dedicated span scanner rather than a re-lex (the
 real lexer has no byte spans and hard-errors on incomplete input).
 Unit tests cover the classification matrix.
+
+### New: columned Tab-completion listing (C69)
+The interactive Editor is now built with `CompletionType::List` — Tab
+shows the columned, paged candidate list (bash's Tab-Tab display)
+instead of silently cycling candidates in place. One-line config
+change; no completion logic touched.

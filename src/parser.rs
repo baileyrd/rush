@@ -113,8 +113,124 @@ pub enum RedirMode {
 }
 
 /// A compound command. Each body is itself a list, run by the executor.
+/// A parsed `[[ ... ]]` expression (C55) — genuinely recursive, unlike
+/// `[ ]`'s flat `-a`/`-o` combinators: `&&`/`||`/`!`/`( )` nest directly.
+/// Operand words keep their `WordPart` structure all the way to
+/// evaluation, because quoting changes meaning there (an unquoted RHS of
+/// `==`/`!=` is a glob pattern; a quoted one is literal).
+#[derive(Debug, Clone)]
+pub enum CondAst {
+    Or(Box<CondAst>, Box<CondAst>),
+    And(Box<CondAst>, Box<CondAst>),
+    Not(Box<CondAst>),
+    /// `-f x`, `-z x`, … — a unary operator and its operand.
+    Unary(String, Word),
+    /// `a = b`, `a -eq b`, `a < b`, … — LHS, operator, RHS.
+    Binary(Word, String, Word),
+    /// A lone word: true when its expansion is non-empty.
+    Str(Word),
+}
+
+/// The binary operators `[[ ]]` recognizes (C55; `=~` reserved for C56).
+const COND_BINARY_OPS: &[&str] =
+    &["=", "==", "!=", "=~", "<", ">", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-nt", "-ot", "-ef"];
+/// The unary operators `[[ ]]` recognizes — `test`'s set plus `-a`
+/// (exists; unary-only inside `[[`, where the binary `-a` combinator
+/// doesn't exist) and `-h`/`-L` (symlink).
+const COND_UNARY_OPS: &[&str] =
+    &["-a", "-e", "-f", "-d", "-s", "-r", "-w", "-x", "-z", "-n", "-h", "-L"];
+
+/// Recursive-descent parse of a lexed `[[ ... ]]` interior:
+/// `or := and (\'||\' and)*`, `and := not (\'&&\' not)*`,
+/// `not := \'!\' not | \'(\' or \')\' | primary`.
+pub(crate) fn parse_cond_expr(toks: &[lexer::CondTok]) -> Result<CondAst, ParseError> {
+    let mut pos = 0;
+    let ast = cond_or(toks, &mut pos)?;
+    if pos != toks.len() {
+        return Err(ParseError::Syntax("unexpected token inside `[[ ]]`".into()));
+    }
+    Ok(ast)
+}
+
+fn cond_or(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, ParseError> {
+    let mut node = cond_and(toks, pos)?;
+    while matches!(toks.get(*pos), Some(lexer::CondTok::OrOr)) {
+        *pos += 1;
+        node = CondAst::Or(Box::new(node), Box::new(cond_and(toks, pos)?));
+    }
+    Ok(node)
+}
+
+fn cond_and(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, ParseError> {
+    let mut node = cond_not(toks, pos)?;
+    while matches!(toks.get(*pos), Some(lexer::CondTok::AndAnd)) {
+        *pos += 1;
+        node = CondAst::And(Box::new(node), Box::new(cond_not(toks, pos)?));
+    }
+    Ok(node)
+}
+
+fn cond_not(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, ParseError> {
+    match toks.get(*pos) {
+        Some(lexer::CondTok::Not) => {
+            *pos += 1;
+            Ok(CondAst::Not(Box::new(cond_not(toks, pos)?)))
+        }
+        Some(lexer::CondTok::LParen) => {
+            *pos += 1;
+            let inner = cond_or(toks, pos)?;
+            if !matches!(toks.get(*pos), Some(lexer::CondTok::RParen)) {
+                return Err(ParseError::Syntax("expected `)` inside `[[ ]]`".into()));
+            }
+            *pos += 1;
+            Ok(inner)
+        }
+        _ => cond_primary(toks, pos),
+    }
+}
+
+/// A word as plain unquoted text, if that's its whole shape — how operator
+/// words (`-f`, `==`, `<`) are recognized; a quoted `"-f"` is an operand.
+fn cond_op_text(tok: Option<&lexer::CondTok>) -> Option<&str> {
+    match tok {
+        Some(lexer::CondTok::Word(parts)) => match parts.as_slice() {
+            [WordPart::Unquoted(s)] => Some(s.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn cond_primary(toks: &[lexer::CondTok], pos: &mut usize) -> Result<CondAst, ParseError> {
+    let Some(lexer::CondTok::Word(first)) = toks.get(*pos) else {
+        return Err(ParseError::Syntax("expected an operand inside `[[ ]]`".into()));
+    };
+    // Unary operator with an operand following.
+    if let Some(op) = cond_op_text(toks.get(*pos)).filter(|op| COND_UNARY_OPS.contains(op))
+        && let Some(lexer::CondTok::Word(operand)) = toks.get(*pos + 1)
+    {
+        let (op, operand) = (op.to_string(), operand.clone());
+        *pos += 2;
+        return Ok(CondAst::Unary(op, operand));
+    }
+    // Binary operator between two operands.
+    if let Some(op) = cond_op_text(toks.get(*pos + 1)).filter(|op| COND_BINARY_OPS.contains(op)) {
+        let Some(lexer::CondTok::Word(rhs)) = toks.get(*pos + 2) else {
+            return Err(ParseError::Syntax(format!("`{op}': argument expected inside `[[ ]]`")));
+        };
+        let node = CondAst::Binary(first.clone(), op.to_string(), rhs.clone());
+        *pos += 3;
+        return Ok(node);
+    }
+    let node = CondAst::Str(first.clone());
+    *pos += 1;
+    Ok(node)
+}
+
 #[derive(Debug, Clone)]
 pub enum Compound {
+    /// `[[ expr ]]` — the extended test (C55); see [`CondAst`].
+    Cond(CondAst),
     /// `if` with its `elif`s flattened into `branches` of `(condition, body)`.
     If {
         branches: Vec<(CommandList, CommandList)>,
@@ -351,6 +467,11 @@ impl Parser {
         } else if let Some(Token::DblParen(_)) = self.peek() {
             let Some(Token::DblParen(expr)) = self.advance() else { unreachable!() };
             Compound::Arith(expr)
+        // `[[ expr ]]` — the extended test (C55), already lexed in its own
+        // mode; parsed into a recursive `CondAst` here.
+        } else if let Some(Token::CondExpr(_)) = self.peek() {
+            let Some(Token::CondExpr(toks)) = self.advance() else { unreachable!() };
+            Compound::Cond(parse_cond_expr(&toks)?)
         // A bare `(` starts a subshell.
         } else if matches!(self.peek(), Some(Token::LParen)) {
             self.parse_subshell()?
@@ -743,6 +864,7 @@ fn describe(tok: &Token) -> String {
         Token::LParen => "(".into(),
         Token::RParen => ")".into(),
         Token::DblParen(_) => "((...))".into(),
+        Token::CondExpr(_) => "[[...]]".into(),
         Token::Redirect(_) => "redirection".into(),
         Token::Newline => "newline".into(),
     }
@@ -751,6 +873,28 @@ fn describe(tok: &Token) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C55: `[[ ]]` lexes in its own mode and parses recursively.
+    #[test]
+    fn cond_expr_parses_recursively() {
+        let list = parse("[[ ( a = b || a = a ) && ! -f /nosuch ]]").unwrap();
+        let crate::parser::RawCommand::Compound(rc) = first_cmd(&list) else {
+            panic!("expected a compound");
+        };
+        let Compound::Cond(CondAst::And(lhs, rhs)) = &*rc.compound else {
+            panic!("expected Cond(And), got {:?}", rc.compound);
+        };
+        assert!(matches!(lhs.as_ref(), CondAst::Or(..)));
+        assert!(matches!(rhs.as_ref(), CondAst::Not(..)));
+
+        // `<` inside `[[` is a comparison word, not a redirection.
+        let list = parse("[[ abc < abd ]]").unwrap();
+        let crate::parser::RawCommand::Compound(rc) = first_cmd(&list) else {
+            panic!("expected a compound");
+        };
+        assert!(matches!(&*rc.compound, Compound::Cond(CondAst::Binary(_, op, _)) if op == "<"));
+        assert!(rc.redirects.is_empty());
+    }
 
     fn text(word: &Word) -> String {
         word.iter()

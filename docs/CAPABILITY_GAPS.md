@@ -134,10 +134,11 @@ comparison shells — dash, bash, zsh, ksh93, and fish were all actually
 installed and invoked directly, not just checked against documentation,
 a strictly higher bar than this document's original methodology)
 surfaced 33 new, previously-undocumented gaps, C41–C73, spanning all
-five tiers. The headline finding is **C55: rush has no `[[ ]]` extended-test
+five tiers. The headline finding was **C55: rush had no `[[ ]]` extended-test
 construct at all** — no lexer tokens, no parser production, nothing;
-`[[ foo = foo ]]` is "command not found," and `<`/`>` inside one are
-silently misparsed as ordinary file redirections. Close behind it:
+`[[ foo = foo ]]` was "command not found," and `<`/`>` inside one were
+silently misparsed as ordinary file redirections; now done (see its
+write-up). Close behind it:
 **C45, `readonly`/`declare -r` (read-only variables) was entirely
 missing**, despite being POSIX-mandated and present in all five
 comparison shells including dash — and worse than a mere missing
@@ -188,7 +189,7 @@ applicable to that shell's own model.
 | Context-aware completion | ✅§§§ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ✅*** | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
-| `[[ ]]` extended test | ❌× | ❌ | ✅ | ✅ | ✅ | ❌ |
+| `[[ ]]` extended test | ✅× | ❌ | ✅ | ✅ | ✅ | ❌ |
 | `readonly` / read-only vars | ✅×× | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `$`/`$PPID`/`$-` special vars | ✅××× | ✅ | ✅ | ✅ | ✅ | 🟡 |
 
@@ -292,13 +293,12 @@ any builtin, per-external-command argument specs (`git <TAB>`
 subcommands, `ssh <TAB>` known hosts) — the rest of what a real fish/zsh
 completion *system* (as opposed to this fixed case list) provides.
 
-× No `[[`/`]]` tokens anywhere in the lexer/parser — `[[ foo = foo ]]` is
-"command not found" (127), and `<`/`>` inside one are misparsed as
-ordinary file redirections (`[[ abc < abd ]]` tries to open a file named
-`abd`). fish has no `[[ ]]` syntax either (its own conditional model is
-built on `test`/`[` plus `and`/`or`, not a bash-style extended test). The
-single largest gap surfaced by this document's fresh comparison pass
-(C55).
+× Done (C55): full lexer/parser/evaluator — split-safe/glob-safe
+operands, `&&`/`||`/`!`/`( )` nesting, pattern-matching `==`/`!=` with
+bash's per-part quoting rule, lexicographic `<`/`>`, arithmetic
+`-eq…-ge`, `-nt`/`-ot`/`-ef`. `=~` (regex) is C56, sequenced next. fish
+has no `[[ ]]` syntax either (its own conditional model is built on
+`test`/`[` plus `and`/`or`).
 
 ×× Done (C45): `readonly`/`declare -r`/`local -r` all mark the flag,
 every mutation path rejects it (a bare assignment fatally, matching
@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (11 done, 12 open — C56–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C54 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C55 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-19 are open.
+18 are open.
 
 ---
 
@@ -2248,7 +2248,7 @@ piping inside a substitution, assignment RHS, redirect targets, `$!`,
 non-blocking/concurrent timing, and status independence — all matching
 exactly (aside from the documented fd-number cosmetic difference).
 
-### C55 — `[[ ]]` extended test construct entirely missing (tracked)
+### C55 — `[[ ]]` extended test construct entirely missing ✅ done
 **The single largest gap in this document.** Present in bash/ksh93/zsh
 (not dash — a genuine POSIX-shell/bash-family split, matching rush's own
 model in that specific narrow sense, but rush's own README calls itself
@@ -2290,6 +2290,52 @@ start available: `[ ]`'s own `test_unary`/`test_binary`/the `-a`/`-o`
 recursive-descent structure (`builtins.rs`) already covers most of the
 primaries (`-f`, `-eq`, etc.) and closely mirrors the `&&`/`||`/`!`
 grammar `[[` itself needs.
+
+Implemented — all three layers:
+
+- **Lexer**: a standalone `[[` word switches into a dedicated
+  interior-lexing mode (`lex_cond`) until the matching `]]`: `<`/`>`
+  become ordinary comparison-operator words (never redirections — the
+  item's own headline misparse), `&&`/`||`/`(`/`)` are the construct's
+  operators, a lone `;`/`|`/`&` is a syntax error (as in bash), newlines
+  are mere whitespace (a multi-line `[[` works), and running out of
+  input yields `Incomplete` so the REPL reads continuation lines. Words
+  keep their full `WordPart` quoting structure — evaluation needs it. A
+  `case` pattern like `[[:digit:]]` lexes as one longer word and never
+  trips the mode (regression-tested against C42's own tests).
+- **Parser**: a genuinely recursive `CondAst` production —
+  `or := and ('||' and)*`, `and := not ('&&' not)*`,
+  `not := '!' not | '(' or ')' | primary` — with primaries recognizing
+  `test`'s unary set plus `-a` (exists)/`-h`/`-L` (symlink, added to
+  `[ ]`'s shared helper too) and the binary set
+  `= == != =~ < > -eq…-ge -nt -ot -ef`. Operator words must be plain and
+  unquoted (`"-f"` is an operand), same as bash. A malformed expression
+  is a parse-time syntax error that aborts with status 2, matching bash
+  exactly (`[[ a -eq ]]` verified).
+- **Evaluator** (`exec::eval_cond`): operands expand with full
+  `$`/`$(...)`/quote handling but **no word-splitting and no globbing**
+  — the whole point of `[[`. All three of the item's broken idioms now
+  behave: `x=; [[ $x = foo ]]` (empty-safe), `x="a b"; [[ $x = "a b" ]]`
+  (split-safe), `x=foo.txt; [[ $x = *.txt ]]` (the *RHS* is a glob
+  pattern). Pattern semantics follow bash's quoting rule per word part:
+  unquoted parts keep metacharacters active (including ones arriving via
+  `$var` — `p="*.txt"; [[ foo.txt = $p ]]` is true), quoted/literal
+  parts are backslash-escaped (`[[ abc = "a"* ]]` needs a literal `a`) —
+  the shared `glob.rs` matcher does the matching, so C42's POSIX classes
+  work inside `[[` for free (`[[ 5 = [[:digit:]] ]]`). `<`/`>` compare
+  lexicographically; `-eq…-ge` evaluate both sides as full arithmetic
+  (`x=5; [[ x -eq 5 ]]` is true, unlike `[ ]`'s integer-literal rule —
+  bash-verified); `-nt`/`-ot`/`-ef` compare file mtimes/identity.
+  True/false/error → 0/1/2, without aborting on an evaluation error.
+  `=~` is recognized by the grammar but returns a status-2 "not
+  supported yet" pointing at C56, the item sequenced next.
+
+Verified against real bash across 32 scenarios, each byte-identical —
+including the three headline idioms, grouping/negation/nesting, `if`/
+`while` conditions, `set -e` interplay, multi-line input, and the
+malformed-expression abort. Regression tests: one parser unit test
+(recursion + `<`-is-not-a-redirect) and one comprehensive integration
+test.
 
 ### C56 — `[[ $s =~ $regex ]]` (ERE matching) + `$BASH_REMATCH` (tracked)
 Present in bash (full, including capture groups in `$BASH_REMATCH`);

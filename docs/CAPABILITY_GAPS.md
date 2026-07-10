@@ -321,13 +321,13 @@ syntax directly.
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
-- **Tier V — interactive UX:** 9 (4 done, 5 open — C69–C73)
+- **Tier V — interactive UX:** 9 (5 done, 4 open — C70–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C68 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C69 are
 now done (re-closing Tiers I through IV completely) and the remaining
-5 (all Tier V, interactive UX) are open.
+4 (all Tier V, interactive UX) are open.
 
 ---
 
@@ -2831,7 +2831,7 @@ matrix (resolvable/unresolvable command words, matched/unmatched
 quotes, comments, vars, pipe-resets-command-position, assignment
 prefixes).
 
-### C69 — Tab completion shows one candidate at a time, no columned list (tracked)
+### C69 — Tab completion shows one candidate at a time, no columned list ✅ done
 Native list/menu display in fish, zsh, and bash (bash-completion or even
 stock bash's default double-Tab listing). Rush's `Editor` is currently
 constructed with `rustyline`'s default `CompletionType::Circular` — Tab
@@ -2843,6 +2843,13 @@ backed by its own `page_completions` — the exact mechanism bash's
 default Tab-Tab listing and fish's dropdown are built on); switching is
 a one-line `Config::builder().completion_type(CompletionType::List)`
 change at `Editor` construction, not new completion logic. **Effort: S.**
+
+Implemented as exactly that one-line change: the interactive `Editor`
+is now built with `CompletionType::List`, so Tab shows `rustyline`'s
+columned, paged candidate list (its own `page_completions`, the same
+display bash's Tab-Tab and fish's dropdown are built on) instead of
+silently cycling candidates in place. No completion logic changed —
+every candidate source from C34 feeds the new display unchanged.
 
 ### C70 — No abbreviations / global-alias live expansion (tracked)
 Native in fish (`abbr`) and zsh (`alias -g`) — a name that expands

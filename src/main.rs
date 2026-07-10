@@ -231,7 +231,12 @@ fn run_source(src: &str) -> i32 {
 
 fn interactive() -> rustyline::Result<()> {
     vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
-    let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::new()?;
+    // `CompletionType::List` (C69): Tab shows the columned, paged list of
+    // every candidate — bash's own Tab-Tab display — instead of the
+    // default `Circular`, which cycles candidates in place one at a time
+    // with nothing on screen listing the alternatives.
+    let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).build();
+    let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::with_config(config)?;
     rl.set_helper(Some(completion::RushHelper::new()));
     let hist = history_path();
     if let Some(ref h) = hist {

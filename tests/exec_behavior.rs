@@ -2756,3 +2756,29 @@ fn job_control_niceties() {
     let (out, _) = rush("sleep 2 & pid=$!; disown; jobs; kill %1 2>/dev/null; echo kill-st=$?; kill $pid; echo done");
     assert_eq!(out, "kill-st=1\ndone\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn trap_debug_return_and_introspection() {
+    // C65: DEBUG fires before each pipeline with $? preserved across the
+    // handler (bash-verified); RETURN fires on function return and when
+    // a sourced script finishes; trap -l/-p used to be silent no-ops.
+    let (out, _) = rush("trap 'echo D' DEBUG; false; echo st=$?");
+    assert_eq!(out, "D\nD\nst=1\n");
+
+    let (out, _) = rush("f(){ trap 'echo R' RETURN; echo in-f; }; f; echo after");
+    assert_eq!(out, "in-f\nR\nafter\n");
+
+    let f = std::env::temp_dir().join(format!("rush_c65_{}.sh", std::process::id()));
+    std::fs::write(&f, "echo sourced\n").unwrap();
+    let (out, _) = rush(&format!("trap 'echo R' RETURN; . {}; echo after", f.display()));
+    assert_eq!(out, "sourced\nR\nafter\n");
+    let _ = std::fs::remove_file(&f);
+
+    // trap -l: bash's numbered five-per-line table; trap -p: re-runnable,
+    // filterable.
+    let (out, _) = rush("trap -l");
+    assert!(out.starts_with(" 1) SIGHUP\t 2) SIGINT"), "got: {out:?}");
+    let (out, _) = rush("trap 'echo x' TERM EXIT; trap -p TERM; trap - EXIT");
+    assert_eq!(out, "trap -- 'echo x' SIGTERM\n");
+}

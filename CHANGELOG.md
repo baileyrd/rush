@@ -1612,3 +1612,11 @@ signals now actually installs a handler — `trap 'cmd' USR1` used to
 register and then die on delivery; dispositions are now synced
 dynamically on trap set/unset for the catchable non-job-control set.
 Adds 1 integration test.
+
+### New: `trap DEBUG` / `trap RETURN`, `trap -l` / `trap -p` (C65)
+DEBUG fires before each pipeline with `$?` preserved across the handler
+(per-pipeline where bash is per-simple-command — documented); RETURN
+fires on function return and when a sourced script finishes; `trap -l`
+prints bash's numbered five-per-line table; `trap -p [name...]` prints
+re-runnable trap lines with normalized-spec filtering. Adds 1
+integration test.

@@ -210,8 +210,7 @@ commands actually inside its body.
 ‖ `EXIT`/`INT`/`TERM`/`HUP` all fire now — including interrupting a
 blocking wait immediately, not just once the foreground job finishes on
 its own — and `ERR` fires on errexit's exact condition (C53; not
-inherited by functions, bash's no-`errtrace` default). `DEBUG` remains
-unimplemented.
+inherited by functions, bash's no-`errtrace` default). `DEBUG`/`RETURN` fire too (C65).
 
 ¶ Literal assignment, all read forms (`${arr[N]}`/`${arr[@]}`/`${arr[*]}`/
 `${#arr[@]}`/`${!arr[@]}`), sparse arrays, `arr[i]=`/`arr[i]+=`, `unset`
@@ -321,14 +320,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (20 done, 3 open — C65–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (21 done, 2 open — C66–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C64 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C65 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-9 are open.
+8 are open.
 
 ---
 
@@ -2682,7 +2681,7 @@ delivery-side naming switched to the shared `libc`-constant table;
 deliberately untouched. One integration test covers the cluster,
 including a delivered `USR1` firing its trap.
 
-### C65 — `trap DEBUG` / `trap RETURN`, and `trap -l`/`trap -p` (tracked)
+### C65 — `trap DEBUG` / `trap RETURN`, and `trap -l`/`trap -p` ✅ done
 Present in bash/ksh93/zsh (not POSIX/dash) — distinct from C44 (a real
 bug: a *registered* numeric/`SIG`-prefixed trap silently never fires) and
 C53 (`trap ERR`, tier III, a scripting-safety idiom): these are two
@@ -2701,6 +2700,21 @@ no arguments does correctly list — only the flagged forms are broken).
 `exec::call_function`'s and `source_file`'s own return paths); `-l`/`-p`
 **S** each (`-l` shares C64's table; `-p` reuses the listing logic bare
 `trap` already has).
+
+Implemented, all four pieces. `DEBUG` fires before each pipeline in
+`exec::run_andor` — bash fires per *simple command*, so one `a | b`
+pair is a single firing here where bash may fire per stage, a
+documented approximation — with `$?` preserved across the handler
+(bash-verified: `trap 'echo D' DEBUG; false; echo $?` still prints 1),
+via a new shared `fire_preserving`. `RETURN` fires from
+`call_function`'s return path and when a sourced script finishes, the
+function's own status preserved for the caller. `trap -l` prints
+bash's numbered five-per-line tab-separated table off C44's existing
+name↔number table, and `trap -p [name...]` reuses the bare-`trap`
+listing format with optional filtering (specs normalized, so
+`trap -p 15` works too). Both pseudo-signals joined the C44 normalizer
+(case-insensitive, no number, no `SIG` spelling — like `ERR`). One
+integration test covers all four.
 
 ### C66 — `coproc` (named bidirectional coprocess) (tracked)
 Present in bash (`coproc`) and zsh; ksh93 uses different (`|&`) syntax;

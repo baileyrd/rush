@@ -179,6 +179,11 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     if crate::vars::noexec() {
         return Ok((0, false));
     }
+    // `trap 'cmd' DEBUG` (C65) fires before each pipeline here — bash
+    // fires per *simple command*, so one `a | b` stage-pair is a single
+    // firing in rush where bash may fire per stage; a documented
+    // approximation. `$?` is preserved across the handler.
+    crate::trap::fire_preserving("DEBUG");
     // Update `$?` after every pipeline, so a later one in the same line can read
     // it (e.g. `false || echo $?`).
     let mut status = run_pipeline_node(&list.first)?;
@@ -195,6 +200,7 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     let final_idx = list.rest.len().wrapping_sub(1);
     for (i, (connector, raw)) in list.rest.iter().enumerate() {
         if should_run(*connector, status) {
+            crate::trap::fire_preserving("DEBUG");
             status = run_pipeline_node(raw)?;
             crate::vars::set_last_status(status);
             last_ran = i == final_idx && !raw.negated;
@@ -589,6 +595,10 @@ fn call_function(argv: &[String]) -> Result<i32, String> {
     crate::vars::set_returning(None);
     crate::vars::set_args(name0, saved);
     crate::vars::pop_local_frame();
+
+    // `trap 'cmd' RETURN` (C65) fires as the function returns, with the
+    // function's own status preserved for the caller.
+    crate::trap::fire_preserving("RETURN");
 
     Ok(returned.unwrap_or(result?))
 }

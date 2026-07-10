@@ -2416,3 +2416,52 @@ fn pipestatus_records_per_stage_statuses() {
     let (out, _) = rush(r#"set -o pipefail; false | true; echo "st=$? ${PIPESTATUS[@]}""#);
     assert_eq!(out, "st=1 1 0\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn double_bracket_extended_test() {
+    // C55, the largest item in the pass: `[[ ]]` didn't exist at all —
+    // `[[ foo = foo ]]` was command-not-found (127), and `<` inside one
+    // was misparsed as a redirection. Every expectation below was
+    // verified byte-identical against real bash first.
+    let (out, _) = rush("[[ foo = foo ]] && echo yes; [[ foo = bar ]]; echo st=$?");
+    assert_eq!(out, "yes\nst=1\n");
+
+    // The whole reason `[[` exists: empty-safe, split-safe, glob-safe
+    // operands — each of these is a "too many arguments" error under [ ].
+    let (out, _) = rush(r#"x=; [[ $x = foo ]]; echo st=$?; x="a b"; [[ $x = "a b" ]] && echo split-safe"#);
+    assert_eq!(out, "st=1\nsplit-safe\n");
+
+    // Unquoted RHS is a glob pattern (even via $var); quoted is literal.
+    let (out, _) = rush(r#"x=foo.txt; [[ $x = *.txt ]] && echo glob; [[ $x = "*.txt" ]] || echo lit; p="*.txt"; [[ $x = $p ]] && echo varpat; [[ abc = "a"* ]] && echo mixed"#);
+    assert_eq!(out, "glob\nlit\nvarpat\nmixed\n");
+
+    // `<`/`>` compare lexicographically — no redirection, no file.
+    let (out, _) = rush("[[ abc < abd ]] && echo lt; [[ abd > abc ]] && echo gt; [ -e abd ] || echo nofile");
+    assert_eq!(out, "lt\ngt\nnofile\n");
+
+    // &&/||/!/( ) nest directly; -eq family is full arithmetic.
+    let (out, _) = rush("[[ ( a = b || a = a ) && c = c ]] && echo grouped; [[ ! -f nosuch_c55 ]] && echo notfile; x=5; [[ x -eq 5 ]] && echo arith");
+    assert_eq!(out, "grouped\nnotfile\narith\n");
+
+    // Unary file/string ops, POSIX classes inside [[, and `if [[ … ]]`.
+    let (out, _) = rush("[[ -f Cargo.toml && -d src && -n x && -z \"\" ]] && echo ops; [[ 5 = [[:digit:]] ]] && echo class; if [[ -d src ]]; then echo in-if; fi");
+    assert_eq!(out, "ops\nclass\nin-if\n");
+
+    // Multi-line [[ ]] keeps reading (Incomplete → continuation).
+    let (out, _) = rush("[[ a = a\n]] && echo multiline");
+    assert_eq!(out, "multiline\n");
+
+    // A `case` class pattern still lexes as its own word, not as `[[`.
+    let (out, _) = rush("case 5 in [[:digit:]]) echo case-ok;; esac");
+    assert_eq!(out, "case-ok\n");
+
+    // A malformed expression is a parse-time syntax error that aborts,
+    // status 2 (same as bash: `[[ a -eq ]]` kills the script there).
+    let (out, status) = rush("[[ a -eq ]]; echo nope");
+    assert_eq!((out.as_str(), status), ("", 2));
+    // `=~` is recognized but explicitly deferred to C56: an evaluation
+    // error, status 2, without aborting.
+    let (out, _) = rush("[[ a =~ a ]] 2>/dev/null; echo st=$?; echo alive");
+    assert_eq!(out, "st=2\nalive\n");
+}

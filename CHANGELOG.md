@@ -1492,3 +1492,19 @@ own `(0)`; `! false` records the un-negated `(1)`; pipefail doesn't
 distort the per-stage values; all existing array read forms compose.
 Not set inside `$(...)` (a bash substitution is a subshell whose
 PIPESTATUS never escapes). Adds 1 integration test.
+
+### New: `[[ ]]` extended test construct (C55)
+The largest single gap in the capability document: rush had no
+`[[`/`]]` at all — `[[ foo = foo ]]` was command-not-found, and `<`
+inside one opened a file. Now implemented in all three layers: a
+dedicated lexer mode for the interior (`<`/`>` are comparison words,
+`&&`/`||`/`( )` operators, multi-line works, quoting structure
+preserved), a genuinely recursive parser production, and an evaluator
+whose operands never word-split or glob — `x=; [[ $x = foo ]]`,
+`x="a b"; [[ $x = "a b" ]]`, and `[[ $x = *.txt ]]` all behave.
+Pattern `==`/`!=` follows bash's per-part quoting rule; `<`/`>` compare
+lexicographically; `-eq…-ge` are full arithmetic; `-nt`/`-ot`/`-ef`
+compare files; malformed expressions abort with status 2 like bash.
+`=~` is recognized and deferred to C56. Verified byte-identical against
+bash across 32 scenarios; adds 1 parser unit test + 1 comprehensive
+integration test.

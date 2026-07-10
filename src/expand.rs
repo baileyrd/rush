@@ -973,6 +973,27 @@ impl Splitter {
     }
 }
 
+/// Expand a `[[ ]]` `==`/`!=` right-hand side into a glob pattern (C55):
+/// unquoted parts keep their metacharacters active (including ones that
+/// arrive via `$var` — `p="*.txt"; [[ foo.txt = $p ]]` is true in bash,
+/// verified), while quoted/literal parts are backslash-escaped so they
+/// only ever match themselves (`[[ $x = "a"* ]]` needs a literal `a`).
+pub(crate) fn expand_cond_pattern(word: &Word) -> Result<String, String> {
+    let mut pattern = String::new();
+    for (i, part) in word.iter().enumerate() {
+        match part {
+            WordPart::Literal(s) => escape_meta_into(&mut pattern, s),
+            WordPart::Quoted(s) => escape_meta_into(&mut pattern, &expand_dollars(s)?),
+            WordPart::Unquoted(s) => {
+                let text = if i == 0 { tilde_expand(s) } else { s.clone() };
+                pattern.push_str(&expand_unquoted(&text)?);
+            }
+            WordPart::ArrayLiteral(_) => {}
+        }
+    }
+    Ok(pattern)
+}
+
 /// Append `s` to a glob pattern, backslash-escaping characters that would
 /// otherwise be metacharacters — used for text that must stay literal.
 fn escape_meta_into(pattern: &mut String, s: &str) {
@@ -984,7 +1005,10 @@ fn escape_meta_into(pattern: &mut String, s: &str) {
     }
 }
 
-fn expand_word(word: &Word) -> Result<String, String> {
+/// Expand a word's parts into one string with `$`/`$(...)`/quote handling
+/// but no word-splitting and no globbing — `local x=$v`-style values, and
+/// (C55) `[[ ]]` operands, which is the whole point of `[[`.
+pub(crate) fn expand_word(word: &Word) -> Result<String, String> {
     let mut out = String::new();
     for (i, part) in word.iter().enumerate() {
         match part {

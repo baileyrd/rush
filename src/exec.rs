@@ -272,6 +272,17 @@ fn run_compound_with_redirects(rc: &RawCompound) -> Result<i32, String> {
 
 pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
     match compound {
+        // `[[ expr ]]` (C55): 0 when true, 1 when false, 2 on an
+        // evaluation error (bad operator, unfinished `=~`) — bash's own
+        // status convention — without aborting the script.
+        Compound::Cond(ast) => match eval_cond(ast) {
+            Ok(true) => Ok(0),
+            Ok(false) => Ok(1),
+            Err(e) => {
+                eprintln!("rush: [[: {e}");
+                Ok(2)
+            }
+        },
         Compound::If { branches, else_body } => {
             for (cond, body) in branches {
                 if exec_cond(cond)? == 0 {
@@ -832,6 +843,80 @@ fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
 
 fn trace_assoc_pairs(pairs: &[(String, String)]) -> String {
     pairs.iter().map(|(k, v)| format!("[{k}]={}", trace_quote(v))).collect::<Vec<_>>().join(" ")
+}
+
+/// Evaluate a parsed `[[ ... ]]` expression (C55). Operands expand with
+/// `$`/`$(...)`/quote handling but — the whole point of `[[` — no
+/// word-splitting and no filename globbing, so `x=; [[ $x = foo ]]` and
+/// `x="a b"; [[ $x = "a b" ]]` both behave (each verified against bash,
+/// where the `[ ]` spellings of the same tests are "too many arguments"
+/// errors).
+fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
+    use crate::parser::CondAst;
+    match ast {
+        CondAst::Or(a, b) => Ok(eval_cond(a)? || eval_cond(b)?),
+        CondAst::And(a, b) => Ok(eval_cond(a)? && eval_cond(b)?),
+        CondAst::Not(x) => Ok(!eval_cond(x)?),
+        CondAst::Str(w) => Ok(!crate::expand::expand_word(w)?.is_empty()),
+        CondAst::Unary(op, w) => {
+            let s = crate::expand::expand_word(w)?;
+            crate::builtins::cond_unary(op, &s)
+        }
+        CondAst::Binary(lhs, op, rhs) => {
+            let l = crate::expand::expand_word(lhs)?;
+            match op.as_str() {
+                // `=`/`==`/`!=`: the RHS is a glob pattern where (and only
+                // where) it's unquoted — `[[ $x = "a"* ]]` matches anything
+                // starting with a literal `a` (verified against bash);
+                // `expand_cond_pattern` backslash-escapes the quoted parts.
+                "=" | "==" => Ok(crate::glob::match_component(&crate::expand::expand_cond_pattern(rhs)?, &l)),
+                "!=" => Ok(!crate::glob::match_component(&crate::expand::expand_cond_pattern(rhs)?, &l)),
+                // Lexicographic string comparison — `<`/`>` never
+                // redirect inside `[[` (that misparse was C55's own
+                // headline repro).
+                "<" => Ok(l < crate::expand::expand_word(rhs)?),
+                ">" => Ok(l > crate::expand::expand_word(rhs)?),
+                // The arithmetic comparisons evaluate both sides as full
+                // arithmetic expressions (variable names resolve, unset
+                // names are 0) — `[[ x -eq 5 ]]` with `x=5` is true in
+                // bash, unlike `[ ]`'s integer-literal-only rule.
+                "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+                    let r = crate::expand::expand_word(rhs)?;
+                    let (a, b) = (crate::arith::eval(&l)?, crate::arith::eval(&r)?);
+                    Ok(match op.as_str() {
+                        "-eq" => a == b,
+                        "-ne" => a != b,
+                        "-lt" => a < b,
+                        "-le" => a <= b,
+                        "-gt" => a > b,
+                        _ => a >= b,
+                    })
+                }
+                // File-timestamp/identity comparisons.
+                "-nt" | "-ot" | "-ef" => {
+                    let r = crate::expand::expand_word(rhs)?;
+                    let (ma, mb) = (std::fs::metadata(&l), std::fs::metadata(&r));
+                    Ok(match op.as_str() {
+                        "-ef" => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::MetadataExt;
+                                matches!((&ma, &mb), (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino())
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                false
+                            }
+                        }
+                        "-nt" => matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a > b),
+                        _ => matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a < b),
+                    })
+                }
+                "=~" => Err("`=~` is not supported yet (tracked as C56)".into()),
+                other => Err(format!("unknown operator `{other}`")),
+            }
+        }
+    }
 }
 
 /// A single command that is only `NAME=value` assignments (no program word):
@@ -1980,6 +2065,7 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
                 Compound::Select { .. } => "select ...".to_string(),
                 Compound::Case { .. } => "case ...".to_string(),
                 Compound::Arith(_) => "((...))".to_string(),
+                Compound::Cond(_) => "[[ ... ]]".to_string(),
                 Compound::Group(_) => "{ ... }".to_string(),
                 Compound::Subshell(_) => "( ... )".to_string(),
                 Compound::FuncDef { name, .. } => format!("{name}() {{ ... }}"),

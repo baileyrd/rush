@@ -60,7 +60,24 @@ pub enum Token {
     /// unsplit — the parser decides whether it's one expression or three
     /// `;`-separated clauses depending on where it appears.
     DblParen(String),
+    /// `[[ ... ]]` (C55) — the extended test's interior, lexed in its own
+    /// mode: `<`/`>` are comparison words (never redirections), `&&`/`||`/
+    /// `!`/`( )` are the construct's own operators, and words keep their
+    /// quoting structure (the parser/evaluator needs it — an unquoted RHS
+    /// of `==` is a glob pattern, a quoted one is literal).
+    CondExpr(Vec<CondTok>),
     Newline,          // a line break (also lets `&&`/`|` continue)
+}
+
+/// One token inside a `[[ ... ]]` construct (C55).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CondTok {
+    Word(Word),
+    AndAnd, // &&
+    OrOr,   // ||
+    Not,    // !
+    LParen, // (
+    RParen, // )
 }
 
 /// A redirection operator. `fd` is the file descriptor being redirected (e.g.
@@ -275,7 +292,16 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
             }
             _ => {
                 let word = lex_word(&mut chars, None)?;
-                tokens.push(Token::Word(word));
+                // A standalone `[[` word opens the extended test (C55) —
+                // its interior lexes in its own mode until the matching
+                // `]]`. (Only an *exact* `[[`: a `case` pattern like
+                // `[[:digit:]]` lexes as one longer word and never
+                // matches here.)
+                if matches!(word.as_slice(), [WordPart::Unquoted(s)] if s == "[[") {
+                    tokens.push(Token::CondExpr(lex_cond(&mut chars)?));
+                } else {
+                    tokens.push(Token::Word(word));
+                }
             }
         }
     }
@@ -285,6 +311,68 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
         return Err(LexError::Incomplete);
     }
     Ok(tokens)
+}
+
+/// Lex a `[[ ... ]]` interior (C55) up to and including the closing `]]`.
+/// Whitespace (newlines included — bash allows a multi-line `[[`) merely
+/// separates tokens; `&&`/`||`/`(`/`)` are the construct's own operators;
+/// `<`/`>` become ordinary comparison-operator words rather than
+/// redirections; `;`/`|`/`&` (single) are syntax errors, as in bash.
+/// Running out of input before `]]` is `Incomplete`, so the REPL keeps
+/// reading continuation lines.
+fn lex_cond(chars: &mut Peekable<Chars>) -> Result<Vec<CondTok>, LexError> {
+    let mut toks = Vec::new();
+    loop {
+        match chars.peek() {
+            None => return Err(LexError::Incomplete),
+            Some(' ' | '\t' | '\r' | '\n') => {
+                chars.next();
+            }
+            Some('&') => {
+                chars.next();
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    toks.push(CondTok::AndAnd);
+                } else {
+                    return Err(LexError::Syntax("`&` is not valid inside `[[ ]]`".into()));
+                }
+            }
+            Some('|') => {
+                chars.next();
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    toks.push(CondTok::OrOr);
+                } else {
+                    return Err(LexError::Syntax("`|` is not valid inside `[[ ]]`".into()));
+                }
+            }
+            Some('(') => {
+                chars.next();
+                toks.push(CondTok::LParen);
+            }
+            Some(')') => {
+                chars.next();
+                toks.push(CondTok::RParen);
+            }
+            Some(';') => {
+                return Err(LexError::Syntax("`;` is not valid inside `[[ ]]`".into()));
+            }
+            // `<`/`>` are string-comparison operators here, never
+            // redirections — each becomes its own one-character word.
+            Some(&c @ ('<' | '>')) => {
+                chars.next();
+                toks.push(CondTok::Word(vec![WordPart::Unquoted(c.to_string())]));
+            }
+            Some(_) => {
+                let word = lex_word(chars, None)?;
+                match word.as_slice() {
+                    [WordPart::Unquoted(s)] if s == "]]" => return Ok(toks),
+                    [WordPart::Unquoted(s)] if s == "!" => toks.push(CondTok::Not),
+                    _ => toks.push(CondTok::Word(word)),
+                }
+            }
+        }
+    }
 }
 
 /// A here-document opened on the current line, awaiting its body.

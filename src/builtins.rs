@@ -838,6 +838,19 @@ fn test_primary(a: &[&str], pos: &mut usize) -> Result<bool, String> {
     Ok(!s.is_empty())
 }
 
+/// `[[ ]]`'s unary operators (C55) — `test`'s set plus `-a` (exists;
+/// unary-only inside `[[`, where the flat `-a` combinator doesn't exist)
+/// and `-h`/`-L` (symlink — `symlink_metadata`, so a dangling link still
+/// reports true, same as bash).
+pub(crate) fn cond_unary(op: &str, s: &str) -> Result<bool, String> {
+    use std::path::Path;
+    match op {
+        "-a" => Ok(Path::new(s).exists()),
+        "-h" | "-L" => Ok(std::fs::symlink_metadata(s).is_ok_and(|m| m.file_type().is_symlink())),
+        _ => test_unary(op, s),
+    }
+}
+
 fn test_unary(op: &str, s: &str) -> Result<bool, String> {
     use std::path::Path;
     Ok(match op {

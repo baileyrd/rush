@@ -1,7 +1,8 @@
-//! Syscall facade: the `libc` crate (default) or `rusty_libc` (the `rusty-libc`
-//! feature). This is the **only** module that names `libc`; the rest of rush
-//! uses `sys::` for every syscall, type, and constant, so a
-//! `--no-default-features --features rusty-libc` build links no `libc` at all.
+//! Syscall facade. The backend is target-driven: `rusty_libc` on Linux (the
+//! default), the `libc` crate on other Unix, and `libc` on Linux when forced
+//! with `--no-default-features --features libc-backend`. This is the **only**
+//! module that names `libc`; the rest of rush uses `sys::` for every syscall,
+//! type, and constant, so the default Linux build links no `libc` at all.
 //!
 //! Each backend exports the same surface — the syscall *functions* rush issues
 //! (mirroring the `libc` signatures: same args, same `unsafe`-ness, same
@@ -34,8 +35,10 @@
 
 pub use imp::*;
 
-#[cfg(all(unix, not(feature = "libc-backend"), not(feature = "rusty-libc")))]
-compile_error!("enable one syscall backend: the default `libc-backend`, or `rusty-libc`");
+// Backend selection is target-driven: rusty_libc on Linux (the default), the
+// libc crate on other Unix. `libc-backend` forces libc on Linux too.
+#[cfg(all(target_os = "linux", not(feature = "rusty-libc"), not(feature = "libc-backend")))]
+compile_error!("no backend: enable the default `rusty-libc`, or `libc-backend`");
 
 /// Build a rewound, memory-backed file containing `body` — the thread-free
 /// here-document backing (Linux only). The caller either `dup2`s it onto a
@@ -55,8 +58,11 @@ pub fn memfd_heredoc(body: &[u8]) -> std::io::Result<std::fs::File> {
     Ok(f)
 }
 
-// ---- default backend: the libc crate -------------------------------------
-#[cfg(all(feature = "libc-backend", not(feature = "rusty-libc")))]
+// ---- libc backend: other Unix, or Linux with `libc-backend` --------------
+#[cfg(any(
+    all(unix, not(target_os = "linux")),
+    all(target_os = "linux", feature = "libc-backend")
+))]
 mod imp {
     // C types and every constant rush uses come straight from libc.
     pub use libc::{c_int, mode_t, pid_t, rlim_t, rlimit, sighandler_t, uid_t};
@@ -178,8 +184,8 @@ mod imp {
     }
 }
 
-// ---- rusty-libc backend --------------------------------------------------
-#[cfg(feature = "rusty-libc")]
+// ---- rusty-libc backend: Linux default -----------------------------------
+#[cfg(all(target_os = "linux", feature = "rusty-libc", not(feature = "libc-backend")))]
 mod imp {
     use rusty_libc::{fd, process, rlimit as rl, signal as sig, termios, umask as um, wait, Errno};
     use std::cell::Cell;

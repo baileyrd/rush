@@ -1535,6 +1535,64 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         };
     }
 
+    // Array-wide transformations (C59): `${arr[@]/pat/repl}`,
+    // `${arr[@]^^}`, `${arr[@]:1:2}`… — the scalar operator applied to
+    // every element, results joined like `${arr[@]}`/`${arr[*]}` would
+    // join. (`#`/`%` prefix/suffix strips ride along too.)
+    if let Some(open) = inner.find('[')
+        && is_valid_name(&inner[..open])
+        && let Some(close) = inner[open..].find(']').map(|i| open + i)
+        && matches!(&inner[open + 1..close], "@" | "*")
+        && close + 1 < inner.len()
+    {
+        let name = &inner[..open];
+        let rest = &inner[close + 1..];
+        let values = crate::vars::array_values(name);
+        // `${arr[@]:off[:len]}` is array *slicing* — a range of elements,
+        // not a per-element substring (verified: `${arr[@]:1:2}` yields
+        // elements 1 and 2). Every other operator applies per element.
+        if rest.starts_with(':') && is_transform_op(rest) {
+            let spec = &rest[1..];
+            let (off_src, len_src) = match spec.find(':') {
+                Some(i) => (&spec[..i], Some(&spec[i + 1..])),
+                None => (spec, None),
+            };
+            let off = crate::arith::eval(&expand_dollars(off_src)?)?;
+            let n = values.len() as i64;
+            let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
+            let end = match len_src {
+                None => n,
+                Some(src) => {
+                    let len = crate::arith::eval(&expand_dollars(src)?)?;
+                    if len < 0 {
+                        return Err(format!("{len}: substring expression < 0"));
+                    }
+                    (start + len).min(n)
+                }
+            };
+            let sep = if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
+            return Ok(values[start as usize..end.max(start) as usize].join(&sep));
+        }
+        let mut transformed = Vec::with_capacity(values.len());
+        for v in &values {
+            transformed.push(if is_transform_op(rest) {
+                string_transform(v, rest)?
+            } else if let Some(word_src) = rest.strip_prefix("##") {
+                strip_prefix_pattern(v, &expand_dollars(word_src)?, true)
+            } else if let Some(word_src) = rest.strip_prefix('#') {
+                strip_prefix_pattern(v, &expand_dollars(word_src)?, false)
+            } else if let Some(word_src) = rest.strip_prefix("%%") {
+                strip_suffix_pattern(v, &expand_dollars(word_src)?, true)
+            } else if let Some(word_src) = rest.strip_prefix('%') {
+                strip_suffix_pattern(v, &expand_dollars(word_src)?, false)
+            } else {
+                return Err(format!("${{{inner}}}: bad substitution"));
+            });
+        }
+        let sep = if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
+        return Ok(transformed.join(&sep));
+    }
+
     let name_end = inner
         .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
         .unwrap_or(inner.len());
@@ -1565,6 +1623,15 @@ fn expand_braced(inner: &str) -> Result<String, String> {
     if let Some(word_src) = rest.strip_prefix('%') {
         let pattern = expand_dollars(word_src)?;
         return Ok(strip_suffix_pattern(&var_lookup_checked(name)?, &pattern, false));
+    }
+
+    // String transformations (C59): `${v/pat/repl}` (and `//`, `/#`, `/%`),
+    // `${v:offset[:length]}` substrings, and `${v^}`/`${v^^}`/`${v,}`/
+    // `${v,,}` case conversion. Checked before the `:-` default family —
+    // `is_transform_op` only claims a `:` whose next character can't start
+    // that family, so `${v:-x}` still means "default".
+    if is_transform_op(rest) {
+        return string_transform(&var_lookup_checked(name)?, rest);
     }
 
     let colon = rest.starts_with(':');
@@ -1607,6 +1674,194 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         }
         _ => Err(format!("${{{inner}}}: bad substitution")),
     }
+}
+
+/// Whether `rest` (the text after the variable name inside `${...}`)
+/// starts one of C59's string-transformation operators. A `:` only
+/// counts when what follows can't start the `:-`/`:=`/`:+`/`:?` default
+/// family (`${v: -3}`'s mandatory space is exactly bash's own
+/// disambiguation).
+fn is_transform_op(rest: &str) -> bool {
+    match rest.chars().next() {
+        Some('/' | '^' | ',') => true,
+        Some(':') => !matches!(rest[1..].chars().next(), None | Some('-' | '=' | '+' | '?')),
+        _ => false,
+    }
+}
+
+/// Apply one C59 transformation operator (`rest`, including its leading
+/// operator character) to `value`. Semantics verified against bash —
+/// see each branch.
+fn string_transform(value: &str, rest: &str) -> Result<String, String> {
+    // `${v/pat/repl}` family: `//` all, `/#` anchored prefix, `/%`
+    // anchored suffix, plain `/` first occurrence; a missing `/repl`
+    // deletes. The pattern/replacement split is the first *unescaped*
+    // `/` (so `${v/\//_}` replaces a literal slash).
+    if let Some(spec) = rest.strip_prefix('/') {
+        let (mode, spec) = if let Some(s) = spec.strip_prefix('/') {
+            ('A', s)
+        } else if let Some(s) = spec.strip_prefix('#') {
+            ('P', s)
+        } else if let Some(s) = spec.strip_prefix('%') {
+            ('S', s)
+        } else {
+            ('F', spec)
+        };
+        let mut split = None;
+        let mut skip = false;
+        for (i, c) in spec.char_indices() {
+            if skip {
+                skip = false;
+                continue;
+            }
+            match c {
+                '\\' => skip = true,
+                '/' => {
+                    split = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (pat_src, repl_src) = match split {
+            Some(i) => (&spec[..i], &spec[i + 1..]),
+            None => (spec, ""),
+        };
+        let pattern = expand_dollars(pat_src)?;
+        let replacement = expand_dollars(repl_src)?;
+        return Ok(replace_pattern(value, &pattern, &replacement, mode));
+    }
+    // Case conversion: `^`/`^^` upper, `,`/`,,` lower; the doubled form
+    // converts every character, the single form just the first. An
+    // optional trailing pattern restricts which characters convert
+    // (`${v^^[a-f]}`), defaulting to `?` (any).
+    for (op, upper, all) in [("^^", true, true), ("^", true, false), (",,", false, true), (",", false, false)] {
+        if let Some(pat_src) = rest.strip_prefix(op) {
+            let pattern = if pat_src.is_empty() { "?".to_string() } else { expand_dollars(pat_src)? };
+            return Ok(case_convert(value, &pattern, upper, all));
+        }
+    }
+    // Substring: `${v:offset}` / `${v:offset:length}` — both sides are
+    // full arithmetic expressions. Negative offset counts from the end
+    // (out of range → empty, matching bash); negative length means "up
+    // to that many characters before the end", and one that lands before
+    // the offset is an error (bash: "substring expression < 0").
+    if let Some(spec) = rest.strip_prefix(':') {
+        let (off_src, len_src) = match spec.find(':') {
+            Some(i) => (&spec[..i], Some(&spec[i + 1..])),
+            None => (spec, None),
+        };
+        let off = crate::arith::eval(&expand_dollars(off_src)?)?;
+        let chars: Vec<char> = value.chars().collect();
+        let n = chars.len() as i64;
+        let start = if off < 0 { (n + off).max(0).min(n) } else { off.min(n) };
+        let end = match len_src {
+            None => n,
+            Some(src) => {
+                let len = crate::arith::eval(&expand_dollars(src)?)?;
+                if len < 0 {
+                    let end = n + len;
+                    if end < start {
+                        return Err(format!("{len}: substring expression < 0"));
+                    }
+                    end
+                } else {
+                    (start + len).min(n)
+                }
+            }
+        };
+        // A negative offset past the front of the string is empty in
+        // bash (`${v: -10}` of `abc` → ``), not the whole string.
+        if off < 0 && n + off < 0 {
+            return Ok(String::new());
+        }
+        return Ok(chars[start as usize..end.max(start) as usize].iter().collect());
+    }
+    Err(format!("bad substitution: {rest}"))
+}
+
+/// `${v/pat/repl}`'s engine: replace the longest match of a glob
+/// `pattern` at the earliest position (`F`), every non-overlapping such
+/// match (`A`), or an anchored prefix (`P`)/suffix (`S`) match.
+fn replace_pattern(value: &str, pattern: &str, replacement: &str, mode: char) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let n = chars.len();
+    let matches_range = |from: usize, to: usize| {
+        let s: String = chars[from..to].iter().collect();
+        crate::glob::match_component(pattern, &s)
+    };
+    match mode {
+        'P' => {
+            for j in (0..=n).rev() {
+                if matches_range(0, j) {
+                    let rest: String = chars[j..].iter().collect();
+                    return format!("{replacement}{rest}");
+                }
+            }
+            value.to_string()
+        }
+        'S' => {
+            for i in 0..=n {
+                if matches_range(i, n) {
+                    let head: String = chars[..i].iter().collect();
+                    return format!("{head}{replacement}");
+                }
+            }
+            value.to_string()
+        }
+        _ => {
+            let mut out = String::new();
+            let mut i = 0;
+            let mut replaced = false;
+            while i < n {
+                let hit = (!replaced || mode == 'A')
+                    .then(|| (i..=n).rev().find(|&j| matches_range(i, j)))
+                    .flatten();
+                match hit {
+                    Some(j) => {
+                        out.push_str(replacement);
+                        replaced = true;
+                        if j == i {
+                            out.push(chars[i]);
+                            i += 1;
+                        } else {
+                            i = j;
+                        }
+                    }
+                    None => {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+            }
+            // A pattern that only matches the empty string at the very
+            // end (or an empty value with a match-empty pattern).
+            if n == 0 && (!replaced || mode == 'A') && matches_range(0, 0) {
+                out.push_str(replacement);
+            }
+            out
+        }
+    }
+}
+
+/// `${v^}`/`${v^^}`/`${v,}`/`${v,,}`: case-convert the first (`all ==
+/// false`) or every (`all == true`) character whose single-character
+/// glob `pattern` matches it.
+fn case_convert(value: &str, pattern: &str, upper: bool, all: bool) -> String {
+    let mut out = String::new();
+    for (i, c) in value.chars().enumerate() {
+        let eligible = (all || i == 0) && crate::glob::match_component(pattern, &c.to_string());
+        if eligible {
+            if upper {
+                out.extend(c.to_uppercase());
+            } else {
+                out.extend(c.to_lowercase());
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `${var#pattern}` (shortest) / `${var##pattern}` (longest, `greedy`): strip

@@ -1543,3 +1543,15 @@ real recursive descent — output byte-identical to bash on shared
 fixtures, including the `a/` zero-level quirk. `extglob` defaults on
 (C57) and is genuinely toggleable. Without globstar, `**` keeps
 collapsing to `*` as before. Adds 1 integration test.
+
+### New: string transformation operators — `${v/pat/repl}`, `${v:off:len}`, `${v^^}` (C59)
+The most commonly used missing `${...}` family, all previously "bad
+substitution". Search/replace (`/`, `//`, `/#`, `/%`; longest match at
+the earliest position, unescaped-slash split, glob patterns via the
+shared matcher), substrings (full arithmetic on both sides, negative
+offset/length with bash's exact edge behaviors and error message), case
+conversion (`^`/`^^`/`,`/`,,` with the optional pattern restriction),
+and the array-wide forms — where `${arr[@]:off:len}` turned out to be
+array *slicing*, a different operation, caught by direct comparison.
+Verified against bash byte-for-byte across ~40 cases; adds 2
+integration tests.

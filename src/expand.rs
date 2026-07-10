@@ -1489,6 +1489,42 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         });
     }
 
+    // `${!prefix@}` / `${!prefix*}` — every variable name starting with
+    // `prefix`, sorted (C60); joined like `$@`/`$*` would join.
+    if let Some(rest0) = inner.strip_prefix('!')
+        && let Some((prefix, star)) = rest0
+            .strip_suffix('@')
+            .map(|p| (p, false))
+            .or_else(|| rest0.strip_suffix('*').map(|p| (p, true)))
+        && !prefix.is_empty()
+        && is_valid_name(prefix)
+    {
+        let mut names: Vec<String> =
+            crate::vars::names().into_iter().filter(|n| n.starts_with(prefix)).collect();
+        names.sort();
+        return Ok(if star { names.join(&Ifs::current().star_sep) } else { names.join(" ") });
+    }
+
+    // `${!var}` — indirect expansion (C60): `$var`'s own value names the
+    // parameter to expand (a variable name or a positional-parameter
+    // number). Any trailing operators compose by re-dispatching through
+    // this same function (`${!v:-def}` applies the default to the
+    // *referent*, matching bash).
+    if let Some(rest0) = inner.strip_prefix('!') {
+        let name_end =
+            rest0.find(|c: char| !(c == '_' || c.is_ascii_alphanumeric())).unwrap_or(rest0.len());
+        let (target, ops) = (&rest0[..name_end], &rest0[name_end..]);
+        if is_valid_name(target) {
+            let referent = var_lookup_checked(target)?;
+            if referent.is_empty() {
+                // bash: an empty/unset referent is a hard error, not an
+                // empty expansion (verified: `w=; echo "${!w}"` aborts).
+                return Err(format!("{target}: invalid variable name"));
+            }
+            return expand_braced(&format!("{referent}{ops}"));
+        }
+    }
+
     // Special parameters: `${#}`, `${@}`/`${*}`, and numeric `${10}`.
     match inner {
         "#" => return Ok(crate::vars::arg_count().to_string()),
@@ -1625,6 +1661,19 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         return Ok(strip_suffix_pattern(&var_lookup_checked(name)?, &pattern, false));
     }
 
+    // `${v@Q}` / `@E` / `@a` / `@A` — bash 4.4's parameter transformations
+    // (C60): shell-requote, ANSI-C unescape, attribute letters, and
+    // reconstruct-as-assignment.
+    if let Some(op) = rest.strip_prefix('@') {
+        return match op {
+            "Q" => Ok(shell_quote(&var_lookup_checked(name)?)),
+            "E" => Ok(ansi_unescape(&var_lookup_checked(name)?)),
+            "a" => Ok(attr_letters(name)),
+            "A" => Ok(reconstruct_assignment(name)),
+            _ => Err(format!("${{{inner}}}: bad substitution")),
+        };
+    }
+
     // String transformations (C59): `${v/pat/repl}` (and `//`, `/#`, `/%`),
     // `${v:offset[:length]}` substrings, and `${v^}`/`${v^^}`/`${v,}`/
     // `${v,,}` case conversion. Checked before the `:-` default family —
@@ -1673,6 +1722,121 @@ fn expand_braced(inner: &str) -> Result<String, String> {
             }
         }
         _ => Err(format!("${{{inner}}}: bad substitution")),
+    }
+}
+
+/// `${v@Q}` (C60): re-quote a value so it can be reused as shell input —
+/// single quotes normally (with the `'\''` dance for embedded quotes),
+/// or bash's `$'...'` form when control characters are present, matching
+/// bash's own output format (verified).
+fn shell_quote(value: &str) -> String {
+    if value.chars().any(|c| c.is_control()) {
+        let mut out = String::from("$'");
+        for c in value.chars() {
+            match c {
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                '\\' => out.push_str("\\\\"),
+                '\'' => out.push_str("\\'"),
+                c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// `${v@E}` (C60): interpret backslash escapes the way `$'...'` would.
+fn ansi_unescape(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('a') => out.push('\x07'),
+            Some('b') => out.push('\x08'),
+            Some('f') => out.push('\x0c'),
+            Some('v') => out.push('\x0b'),
+            Some('e') | Some('E') => out.push('\x1b'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// `${v@a}` (C60): the variable's attribute letters — `a`/`A` for the
+/// array kinds, plus C43/C45's declared attributes (`i`, `l`, `u`, `r`),
+/// in bash's own letter set.
+fn attr_letters(name: &str) -> String {
+    let mut out = String::new();
+    if crate::vars::is_indexed_array(name) {
+        out.push('a');
+    }
+    if crate::vars::is_assoc(name) {
+        out.push('A');
+    }
+    let attrs = crate::vars::attrs_of(name);
+    if attrs.integer {
+        out.push('i');
+    }
+    if attrs.lower {
+        out.push('l');
+    }
+    if attrs.readonly {
+        out.push('r');
+    }
+    if attrs.upper {
+        out.push('u');
+    }
+    out
+}
+
+/// `${v@A}` (C60): an assignment (or `declare` command) that would
+/// recreate the variable — `name='value'` when attribute-free, a
+/// `declare -flags` form otherwise (arrays use the modern element-list
+/// format, a documented divergence from older bash's odd scalarized
+/// array output).
+fn reconstruct_assignment(name: &str) -> String {
+    let flags = attr_letters(name);
+    if crate::vars::is_indexed_array(name) || crate::vars::is_assoc(name) {
+        let elems: Vec<String> = if crate::vars::is_assoc(name) {
+            crate::vars::assoc_keys(name)
+                .into_iter()
+                .map(|k| {
+                    let v = crate::vars::assoc_get(name, &k).unwrap_or_default();
+                    format!("[{k}]={}", shell_quote(&v))
+                })
+                .collect()
+        } else {
+            crate::vars::array_indices(name)
+                .into_iter()
+                .map(|i| format!("[{i}]={}", shell_quote(&crate::vars::array_get(name, i).unwrap_or_default())))
+                .collect()
+        };
+        return format!("declare -{flags} {name}=({})", elems.join(" "));
+    }
+    let value = shell_quote(&crate::vars::get(name).unwrap_or_default());
+    if flags.is_empty() {
+        format!("{name}={value}")
+    } else {
+        format!("declare -{flags} {name}={value}")
     }
 }
 

@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (15 done, 8 open — C60–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (16 done, 7 open — C61–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C59 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C60 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-14 are open.
+13 are open.
 
 ---
 
@@ -2510,7 +2510,7 @@ family (a leading `:` is currently always read as one of those); case
 conversion is the cheapest of the three, a straightforward char-map.
 Array-wide application is a small M on top of the scalar case existing.
 
-### C60 — Indirect expansion `${!var}`, name-listing `${!prefix@}`, transformation operators `${v@Q}` (tracked)
+### C60 — Indirect expansion `${!var}`, name-listing `${!prefix@}`, transformation operators `${v@Q}` ✅ done
 Rarer, more bash-specific siblings of C59, sharing the same
 `expand_braced` dispatch point and the same `bad substitution` failure
 mode. `${!var}` (expand to the value of the variable *named by* `$var`'s
@@ -2528,6 +2528,28 @@ directly, just prefix-filtered. **Effort: M** for the `@`-transforms,
 lower priority given how rarely they appear outside debugging/
 serialization helpers, and `@A`/`@a` specifically depend on attribute
 introspection that's cheaper once C43/C45's attribute-flag work exists.
+
+Implemented, all three groups. `${!var}` dereferences to a variable
+name *or* a positional-parameter number, and trailing operators compose
+by re-dispatching through `expand_braced` itself — so `${!v:-def}`,
+`${!v/pat/repl}`, and every other operator apply to the *referent* with
+zero extra code (verified against bash). An empty referent is a hard
+"invalid variable name" error, matching bash exactly (not an empty
+expansion). `${!prefix@}`/`${!prefix*}` reuse `vars::names()` as the
+sketch predicted, sorted and joined like `$@`/`$*`. The `@`-transforms
+landed too, and the prediction about C43/C45 held: `@a` reads the
+attribute flags (`declare -ir n=5` → `ir`) plus the array kinds, and
+`@A` reconstructs `name='value'` or a `declare -flags` form on top of
+`@Q` — whose output format matches bash's exactly (single quotes with
+the `'\''` dance, or `$'...'` when control characters are present).
+`@E` interprets the `$'...'` escape set. Documented narrowings: `@A`'s
+array form uses the modern element-list format (this container's older
+bash prints a strange scalarized form), and the `@`-transforms apply to
+scalars (not `${arr[@]@Q}` element-wise). One adjacent observation for
+the record: `$'...'` ANSI-C quoting itself is *not implemented and not
+tracked by any item* — `w=$'a\nb'` assigns the literal text — noted
+here rather than silently skipped. Two integration tests cover the
+matrix.
 
 ### C61 — `mapfile` / `readarray` (tracked)
 Bash-only (no equivalent spelling in zsh/ksh93, which use `arr=("${(@f)$(...)}")`/`read -A`

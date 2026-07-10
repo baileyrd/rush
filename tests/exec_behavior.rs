@@ -2618,3 +2618,40 @@ fn array_wide_transformations_and_slicing() {
     let (out, _) = rush(r#"arr=(a b c d); echo "${arr[@]:1:2}"; echo "${arr[@]: -1}"; echo "${arr[@]:2}""#);
     assert_eq!(out, "b c\nd\nc d\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn indirect_expansion_and_name_listing() {
+    // C60: `${!var}` double-dereference (a name or a positional number),
+    // composing with trailing operators; `${!prefix@}` name listing.
+    let (out, _) = rush(r#"x=hello; v=x; echo "${!v}"; set -- one two; n=2; echo "${!n}"; echo "${!v:-def}""#);
+    assert_eq!(out, "hello\ntwo\nhello\n");
+
+    let (out, _) = rush(r#"FOO_A=1; FOO_B=2; echo "${!FOO_@}""#);
+    assert_eq!(out, "FOO_A FOO_B\n");
+
+    // A referent that names an unset variable is empty; an *empty*
+    // referent is a hard error (both verified against bash).
+    let (out, _) = rush(r#"u=nosuchvar_c60; echo "[${!u}]""#);
+    assert_eq!(out, "[]\n");
+    let (_, status) = rush(r#"w=; echo "${!w}""#);
+    assert_eq!(status, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn at_transformations() {
+    // C60: ${v@Q}/@E/@a/@A. Formats verified against bash (@A's array
+    // form uses the modern element-list format, documented).
+    let (out, _) = rush(r#"v="it's a \"test\""; echo "${v@Q}"; w=$(printf "a\nb"); echo "${w@Q}""#);
+    assert_eq!(out, "'it'\\''s a \"test\"'\n$'a\\nb'\n");
+
+    let (out, _) = rush(r#"v="a\tb"; e="${v@E}"; printf "%s|\n" "$e""#);
+    assert_eq!(out, "a\tb|\n");
+
+    let (out, _) = rush(r#"declare -ir n=5; echo "${n@a}"; arr=(a b); echo "${arr@a}"; declare -A m; echo "${m@a}"; x=plain; echo "[${x@a}]""#);
+    assert_eq!(out, "ir\na\nA\n[]\n");
+
+    let (out, _) = rush(r#"x="hi there"; echo "${x@A}"; declare -r r=5; echo "${r@A}""#);
+    assert_eq!(out, "x='hi there'\ndeclare -r r='5'\n");
+}

@@ -468,6 +468,11 @@ pub fn get(name: &str) -> Option<String> {
 /// interpreted everywhere else (arithmetic index vs. literal string key;
 /// see `key_set`/`key_append` and `expand::eval_subscript_for`). `false`
 /// for a scalar, an indexed array, or an unset name.
+/// Whether `name` is currently an *indexed* array (`${v@a}`'s `a`, C60).
+pub fn is_indexed_array(name: &str) -> bool {
+    VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Array(_))))
+}
+
 pub fn is_assoc(name: &str) -> bool {
     VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Assoc(_))))
 }

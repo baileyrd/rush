@@ -1555,3 +1555,14 @@ and the array-wide forms — where `${arr[@]:off:len}` turned out to be
 array *slicing*, a different operation, caught by direct comparison.
 Verified against bash byte-for-byte across ~40 cases; adds 2
 integration tests.
+
+### New: indirect expansion `${!var}`, name listing `${!prefix@}`, and `@`-transforms (C60)
+`${!var}` dereferences to a name or positional number, with trailing
+operators composing by re-dispatch (`${!v:-def}` applies to the
+referent); an empty referent is bash's hard "invalid variable name"
+error. `${!prefix@}`/`${!prefix*}` list matching names sorted. `@Q`
+requotes in bash's exact format (`'\''` dance, `$'...'` for control
+chars); `@E` unescapes; `@a` reads C43/C45's attribute flags plus array
+kinds; `@A` reconstructs an assignment/`declare`. Noted for the record:
+`$'...'` ANSI-C quoting itself is an untracked, unimplemented gap.
+Adds 2 integration tests.

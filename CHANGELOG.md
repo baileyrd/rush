@@ -1601,3 +1601,14 @@ characters — and rush couldn't re-read it (`w=$'a\nb'` assigned the
 literal text; recorded as an untracked gap in C60's write-up). `$'...'`
 now lexes as a literal with the `@E` escape set interpreted at lex
 time, verified against bash; `%q` round-trips through `eval`.
+
+### New: job-control niceties — `jobs -l`/`-p`, `kill -l`, `wait -n`, `disown` (C64)
+The signal table grew from seven names to twenty-one (`kill -USR1 %1`
+works; `kill -l` lists and converts both directions); `jobs -l`/`-p`
+format the existing table; `wait -n` blocks until whichever child
+exits next (the worker-pool idiom), 127 with none left; `disown` drops
+a job from the table. Riding along: trapping the newly-nameable
+signals now actually installs a handler — `trap 'cmd' USR1` used to
+register and then die on delivery; dispositions are now synced
+dynamically on trap set/unset for the catchable non-job-control set.
+Adds 1 integration test.

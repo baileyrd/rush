@@ -169,7 +169,7 @@ applicable to that shell's own model.
 | `#`/`##`/`%`/`%%` param. expansion | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | `read` / `printf` / `shift` / `getopts` | ✅† | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | `local` function-scoped vars | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `wait` / `disown` | 🟡‡ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `wait` / `disown` | ✅‡ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `source` / `.` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `eval` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `exec` (process replacement) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -200,8 +200,8 @@ among several *inside* a `$(...)` substitution, or on non-Unix, still errors.
 splitting) and `printf` (sans `%e`/`%f`/`%g`) are otherwise complete;
 `shift`/`getopts` are full.
 
-‡ `wait` (`pid`/`%job`, or none) is done, along with its `$!` prerequisite;
-`disown` remains missing.
+‡ `wait` (`pid`/`%job`/`-n`, or none) is done, along with its `$!`
+prerequisite; `disown` is done too (C64).
 
 § `-e`, `-u`, `-o pipefail`, and `-x` are all done; `-x`'s trace doesn't
 cover a compound's own header line (`for i in 1 2`, `case a in`), only the
@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (19 done, 4 open — C64–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (20 done, 3 open — C65–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C63 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C64 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-10 are open.
+9 are open.
 
 ---
 
@@ -2635,7 +2635,7 @@ couldn't re-read it. `$'...'` now lexes as a literal with the `@E`
 escape set interpreted at lex time, verified against bash. One
 integration test.
 
-### C64 — Job-control niceties: `jobs -l`/`-p`, `kill -l` + a fuller signal table, `wait -n`, `disown` (tracked)
+### C64 — Job-control niceties: `jobs -l`/`-p`, `kill -l` + a fuller signal table, `wait -n`, `disown` ✅ done
 A cluster of small, independently shippable job-control completeness
 gaps, all present in bash and mostly in zsh/ksh93 (`wait -n` is
 bash-only; the doc's own comparison matrix already flags `disown` as the
@@ -2658,6 +2658,29 @@ existing job table using the same `%job`/current-job selection logic
 `fg`/`bg` already have; `wait -n` needs a small extension to the existing
 blocking-wait loop to stop at whichever tracked pid exits first instead
 of a specific one (**S–M**).
+
+Implemented, the whole cluster. `jobs -l` adds the pgid to each line
+and `-p` prints pgids alone (pure formatting over the existing table,
+as predicted). The `kill`/`trap` signal table grew from seven names to
+twenty-one (each mapped to its real `libc` constant), so `kill -USR1
+%1` works; `kill -l` lists the numbered table, and `kill -l TERM` /
+`kill -l 15` convert in both directions. `wait -n` blocks on
+`waitpid(-1)` until whichever child exits next, records it through the
+existing bookkeeping, and returns its status (127 with no children
+left) — verified with the worker-pool shape it exists for. `disown`
+drops the selected (or most recent) job from the table via the same
+`%job` selection `fg`/`bg` use.
+
+One genuinely behavioral piece rode along: **registering a trap for
+the newly-nameable signals now actually installs a handler** —
+`trap 'cmd' USR1` used to register and then die on delivery (only
+`TERM`/`HUP` had handlers installed at startup). `trap::set`/`unset`
+now install/restore the disposition dynamically for the catchable,
+non-job-control set (`QUIT`/`ABRT`/`ALRM`/`USR1`/`USR2`/`PIPE`), with
+delivery-side naming switched to the shared `libc`-constant table;
+`INT` stays with the interactive machinery and the stop signals are
+deliberately untouched. One integration test covers the cluster,
+including a delivered `USR1` firing its trap.
 
 ### C65 — `trap DEBUG` / `trap RETURN`, and `trap -l`/`trap -p` (tracked)
 Present in bash/ksh93/zsh (not POSIX/dash) — distinct from C44 (a real

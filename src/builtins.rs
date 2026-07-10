@@ -53,7 +53,7 @@ pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "declare",
-    "readonly",
+    "typeset", "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up

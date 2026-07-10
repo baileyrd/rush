@@ -972,7 +972,9 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
 fn dispatch_builtin(cmd: &Command) -> i32 {
     match cmd.argv.first().map(String::as_str) {
         Some("local") => builtins::local_from_decls(&cmd.local_decls, cmd.decl_attrs),
-        Some("declare") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
+        // `typeset` is ksh/zsh's own spelling of `declare` (C49) — ksh93
+        // has *only* typeset; bash and zsh accept both as synonyms.
+        Some("declare") | Some("typeset") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
         Some("readonly") => builtins::readonly_from_decls(&cmd.local_decls, cmd.decl_attrs),
         _ => builtins::try_run(&cmd.argv).unwrap_or(1),
     }

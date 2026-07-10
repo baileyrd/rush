@@ -47,7 +47,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Redirection (`>`, `>>`, `<`, `2>`, `2>&1`, `&>`) | ✅ | per-fd to files, any fd (`3>file`, `4<&5`); fd duplication (`> f 2>&1`); `&>` both streams |
 | Here-documents (`<<`) / here-strings (`<<<`) | ✅ | `<<EOF`, `<<-EOF` (tab-strip), `<<'EOF'` (no expansion); `cmd <<< "$var"` |
 | Process substitution | ✅ | `<(cmd)`/`>(cmd)` via a real pipe + `/dev/fd/N`, non-blocking and concurrent (Unix only) |
-| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`, `readonly`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask`/`ulimit` on Unix) |
+| Builtins | ✅ | `cd`, `pwd`, `echo`, `export`, `unset`, `test`/`[ ]`, `true`, `false`, `:`, `break`/`continue`/`return`, `exit`, `alias`/`unalias`, `set`, `trap`, `read`, `printf`, `shift`, `local`, `declare`/`typeset`, `readonly`, `getopts`, `command`, `type`, `hash`, `.`/`source`, `eval` (+ `jobs`/`fg`/`bg`/`kill`/`wait`/`exec`/`umask`/`ulimit` on Unix) |
 | Aliases | ✅ | `alias name=value`; a single, non-recursive substitution at command-word position |
 | `set -e` (errexit) | ✅ | a failing command exits the shell; exempts `if`/`while`/`until` conditions; clustered flags (`set -euo pipefail`) parse as in bash |
 | `set -u` (nounset) | ✅ | referencing an unset variable is an error; `:-`/`:=`/`:+`/`:?` and `$@`/`$*`/`$#`/`$?`/`$$` are exempt |

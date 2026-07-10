@@ -1781,6 +1781,28 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 /// command to stderr before running it (see `exec::trace_command`). Other
 /// flags/`-o` names aren't implemented yet; naming one is an error rather
 /// than a silently-ignored no-op.
+/// `set -o` (bare) / `set +o` (bare) — list every tracked option (C52):
+/// the `-o` spelling in bash's own `name<padding>on|off` table format,
+/// the `+o` spelling as directly re-runnable `set -o name`/`set +o name`
+/// lines (both formats verified against real bash).
+fn list_options(dash_spelling: bool) {
+    let options: &[(&str, bool)] = &[
+        ("errexit", crate::vars::errexit()),
+        ("noclobber", crate::vars::noclobber()),
+        ("noexec", crate::vars::noexec()),
+        ("nounset", crate::vars::nounset()),
+        ("pipefail", crate::vars::pipefail()),
+        ("xtrace", crate::vars::xtrace()),
+    ];
+    for (name, on) in options {
+        if dash_spelling {
+            println!("{:<15}\t{}", name, if *on { "on" } else { "off" });
+        } else {
+            println!("set {}o {name}", if *on { "-" } else { "+" });
+        }
+    }
+}
+
 fn set_cmd(argv: &[String]) -> i32 {
     // Flag changes are collected first and only applied once the *whole*
     // invocation has validated — an invalid flag anywhere means nothing is
@@ -1849,15 +1871,28 @@ fn set_cmd(argv: &[String]) -> i32 {
                 for c in other[1..].chars() {
                     match c {
                         'e' | 'u' | 'x' | 'C' | 'n' => pending.push((c, on)),
+                        // `-o name` — the long spellings (C52), mapped to
+                        // the same letters the short forms queue. A bare
+                        // `set -o`/`set +o` (no name following) lists every
+                        // tracked option instead: current on/off state for
+                        // `-o`, a directly re-runnable `set -o name`/`set +o
+                        // name` line for `+o` — both matching real bash's
+                        // own formats exactly.
                         'o' => match args.next().map(String::as_str) {
+                            Some("errexit") => pending.push(('e', on)),
+                            Some("nounset") => pending.push(('u', on)),
+                            Some("xtrace") => pending.push(('x', on)),
+                            Some("noclobber") => pending.push(('C', on)),
+                            Some("noexec") => pending.push(('n', on)),
                             Some("pipefail") => pending.push(('p', on)),
                             Some(name) => {
                                 eprintln!("set: {name}: invalid option name");
                                 return 1;
                             }
                             None => {
-                                eprintln!("{}: option requires an argument -- 'o'", argv[0]);
-                                return 1;
+                                apply(&pending);
+                                list_options(on);
+                                return 0;
                             }
                         },
                         _ => {

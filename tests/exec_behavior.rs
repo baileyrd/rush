@@ -2315,3 +2315,32 @@ fn rush_dash_n_is_syntax_check_only() {
     assert_eq!(output.status.code(), Some(0));
     let _ = std::fs::remove_file(&f);
 }
+
+#[cfg(unix)]
+#[test]
+fn set_o_long_names_and_listing() {
+    // C52: long spellings map to the same flags as the short forms.
+    let (out, status) = rush("set -o errexit; false; echo nope");
+    assert_eq!((out.as_str(), status), ("", 1));
+    let (out, _) = rush("set -o nounset; echo ${UNSET_C52-fallback}; set +o nounset; echo ok$UNSET_C52");
+    assert_eq!(out, "fallback\nok\n");
+
+    // Bare `set -o`: bash's own name/on-off table (format verified
+    // byte-identical to bash over the tracked options).
+    let (out, _) = rush("set -o errexit; set -o");
+    assert!(out.lines().any(|l| l == "errexit        \ton"), "got: {out:?}");
+    assert!(out.lines().any(|l| l == "pipefail       \toff"), "got: {out:?}");
+
+    // Bare `set +o`: directly re-runnable lines.
+    let (out, _) = rush("set -o pipefail; set +o");
+    assert!(out.lines().any(|l| l == "set -o pipefail"), "got: {out:?}");
+    assert!(out.lines().any(|l| l == "set +o errexit"), "got: {out:?}");
+
+    // Round-trip: `set +o` output re-runs cleanly.
+    let (out, _) = rush("set -o noclobber; saved=$(set +o); set +o noclobber; eval \"$saved\"; echo [$-]");
+    assert_eq!(out, "[C]\n");
+
+    let (err, status) = rush_stderr("set -o badname");
+    assert!(err.contains("badname: invalid option name"), "got: {err:?}");
+    assert_eq!(status, 1);
+}

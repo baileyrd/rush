@@ -59,6 +59,11 @@ pub struct Attrs {
     /// errors, and `${z+set}` stays empty until then — verified against
     /// real bash).
     pub readonly: bool,
+    /// `declare -n`/`local -n` (C62): the declared names become namerefs.
+    /// Carried through `Command::decl_attrs` only — never stored in the
+    /// `ATTRS` map (`set_attrs` doesn't copy it); the actual ref → target
+    /// mapping lives in `NAMEREFS`.
+    pub nameref: bool,
 }
 
 impl Attrs {
@@ -179,6 +184,11 @@ thread_local! {
     // user has explicitly toggled; `shopt()` falls back to the defaults
     // table for the rest.
     static SHOPTS: RefCell<HashMap<&'static str, bool>> = RefCell::new(HashMap::new());
+    // Nameref variables (`declare -n`, C62): ref name → target name. An
+    // empty target means "declared a nameref, target not chosen yet" —
+    // the next plain assignment to the ref *names* the target instead of
+    // writing through (matching bash).
+    static NAMEREFS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
@@ -187,7 +197,7 @@ type PriorValue = Option<(VarValue, bool)>;
 /// One function call's set of `local`-shadowed names, in declaration order,
 /// each with the prior value and the prior declared attributes (C43) to
 /// restore on return.
-type LocalFrame = Vec<(String, PriorValue, Attrs)>;
+type LocalFrame = Vec<(String, PriorValue, Attrs, Option<String>)>;
 
 pub fn set_errexit(on: bool) {
     ERREXIT.with(|e| *e.borrow_mut() = on);
@@ -246,6 +256,41 @@ pub fn set_shopt(name: &str, on: bool) -> bool {
     };
     SHOPTS.with(|m| m.borrow_mut().insert(canonical, on));
     true
+}
+
+/// Follow nameref indirection (C62): the name every read/write of
+/// `name` actually lands on. Chains follow up to a small depth cap
+/// (bash warns on circular references; rush just stops following).
+pub fn resolve_name(name: &str) -> String {
+    let mut current = name.to_string();
+    for _ in 0..8 {
+        let next = NAMEREFS.with(|m| m.borrow().get(&current).cloned());
+        match next {
+            Some(t) if !t.is_empty() && t != current => current = t,
+            _ => break,
+        }
+    }
+    current
+}
+
+/// Declare `ref` as a nameref to `target` (`declare -n ref=target`,
+/// C62). An empty `target` records a nameref whose target the next
+/// plain assignment will choose.
+pub fn set_nameref(refname: &str, target: &str) {
+    NAMEREFS.with(|m| {
+        m.borrow_mut().insert(refname.to_string(), target.to_string());
+    });
+}
+
+/// `ref`'s recorded nameref target, if it is one.
+pub fn nameref_target(refname: &str) -> Option<String> {
+    NAMEREFS.with(|m| m.borrow().get(refname).cloned())
+}
+
+fn clear_nameref(refname: &str) {
+    NAMEREFS.with(|m| {
+        m.borrow_mut().remove(refname);
+    });
 }
 
 pub fn set_noexec(on: bool) {
@@ -454,6 +499,8 @@ pub fn set_last_bg_pid(pid: i32) {
 /// absent if that particular slot isn't set, same as any other unset
 /// variable.
 pub fn get(name: &str) -> Option<String> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Scalar(s) => Some(s.clone()),
@@ -470,10 +517,14 @@ pub fn get(name: &str) -> Option<String> {
 /// for a scalar, an indexed array, or an unset name.
 /// Whether `name` is currently an *indexed* array (`${v@a}`'s `a`, C60).
 pub fn is_indexed_array(name: &str) -> bool {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Array(_))))
 }
 
 pub fn is_assoc(name: &str) -> bool {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Assoc(_))))
 }
 
@@ -482,6 +533,8 @@ pub fn is_assoc(name: &str) -> bool {
 /// real bash too, verified directly: `declare -u u=x; unset u; u=abc`
 /// leaves `abc` untransformed).
 pub fn unset(name: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if is_readonly(name) {
         return; // the `unset` builtin pre-checks and prints; nothing else may drop a readonly name
     }
@@ -637,6 +690,15 @@ fn transformed(name: &str, value: &str) -> Option<String> {
 /// `arr[1]`/`arr[2]` alone, verified directly for both array kinds); a
 /// plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
+    // A nameref declared without a target (`declare -n ref; ref=x`):
+    // this assignment *names* the target rather than writing through
+    // (verified against bash, C62).
+    if nameref_target(name).as_deref() == Some("") {
+        set_nameref(name, value);
+        return;
+    }
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -668,6 +730,8 @@ pub fn set(name: &str, value: &str) {
 /// `exported`), so this niche interaction with a pre-existing array isn't
 /// specially handled.
 pub fn set_exported(name: &str, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -682,6 +746,8 @@ pub fn set_exported(name: &str, value: &str) {
 /// Mark an existing (or newly-created, empty scalar) variable exported
 /// (`export NAME`).
 pub fn export(name: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow_mut()
             .entry(name.to_string())
@@ -696,6 +762,8 @@ pub fn export(name: &str) {
 /// (arrays are never actually exported — see `exported` — but there's no
 /// reason to drop the flag if a future export-arrays feature needs it).
 pub fn set_array(name: &str, elements: Vec<String>) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -719,6 +787,8 @@ pub fn set_array(name: &str, elements: Vec<String>) {
 /// associative-array analogue of `set_array`. Later pairs win over earlier
 /// ones for a repeated key, matching an ordinary map build.
 pub fn set_assoc(name: &str, pairs: Vec<(String, String)>) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -736,6 +806,8 @@ pub fn set_assoc(name: &str, pairs: Vec<(String, String)>) {
 /// for any other index. `None` for an associative array too — that's what
 /// `assoc_get` is for (see `is_assoc`, which callers check first).
 pub fn array_get(name: &str, index: usize) -> Option<String> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Array(a) => a.get(&index).cloned(),
@@ -748,6 +820,8 @@ pub fn array_get(name: &str, index: usize) -> Option<String> {
 /// `${arr[key]}` — a specific associative-array element (`None` if unset,
 /// or if `name` isn't actually an associative array).
 pub fn assoc_get(name: &str, key: &str) -> Option<String> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Assoc(a) => a.get(key).cloned(),
@@ -762,6 +836,8 @@ pub fn assoc_get(name: &str, key: &str) -> Option<String> {
 /// ultimately just need "every value in this map," regardless of what the
 /// keys look like.
 pub fn array_values(name: &str) -> Vec<String> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow()
             .get(name)
@@ -778,6 +854,8 @@ pub fn array_values(name: &str) -> Vec<String> {
 /// a sparse array are skipped entirely, not listed); `[0]` for a plain
 /// scalar. See `assoc_keys` for an associative array's own version.
 pub fn array_indices(name: &str) -> Vec<usize> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow()
             .get(name)
@@ -795,6 +873,8 @@ pub fn array_indices(name: &str) -> Vec<usize> {
 /// this is a strictly more predictable superset, not a behavior being
 /// matched exactly; see `VarValue`'s own doc comment).
 pub fn assoc_keys(name: &str) -> Vec<String> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow()
             .get(name)
@@ -812,6 +892,8 @@ pub fn assoc_keys(name: &str) -> Vec<String> {
 /// unset name as 0. Shared between indexed and associative arrays, same
 /// reasoning as `array_values`.
 pub fn array_len(name: &str) -> usize {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         v.borrow()
             .get(name)
@@ -830,6 +912,8 @@ pub fn array_len(name: &str) -> usize {
 /// `index` itself *is* 0, which just overwrites it) — both verified
 /// directly against real bash.
 pub fn array_set(name: &str, index: usize, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -871,6 +955,8 @@ pub fn array_set(name: &str, index: usize, value: &str) {
 /// nothing to append *to*), same auto-vivify/scalar-promotion rules as
 /// `array_set`, both verified directly against real bash.
 pub fn array_append_index(name: &str, index: usize, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -907,6 +993,8 @@ pub fn array_append_index(name: &str, index: usize, value: &str) {
 /// to an array first, its old value kept at index 0, then the new elements
 /// appended from index 1 — matching real bash exactly (verified directly).
 pub fn array_append(name: &str, elements: Vec<String>) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -952,6 +1040,8 @@ pub fn array_append(name: &str, elements: Vec<String>) {
 /// other element untouched. Creates a fresh scalar if `name` didn't exist
 /// yet.
 pub fn append_scalar(name: &str, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -993,6 +1083,8 @@ pub fn append_scalar(name: &str, value: &str) {
 /// an *indexed* array or that index isn't set (see `assoc_unset_key` for
 /// an associative array's own version).
 pub fn array_unset_index(name: &str, index: usize) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         if let Some(var) = v.borrow_mut().get_mut(name)
             && let VarValue::Array(a) = &mut var.value
@@ -1005,6 +1097,8 @@ pub fn array_unset_index(name: &str, index: usize) {
 /// `unset 'arr[key]'` for an associative array — a no-op if `name` isn't
 /// one, or that key isn't set.
 pub fn assoc_unset_key(name: &str, key: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     VARS.with(|v| {
         if let Some(var) = v.borrow_mut().get_mut(name)
             && let VarValue::Assoc(a) = &mut var.value
@@ -1019,6 +1113,8 @@ pub fn assoc_unset_key(name: &str, key: &str) {
 /// entry point; calling this directly on a non-associative name would
 /// silently convert it, which is why it's not `pub`).
 fn assoc_set(name: &str, key: &str, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -1046,6 +1142,8 @@ fn assoc_set(name: &str, key: &str, value: &str) {
 /// `arr[key]+=value` on an associative array — append to that key's own
 /// string (or set it, if nothing's there yet).
 fn assoc_append_key(name: &str, key: &str, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -1074,6 +1172,8 @@ fn assoc_append_key(name: &str, key: &str, value: &str) {
 /// to `-A`'s shape) — but for exhaustiveness/robustness, a `Scalar`/`Array`
 /// target is just replaced outright rather than corrupted in place.
 pub fn assoc_merge(name: &str, pairs: Vec<(String, String)>) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if readonly_rejected(name) {
         return;
     }
@@ -1102,6 +1202,8 @@ pub fn assoc_merge(name: &str, pairs: Vec<(String, String)>) {
 /// `a` as an arithmetic expression (evaluating to 0), *not* a string key —
 /// only `declare -A`/`local -A` unlocks string-keyed subscripts at all.
 pub fn key_set(name: &str, subscript: &str, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if is_assoc(name) {
         assoc_set(name, subscript, value);
     } else if let Some(index) = crate::expand::eval_subscript(subscript) {
@@ -1111,6 +1213,8 @@ pub fn key_set(name: &str, subscript: &str, value: &str) {
 
 /// As [`key_set`], for `arr[subscript]+=value`.
 pub fn key_append(name: &str, subscript: &str, value: &str) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
     if is_assoc(name) {
         assoc_append_key(name, subscript, value);
     } else if let Some(index) = crate::expand::eval_subscript(subscript) {
@@ -1150,7 +1254,7 @@ pub fn pop_local_frame() {
     };
     VARS.with(|v| {
         let mut m = v.borrow_mut();
-        for (name, prior, prior_attrs) in frame {
+        for (name, prior, prior_attrs, prior_nameref) in frame {
             match prior {
                 Some((value, exported)) => {
                     m.insert(name.clone(), Var { value, exported });
@@ -1160,6 +1264,10 @@ pub fn pop_local_frame() {
                 }
             }
             reset_attrs(&name, prior_attrs);
+            match prior_nameref {
+                Some(target) => set_nameref(&name, &target),
+                None => clear_nameref(&name),
+            }
         }
     });
 }
@@ -1228,6 +1336,19 @@ pub fn declare_local_assoc_attrs(name: &str, pairs: Vec<(String, String)>, attrs
     declared
 }
 
+/// `local -n ref[=target]` (C62): a frame-scoped nameref — the mapping
+/// (and any value the name previously had) is restored when the call
+/// returns.
+pub fn declare_local_nameref(name: &str, target: &str) -> bool {
+    let declared = capture_for_local(name);
+    if declared {
+        remove_value(name);
+        reset_attrs(name, Attrs::default());
+        set_nameref(name, target);
+    }
+    declared
+}
+
 /// Shared by `declare_local_attrs`/`declare_local_array_attrs`: capture `name`'s prior
 /// value into the current function call's frame (only the *first* time
 /// this name is made local within that one call — see `declare_local_attrs`'s own
@@ -1242,7 +1363,7 @@ fn capture_for_local(name: &str) -> bool {
         };
         if !frame.iter().any(|(n, ..)| n == name) {
             let prior = VARS.with(|v| v.borrow().get(name).map(|x| (x.value.clone(), x.exported)));
-            frame.push((name.to_string(), prior, attrs_of(name)));
+            frame.push((name.to_string(), prior, attrs_of(name), nameref_target(name)));
         }
         true
     })

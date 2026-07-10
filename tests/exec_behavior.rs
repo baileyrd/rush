@@ -2685,3 +2685,35 @@ fn mapfile_reads_lines_into_an_array() {
 
     let _ = std::fs::remove_file(&f);
 }
+
+#[cfg(unix)]
+#[test]
+fn nameref_variables() {
+    // C62: `declare -n ref=x` used to assign the literal string "x".
+    // Reads and writes now both follow the reference — all verified
+    // against bash.
+    let (out, _) = rush(r#"x=orig; declare -n ref=x; echo "$ref"; ref=changed; echo "$x""#);
+    assert_eq!(out, "orig\nchanged\n");
+
+    // Arrays through a ref, both directions.
+    let (out, _) = rush(r#"declare -n ref=arr; arr=(a b); echo "${ref[1]}"; ref[0]=Z; echo "${arr[0]}""#);
+    assert_eq!(out, "b\nZ\n");
+
+    // The headline use: a function returning through a caller-named
+    // variable (scalar and array), with the local ref frame-scoped.
+    let (out, _) = rush(r#"f(){ local -n out=$1; out="from-f"; }; f result; echo "$result""#);
+    assert_eq!(out, "from-f\n");
+    let (out, _) = rush(r#"f(){ local -n out=$1; out=(a b c); }; f myarr; echo "${myarr[1]} ${#myarr[@]}""#);
+    assert_eq!(out, "b 3\n");
+
+    // `unset ref` unsets the target; the ref keeps referring. A bare
+    // `declare -n ref` lets the next assignment pick the target.
+    let (out, _) = rush(r#"x=1; declare -n r=x; unset r; echo "[${x-gone}]"; r=again; echo "$x""#);
+    assert_eq!(out, "[gone]\nagain\n");
+    let (out, _) = rush(r#"declare -n ref; ref=x; x=5; echo "$ref""#);
+    assert_eq!(out, "5\n");
+
+    // A circular reference stops following instead of hanging.
+    let (out, _) = rush(r#"declare -n a=b; declare -n b=a; echo "[$a]"; echo alive"#);
+    assert_eq!(out, "[]\nalive\n");
+}

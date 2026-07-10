@@ -1056,6 +1056,25 @@ pub(crate) fn local_from_decls(
             status = 1;
             continue;
         }
+        // `local -n out=$1` (C62) — the standard "return through a
+        // caller-named variable" mechanism. The nameref mapping is
+        // frame-scoped: captured and restored by the local machinery.
+        if attrs.nameref {
+            let target = match op {
+                Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Scalar(t))) => t.clone(),
+                None => String::new(),
+                _ => {
+                    eprintln!("local: {name}: invalid nameref declaration");
+                    status = 1;
+                    continue;
+                }
+            };
+            if !crate::vars::declare_local_nameref(name, &target) {
+                eprintln!("local: can only be used in a function");
+                status = 1;
+            }
+            continue;
+        }
         let declared = match op {
             Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Array(elements))) => {
                 crate::vars::declare_local_array_attrs(name, elements.clone(), attrs)
@@ -1094,6 +1113,23 @@ pub(crate) fn declare_from_decls(
 ) -> i32 {
     let mut status = 0;
     for (name, op) in decls {
+        // `declare -n ref[=target]` (C62): record the nameref mapping
+        // instead of assigning a value — `=target` names the referent, a
+        // bare declaration leaves the target for the next plain
+        // assignment to choose (both verified against bash).
+        if attrs.nameref {
+            match op {
+                Some(crate::vars::AssignOp::Set(crate::vars::AssignValue::Scalar(target))) => {
+                    crate::vars::set_nameref(name, target);
+                }
+                None => crate::vars::set_nameref(name, ""),
+                _ => {
+                    eprintln!("rush: {name}: invalid nameref declaration");
+                    status = 1;
+                }
+            }
+            continue;
+        }
         // Re-assigning an already-readonly name fails with status 1 and
         // continues (not fatal) — verified against real bash (C45).
         if op.is_some() && crate::vars::is_readonly(name) {

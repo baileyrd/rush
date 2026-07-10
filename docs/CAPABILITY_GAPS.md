@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (17 done, 6 open — C62–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (18 done, 5 open — C63–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C61 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C62 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-12 are open.
+11 are open.
 
 ---
 
@@ -2577,7 +2577,7 @@ empty input yields an empty array (`n=0`); an invalid identifier is
 remain documented waits per the item's own scoping, and error clearly
 rather than misparse. One integration test covers the matrix.
 
-### C62 — Nameref variables: `declare -n` / `local -n` / ksh `nameref` (tracked)
+### C62 — Nameref variables: `declare -n` / `local -n` / ksh `nameref` ✅ done
 Present in bash 4.3+ (`declare -n`/`local -n`) and ksh93 (its own
 `nameref` keyword, plus `typeset -n`); no equivalent in zsh (`-n` errors
 there too) or dash. Silent wrongness, not an error: `declare -n ref=x`
@@ -2592,6 +2592,23 @@ gap in reusable-function style bash code. **Effort: L** — needs a new
 write site (`get`/`set`/`assign`/array ops/`unset` all need to check for
 and follow it) — genuinely cross-cutting, unlike the other attribute
 flags in this document, which only affect assignment.
+
+Implemented, and the cross-cutting prediction was accurate: a
+`NAMEREFS: ref → target` map (following the same separate-map pattern
+C43 established) with a `resolve_name` chain-follower (depth-capped —
+a circular `declare -n a=b; declare -n b=a` stops following instead of
+hanging; bash warns there) hooked at the top of **twenty-six** read and
+write functions in `vars.rs` — `get`, `set`, every array/assoc
+read/write/append/unset-element path, `export`, and `unset` (which
+unsets the *target*, the ref keeping its referent — verified). Two
+probed subtleties matched exactly: a bare `declare -n ref` records a
+target-less nameref whose next plain assignment *names* the target
+rather than writing through, and `local -n out=$1` — the headline
+"return through a caller-named variable" mechanism — is frame-scoped,
+with local frames now capturing and restoring the prior nameref mapping
+alongside prior values and attributes. Works for scalars and whole
+arrays in both directions (`ref[0]=Z` writes through; `out=(a b c)`
+returns an array). One integration test covers the matrix.
 
 ### C63 — `printf %q` (tracked)
 Present in bash/zsh/ksh93 (not dash/POSIX, not fish) — quotes a string so

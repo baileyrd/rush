@@ -56,7 +56,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | `set -C` (noclobber) | ✅ | `>` refuses to overwrite an existing regular file; `>|` overrides; `>>`/devices exempt |
 | `set -x` (xtrace) | ✅ | echoes each command (`$PS4`-prefixed) before running it; nesting in `$(...)` repeats `$PS4`'s first character |
 | `trap` | ✅ | `EXIT` (every exit path), `INT` (Ctrl-C at an idle prompt), and (Unix) `TERM`/`HUP` — real signals, interrupting a blocking wait immediately; numeric/`SIG`-prefixed/lowercase specs all accepted (`trap 'cmd' 15`); `ERR` fires on errexit's condition |
-| Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment; `declare`/`local` `-u`/`-l`/`-i` attribute transforms; `readonly`/`declare -r` read-only variables |
+| Variables & assignment | ✅ | `FOO=bar`, prefix `FOO=bar cmd`, `export`; shell vars shadow the environment; `declare`/`local` `-u`/`-l`/`-i` attribute transforms; `readonly`/`declare -r` read-only variables; `declare -n`/`local -n` namerefs |
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding); `set -- args…`/`set args…` reassigns them; `${PIPESTATUS[@]}` per-stage pipeline statuses |
 | Indexed arrays | ✅ | `arr=(a b c)`, `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, `${#arr[@]}`, `${!arr[@]}`, sparse arrays, `arr[i]=`/`arr[i]+=`, `unset 'arr[i]'`, `local arr=(...)` |
 | Associative arrays | ✅ | `declare -A arr`, `arr[key]=val`, `${arr[key]}`/`${arr[@]}`/`${arr[*]}`, `${!arr[@]}` (keys), `${#arr[@]}`, `arr+=([k]=v ...)` merge-by-key, `unset 'arr[key]'`, `local`/`declare -A arr=(...)` |

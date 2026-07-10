@@ -994,6 +994,27 @@ pub(crate) fn expand_cond_pattern(word: &Word) -> Result<String, String> {
     Ok(pattern)
 }
 
+/// Expand a `[[ ]]` `=~` right-hand side into a regex pattern (C56):
+/// unquoted parts are live regex syntax (including via `$var` — the
+/// common `p="^a.c$"; [[ $s =~ $p ]]` idiom), while quoted/literal parts
+/// match themselves (`[[ abc =~ "a.c" ]]` is false in bash — verified —
+/// because the quoted `.` is literal).
+pub(crate) fn expand_cond_regex(word: &Word) -> Result<String, String> {
+    let mut pattern = String::new();
+    for (i, part) in word.iter().enumerate() {
+        match part {
+            WordPart::Literal(s) => pattern.push_str(&regex::escape(s)),
+            WordPart::Quoted(s) => pattern.push_str(&regex::escape(&expand_dollars(s)?)),
+            WordPart::Unquoted(s) => {
+                let text = if i == 0 { tilde_expand(s) } else { s.clone() };
+                pattern.push_str(&expand_unquoted(&text)?);
+            }
+            WordPart::ArrayLiteral(_) => {}
+        }
+    }
+    Ok(pattern)
+}
+
 /// Append `s` to a glob pattern, backslash-escaping characters that would
 /// otherwise be metacharacters — used for text that must stay literal.
 fn escape_meta_into(pattern: &mut String, s: &str) {

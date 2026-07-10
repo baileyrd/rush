@@ -1508,3 +1508,14 @@ compare files; malformed expressions abort with status 2 like bash.
 `=~` is recognized and deferred to C56. Verified byte-identical against
 bash across 32 scenarios; adds 1 parser unit test + 1 comprehensive
 integration test.
+
+### New: `[[ $s =~ regex ]]` ERE matching with `$BASH_REMATCH` (C56)
+On C55's foundation, using the `regex` crate. The real work was lexing:
+bash reads `=~`'s RHS in its own mode — unquoted parens belong to the
+pattern (balance-tracked, spaces inside groups included), `{n}`
+quantifiers pass through, `\.` stays a literal dot — handled by a new
+`lex_regex_word`. Semantics verified against bash: unanchored search;
+quoted parts literal, unquoted (incl. `$var`) live regex;
+`BASH_REMATCH[0]` + capture groups (unmatched optional group = empty
+string); failed match unsets the array; invalid live pattern = status-2
+error without aborting. Adds 1 integration test.

@@ -912,7 +912,29 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                         _ => matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a < b),
                     })
                 }
-                "=~" => Err("`=~` is not supported yet (tracked as C56)".into()),
+                // `=~` (C56): an unanchored ERE search. On a match,
+                // `BASH_REMATCH[0]` is the whole match and `[n]` the
+                // capture groups (an unmatched optional group is present
+                // as an empty string); on a failed match the array is
+                // *unset* — both verified against bash. An invalid regex
+                // is an evaluation error (status 2, script continues).
+                "=~" => {
+                    let pattern = crate::expand::expand_cond_regex(rhs)?;
+                    let re = regex::Regex::new(&pattern).map_err(|e| format!("invalid regex: {e}"))?;
+                    match re.captures(&l) {
+                        Some(caps) => {
+                            let groups: Vec<String> = (0..caps.len())
+                                .map(|i| caps.get(i).map(|m| m.as_str().to_string()).unwrap_or_default())
+                                .collect();
+                            crate::vars::set_array("BASH_REMATCH", groups);
+                            Ok(true)
+                        }
+                        None => {
+                            crate::vars::unset("BASH_REMATCH");
+                            Ok(false)
+                        }
+                    }
+                }
                 other => Err(format!("unknown operator `{other}`")),
             }
         }

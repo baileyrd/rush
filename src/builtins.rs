@@ -1423,7 +1423,6 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 /// flags/`-o` names aren't implemented yet; naming one is an error rather
 /// than a silently-ignored no-op.
 fn set_cmd(argv: &[String]) -> i32 {
-    let mut status = 0;
     let mut args = argv[1..].iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1433,27 +1432,54 @@ fn set_cmd(argv: &[String]) -> i32 {
             "+u" => crate::vars::set_nounset(false),
             "-x" => crate::vars::set_xtrace(true),
             "+x" => crate::vars::set_xtrace(false),
+            // An invalid `-o`/`+o` name or a missing one is a hard error too
+            // (same "stop immediately" rule as an unrecognized flag below) —
+            // verified directly: `set -o badname a b` leaves `$1`/`$2`
+            // untouched, same as `set -z a b` does.
             "-o" | "+o" => {
                 let on = arg == "-o";
                 match args.next().map(String::as_str) {
                     Some("pipefail") => crate::vars::set_pipefail(on),
                     Some(name) => {
                         eprintln!("set: {name}: invalid option name");
-                        status = 1;
+                        return 1;
                     }
                     None => {
                         eprintln!("{}: option requires an argument -- 'o'", argv[0]);
-                        status = 1;
+                        return 1;
                     }
                 }
             }
+            // `--`: everything after becomes the new positional parameters,
+            // even if it looks like a flag (`set -- -x` makes `$1` the
+            // literal text `-x`, not the xtrace flag) — verified directly.
+            "--" => {
+                crate::vars::set_positional(args.cloned().collect());
+                return 0;
+            }
+            // A bare word, not `-`/`+`-prefixed (so a genuinely unknown flag
+            // like `-z` still falls through to the `other` arm below and
+            // errors, matching real bash): this and everything after it
+            // becomes the new positional parameters — `set a b c`, no `--`
+            // needed, works exactly like `set -- a b c` does. `$0` is never
+            // touched by either form.
+            other if !other.starts_with(['-', '+']) => {
+                let mut new_args = vec![other.to_string()];
+                new_args.extend(args.cloned());
+                crate::vars::set_positional(new_args);
+                return 0;
+            }
+            // An unrecognized flag (`-z`) is a hard error — it must *not*
+            // fall through to the bare-word branch above and reassign
+            // positional parameters from whatever follows it, matching
+            // real bash exactly (`set -z a b` leaves `$1`/`$2` untouched).
             other => {
                 eprintln!("set: {other}: not supported");
-                status = 1;
+                return 1;
             }
         }
     }
-    status
+    0
 }
 
 /// `trap` (list) / `trap 'command' NAME...` (register) / `trap - NAME...`

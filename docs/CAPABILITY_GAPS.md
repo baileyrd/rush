@@ -296,7 +296,7 @@ completion *system* (as opposed to this fixed case list) provides.
 × Done (C55): full lexer/parser/evaluator — split-safe/glob-safe
 operands, `&&`/`||`/`!`/`( )` nesting, pattern-matching `==`/`!=` with
 bash's per-part quoting rule, lexicographic `<`/`>`, arithmetic
-`-eq…-ge`, `-nt`/`-ot`/`-ef`. `=~` (regex) is C56, sequenced next. fish
+`-eq…-ge`, `-nt`/`-ot`/`-ef`. `=~` (regex, with `$BASH_REMATCH` captures) is done too (C56). fish
 has no `[[ ]]` syntax either (its own conditional model is built on
 `test`/`[` plus `and`/`or`).
 
@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (11 done, 12 open — C56–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (12 done, 11 open — C57–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C55 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C56 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-18 are open.
+17 are open.
 
 ---
 
@@ -2337,7 +2337,7 @@ malformed-expression abort. Regression tests: one parser unit test
 (recursion + `<`-is-not-a-redirect) and one comprehensive integration
 test.
 
-### C56 — `[[ $s =~ $regex ]]` (ERE matching) + `$BASH_REMATCH` (tracked)
+### C56 — `[[ $s =~ $regex ]]` (ERE matching) + `$BASH_REMATCH` ✅ done
 Present in bash (full, including capture groups in `$BASH_REMATCH`);
 ksh93 and zsh both support `=~` matching but populate the captures under
 a *different* name (`.sh.match`, `$MATCH`/`$match` respectively) — a real
@@ -2347,6 +2347,25 @@ shell that has it. **Effort: M–L** (once `[[` exists) — needs a real ERE
 engine (the `regex` crate is the practical option, though its own syntax
 isn't a byte-for-byte match for POSIX ERE); `$BASH_REMATCH` itself is
 cheap on top, since indexed arrays already exist (C22).
+
+Implemented on C55's day-old foundation, using the `regex` crate as the
+sketch suggested (the codebase's second dependency ever; its syntax
+isn't byte-for-byte POSIX ERE but agrees on everything tested). The
+piece that turned out to need real work was *lexing*, not matching:
+bash reads the RHS of `=~` in its own mode — unquoted parens belong to
+the pattern (balance-tracked; whitespace inside a group is part of it,
+`[[ "a b" =~ (a b) ]]` matches), `{n}` quantifiers pass through, and
+`\.` stays a literal dot. A new `lex_regex_word` handles exactly that,
+entered when the `[[`-interior lexer sees `=~`. Semantics, each verified
+against bash: the match is an unanchored *search*; quoted/literal RHS
+parts match literally (`[[ abc =~ "a.c" ]]` is false) while unquoted
+parts — including via `$var`, the common `p="^…$"` idiom — are live
+regex; `BASH_REMATCH[0]` is the whole match with capture groups in
+`[1..]` (an unmatched optional group present as an empty string); a
+failed match *unsets* the array (bash 5 behavior); an invalid live
+pattern is a status-2 evaluation error that doesn't abort. ksh/zsh's
+different capture-variable names (`.sh.match`, `$MATCH`) are out of
+scope — bash is the reference. One integration test covers the matrix.
 
 ### C57 — Extended globbing: `?(pat)` `*(pat)` `+(pat)` `@(pat)` `!(pat)` (tracked)
 Native in ksh93 and zsh (`setopt kshglob`/`extendedglob`); bash requires

@@ -8,6 +8,9 @@ repository = "https://github.com/baileyrd/rush"
 
 [dependencies]
 rustyline = "18.0.0"
+# `[[ $s =~ regex ]]` (C56). The practical ERE engine; its syntax isn't a
+# byte-for-byte POSIX ERE match, but agrees on everything the tests cover.
+regex = "1"
 
 # Job control (process groups, terminal hand-off, signals) is Unix-only; the
 # raw libc bindings are the most stable surface for it.

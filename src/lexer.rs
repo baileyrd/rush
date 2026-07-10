@@ -368,11 +368,120 @@ fn lex_cond(chars: &mut Peekable<Chars>) -> Result<Vec<CondTok>, LexError> {
                 match word.as_slice() {
                     [WordPart::Unquoted(s)] if s == "]]" => return Ok(toks),
                     [WordPart::Unquoted(s)] if s == "!" => toks.push(CondTok::Not),
+                    // `=~` puts the lexer into regex-word mode for its RHS
+                    // (C56): parens are part of the pattern (tracked for
+                    // balance — whitespace inside a group is included,
+                    // `[[ "a b" =~ (a b) ]]` works in bash), and `{`/`}`
+                    // quantifiers pass through untouched.
+                    [WordPart::Unquoted(s)] if s == "=~" => {
+                        toks.push(CondTok::Word(word.clone()));
+                        toks.push(CondTok::Word(lex_regex_word(chars)?));
+                    }
                     _ => toks.push(CondTok::Word(word)),
                 }
             }
         }
     }
+}
+
+/// Lex the right-hand side of `=~` inside `[[ ]]` (C56): a single word in
+/// its own mode — unquoted `(`/`)` belong to the pattern (balance
+/// tracked; unbalanced is a syntax error, as in bash), whitespace ends
+/// the word only at paren depth 0, quotes produce literal-matching parts
+/// (the evaluator regex-escapes them), and `\x` becomes a literal `x`
+/// (which the evaluator re-escapes — so `\.` still means a literal dot,
+/// same as bash). `$`-expansion of unquoted text happens later, at the
+/// usual expansion stage.
+fn lex_regex_word(chars: &mut Peekable<Chars>) -> Result<Word, LexError> {
+    // Skip leading whitespace (newlines included, same as the rest of the
+    // `[[ ]]` interior).
+    while matches!(chars.peek(), Some(' ' | '\t' | '\r' | '\n')) {
+        chars.next();
+    }
+    let mut parts: Word = Vec::new();
+    let mut unquoted = String::new();
+    let mut depth = 0usize;
+    loop {
+        match chars.peek() {
+            None => return Err(LexError::Incomplete),
+            Some(' ' | '\t' | '\r' | '\n') if depth == 0 => break,
+            Some('"') => {
+                if !unquoted.is_empty() {
+                    parts.push(WordPart::Unquoted(std::mem::take(&mut unquoted)));
+                }
+                chars.next();
+                let mut text = String::new();
+                loop {
+                    match chars.next() {
+                        None => return Err(LexError::Incomplete),
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\' | '$' | '`')) => text.push(c),
+                            Some(c) => {
+                                text.push('\\');
+                                text.push(c);
+                            }
+                            None => return Err(LexError::Incomplete),
+                        },
+                        Some(c) => text.push(c),
+                    }
+                }
+                parts.push(WordPart::Quoted(text));
+            }
+            Some('\'') => {
+                if !unquoted.is_empty() {
+                    parts.push(WordPart::Unquoted(std::mem::take(&mut unquoted)));
+                }
+                chars.next();
+                let mut text = String::new();
+                loop {
+                    match chars.next() {
+                        None => return Err(LexError::Incomplete),
+                        Some('\'') => break,
+                        Some(c) => text.push(c),
+                    }
+                }
+                parts.push(WordPart::Literal(text));
+            }
+            Some('\\') => {
+                chars.next();
+                let Some(c) = chars.next() else {
+                    return Err(LexError::Incomplete);
+                };
+                if !unquoted.is_empty() {
+                    parts.push(WordPart::Unquoted(std::mem::take(&mut unquoted)));
+                }
+                parts.push(WordPart::Literal(c.to_string()));
+            }
+            Some('(') => {
+                depth += 1;
+                unquoted.push('(');
+                chars.next();
+            }
+            Some(')') => {
+                if depth == 0 {
+                    return Err(LexError::Syntax("unbalanced `)` in `=~` pattern".into()));
+                }
+                depth -= 1;
+                unquoted.push(')');
+                chars.next();
+            }
+            Some(&c) => {
+                unquoted.push(c);
+                chars.next();
+            }
+        }
+    }
+    if depth != 0 {
+        return Err(LexError::Syntax("unbalanced `(` in `=~` pattern".into()));
+    }
+    if !unquoted.is_empty() {
+        parts.push(WordPart::Unquoted(unquoted));
+    }
+    if parts.is_empty() {
+        return Err(LexError::Syntax("`=~': argument expected".into()));
+    }
+    Ok(parts)
 }
 
 /// A here-document opened on the current line, awaiting its body.

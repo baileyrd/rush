@@ -2460,8 +2460,35 @@ fn double_bracket_extended_test() {
     // status 2 (same as bash: `[[ a -eq ]]` kills the script there).
     let (out, status) = rush("[[ a -eq ]]; echo nope");
     assert_eq!((out.as_str(), status), ("", 2));
-    // `=~` is recognized but explicitly deferred to C56: an evaluation
-    // error, status 2, without aborting.
-    let (out, _) = rush("[[ a =~ a ]] 2>/dev/null; echo st=$?; echo alive");
-    assert_eq!(out, "st=2\nalive\n");
+    // `=~` works (C56) — full coverage in its own test below.
+    let (out, _) = rush("[[ a =~ a ]]; echo st=$?");
+    assert_eq!(out, "st=0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn regex_match_and_bash_rematch() {
+    // C56: `[[ $s =~ regex ]]` — unanchored ERE search with capture
+    // groups in BASH_REMATCH. Each expectation verified against bash.
+    let (out, _) = rush(r#"[[ "abc123" =~ ([a-z]+)([0-9]+) ]] && echo "${BASH_REMATCH[0]}|${BASH_REMATCH[1]}|${BASH_REMATCH[2]}""#);
+    assert_eq!(out, "abc123|abc|123\n");
+
+    // Quantifiers, anchors, and the $var idiom; quoted RHS is literal.
+    let (out, _) = rush(r#"[[ 2024-01-15 =~ ^([0-9]{4})-([0-9]{2}) ]] && echo "y=${BASH_REMATCH[1]} m=${BASH_REMATCH[2]}"; p="^a.c$"; [[ abc =~ $p ]] && echo var; [[ abc =~ "a.c" ]] || echo quoted-literal"#);
+    assert_eq!(out, "y=2024 m=01\nvar\nquoted-literal\n");
+
+    // An unmatched optional group is present as an empty string; a
+    // failed match unsets the array (bash 5 behavior, verified).
+    let (out, _) = rush(r#"[[ abc =~ (x)?(b) ]] && echo "n=${#BASH_REMATCH[@]} [${BASH_REMATCH[1]}] [${BASH_REMATCH[2]}]"; [[ abc =~ z ]]; echo "st=$? [${BASH_REMATCH[0]}]""#);
+    assert_eq!(out, "n=3 [] [b]\nst=1 []\n");
+
+    // Parens/spaces inside groups lex as part of the pattern; `\.` stays
+    // a literal dot; composes with && inside the same [[.
+    let (out, _) = rush(r#"[[ "a b" =~ (a b) ]] && echo group; [[ a.c =~ a\.c ]] && echo esc; [[ abc =~ a\.c ]] || echo esc2; [[ abc =~ a(b)c && x = x ]] && echo "combined ${BASH_REMATCH[1]}""#);
+    assert_eq!(out, "group\nesc\nesc2\ncombined b\n");
+
+    // An invalid (quoted, so runtime) regex piece: literal, so just no
+    // match — while a syntactically-live bad pattern is a status-2 error.
+    let (out, _) = rush(r#"[[ abc =~ "(" ]]; echo st=$?; p='['; [[ abc =~ $p ]] 2>/dev/null; echo st=$?; echo alive"#);
+    assert_eq!(out, "st=1\nst=2\nalive\n");
 }

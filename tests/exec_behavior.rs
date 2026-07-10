@@ -1918,3 +1918,44 @@ fn set_applies_nothing_when_any_flag_is_invalid() {
     assert_eq!(out, "[] survived\n");
     assert_eq!(status, 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn posix_character_classes_in_case_and_pattern_removal() {
+    // C42: `[[:digit:]]`-style POSIX named classes were misparsed as their
+    // own literal characters — `case 5 in [[:digit:]])` silently never
+    // matched. The same matcher backs `case`, filename globbing, and the
+    // `${v#pat}` family, so one fix covers all three.
+    let (out, _) = rush("case 5 in [[:digit:]]) echo dig;; *) echo no;; esac");
+    assert_eq!(out, "dig\n");
+
+    let (out, _) = rush("case B in [[:upper:]]) echo up;; *) echo no;; esac");
+    assert_eq!(out, "up\n");
+
+    let (out, _) = rush(r#"v=abc123; echo "${v%%[[:digit:]]*}""#);
+    assert_eq!(out, "abc\n");
+
+    // Unknown class name: matches nothing (same as bash), not an error.
+    let (out, _) = rush("case b in [[:bogus:]]) echo m;; *) echo no;; esac");
+    assert_eq!(out, "no\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_character_classes_in_filename_globbing() {
+    // C42, the filename-expansion side: `ls [[:alpha:]]*` used to silently
+    // match nothing.
+    let dir = std::env::temp_dir().join(format!("rush_c42_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["a5", "ab", "aB"] {
+        std::fs::write(dir.join(f), "").unwrap();
+    }
+    let cd = format!("cd {}; ", dir.display());
+    let (out, _) = rush(&format!("{cd}echo a[[:digit:]]"));
+    assert_eq!(out, "a5\n");
+    let (out, _) = rush(&format!("{cd}echo a[[:upper:]]"));
+    assert_eq!(out, "aB\n");
+    let (out, _) = rush(&format!("{cd}echo a[![:digit:]]"));
+    assert_eq!(out, "aB ab\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

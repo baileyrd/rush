@@ -63,7 +63,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `$$`/`$PPID`/`$-`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, `${V#pat}`/`##`/`%`/`%%` (prefix/suffix pattern removal), tilde, command substitution; unquoted results field-split on `$IFS` |
 | Arithmetic (`$((...))`, `((expr))`) | ✅ | `+ - * / % **`, bitwise `& \| ^ ~ << >>`, comparisons, `&& \|\| !`, ternary `?:`, assignment (`= += -= *= /= %= <<= >>= &= ^= \|=`), `++`/`--` (pre/post), parentheses, variables; standalone `((expr))` command, `for ((init;cond;update))` |
-| Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
+| Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, POSIX named classes (`[[:alpha:]]`, `[[:digit:]]`, …), multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
 | Control flow | ✅ | `if`/`while`/`until`/`for`/`select` (`for`/`select x; do` with no `in` iterates `"$@"`), C-style `for ((init;cond;update))`, `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`, `local [name[=value]]…` for function-scoped variables; brace groups `{ …; }` |

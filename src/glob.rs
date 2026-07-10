@@ -187,16 +187,49 @@ fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
     }
 }
 
+/// One member of a bracket expression: an ordinary character range (a single
+/// character is a degenerate `c-c` range) or a POSIX named class
+/// (`[:alpha:]`, `[:digit:]`, …) mapped to its predicate.
+enum ClassItem {
+    Range(char, char),
+    Named(fn(char) -> bool),
+}
+
 struct Class {
     negate: bool,
-    ranges: Vec<(char, char)>,
+    items: Vec<ClassItem>,
 }
 
 impl Class {
     fn matches(&self, ch: char) -> bool {
-        let inside = self.ranges.iter().any(|&(lo, hi)| ch >= lo && ch <= hi);
+        let inside = self.items.iter().any(|item| match *item {
+            ClassItem::Range(lo, hi) => ch >= lo && ch <= hi,
+            ClassItem::Named(pred) => pred(ch),
+        });
         inside ^ self.negate
     }
+}
+
+/// The standard POSIX class names → predicates (C42). `digit`/`xdigit` are
+/// ASCII-only even in a Unicode locale, matching real bash; the letter-ish
+/// classes use Rust's Unicode-aware predicates, which agree with bash under
+/// the usual UTF-8 locales.
+fn named_class(name: &str) -> Option<fn(char) -> bool> {
+    Some(match name {
+        "alpha" => char::is_alphabetic,
+        "digit" => |c| c.is_ascii_digit(),
+        "alnum" => |c| c.is_alphabetic() || c.is_ascii_digit(),
+        "upper" => char::is_uppercase,
+        "lower" => char::is_lowercase,
+        "space" => char::is_whitespace,
+        "blank" => |c| c == ' ' || c == '\t',
+        "punct" => |c| c.is_ascii_punctuation(),
+        "cntrl" => char::is_control,
+        "graph" => |c| !c.is_whitespace() && !c.is_control(),
+        "print" => |c| c == ' ' || (!c.is_whitespace() && !c.is_control()),
+        "xdigit" => |c| c.is_ascii_hexdigit(),
+        _ => return None,
+    })
 }
 
 /// Parse a `[...]` class starting at `start` (the `[`). Returns the class and
@@ -209,19 +242,38 @@ fn parse_class(p: &[char], start: usize) -> Option<(Class, usize)> {
         i += 1;
     }
 
-    let mut ranges = Vec::new();
+    let mut items = Vec::new();
     let mut first = true;
     while i < p.len() {
         // A `]` is only the terminator if it isn't the very first class member.
         if p[i] == ']' && !first {
-            return Some((Class { negate, ranges }, i + 1));
+            return Some((Class { negate, items }, i + 1));
         }
         first = false;
+        // `[:name:]` — a POSIX named class (C42). An unknown *name* with
+        // proper `[: :]` delimiters is a member that matches nothing
+        // (verified: `a[[:bogus:]]` matches no file in bash), rather than
+        // a parse error. When the `[:` is *not* closed by a `:]`, bash
+        // quirkily drops the `[` itself and keeps the rest as ordinary
+        // members (verified char-by-char: `a[[:digit]` matches `ad`/`a:`
+        // but not `a[` — dash keeps the `[` too, but bash is this
+        // codebase's reference), so just the `[` is skipped here.
+        if p[i] == '[' && i + 1 < p.len() && p[i + 1] == ':' {
+            match (i + 2..p.len().saturating_sub(1)).find(|&j| p[j] == ':' && p[j + 1] == ']') {
+                Some(close) => {
+                    let name: String = p[i + 2..close].iter().collect();
+                    items.push(ClassItem::Named(named_class(&name).unwrap_or(|_| false)));
+                    i = close + 2;
+                }
+                None => i += 1,
+            }
+            continue;
+        }
         if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
-            ranges.push((p[i], p[i + 2]));
+            items.push(ClassItem::Range(p[i], p[i + 2]));
             i += 3;
         } else {
-            ranges.push((p[i], p[i]));
+            items.push(ClassItem::Range(p[i], p[i]));
             i += 1;
         }
     }
@@ -253,6 +305,44 @@ mod tests {
         assert!(!match_component("[a-z].rs", "M.rs"));
         assert!(match_component("[!0-9]*", "abc"));
         assert!(!match_component("[!0-9]*", "9bc"));
+    }
+
+    // C42: POSIX named classes inside a bracket expression, all verified
+    // against real bash's own results for the same patterns.
+    #[test]
+    fn posix_named_classes() {
+        assert!(match_component("a[[:digit:]]", "a5"));
+        assert!(!match_component("a[[:digit:]]", "ab"));
+        assert!(match_component("a[[:alpha:]]", "ab"));
+        assert!(match_component("a[[:alpha:]]", "aB"));
+        assert!(!match_component("a[[:alpha:]]", "a5"));
+        assert!(match_component("a[[:upper:]]", "aB"));
+        assert!(!match_component("a[[:upper:]]", "ab"));
+        assert!(match_component("a[[:xdigit:]]", "aF"));
+        assert!(!match_component("a[[:xdigit:]]", "aG"));
+        assert!(match_component("a[[:space:]]b", "a b"));
+        assert!(match_component("a[[:punct:]]", "a-"));
+        // Negation applies to the named class too.
+        assert!(match_component("a[![:digit:]]", "ab"));
+        assert!(!match_component("a[![:digit:]]", "a5"));
+        // Mixed with ordinary members.
+        assert!(match_component("a[[:alpha:]5]", "a5"));
+        assert!(match_component("a[[:alpha:]5]", "ab"));
+        assert!(!match_component("a[[:alpha:]5]", "a6"));
+    }
+
+    // The two edge cases, matching real bash exactly (both verified
+    // char-by-char against it): a properly-delimited unknown name matches
+    // nothing; an unclosed `[:` drops the `[` and keeps the rest as
+    // ordinary members.
+    #[test]
+    fn named_class_edge_cases() {
+        assert!(!match_component("a[[:bogus:]]", "ab"));
+        assert!(!match_component("a[[:bogus:]]", "a["));
+        assert!(match_component("a[[:digit]", "ad"));
+        assert!(match_component("a[[:digit]", "a:"));
+        assert!(!match_component("a[[:digit]", "a["));
+        assert!(!match_component("a[[:digit]", "a5"));
     }
 
     #[test]

@@ -55,6 +55,10 @@ pub enum Connector {
 #[derive(Debug, Clone)]
 pub struct RawPipeline {
     pub commands: Vec<RawCommand>,
+    /// A leading `!` — the pipeline's exit status is logically negated
+    /// (0 ↔ 1), and the pipeline is exempt from `set -e` and the `ERR`
+    /// trap even when the negated status is 1 (C53; matches bash).
+    pub negated: bool,
 }
 
 /// A pipeline stage: either a plain command or a compound (`if`/`while`/`for`).
@@ -320,13 +324,22 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Result<RawPipeline, ParseError> {
+        // A leading `!` (possibly repeated — `! ! cmd` toggles, same as
+        // bash) negates the whole pipeline's exit status.
+        let mut negated = false;
+        while matches!(self.peek(),
+            Some(Token::Word(parts)) if matches!(parts.as_slice(), [WordPart::Unquoted(s)] if s == "!"))
+        {
+            self.pos += 1;
+            negated = !negated;
+        }
         let mut commands = vec![self.parse_command()?];
         while matches!(self.peek(), Some(Token::Pipe)) {
             self.pos += 1;
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
-        Ok(RawPipeline { commands })
+        Ok(RawPipeline { commands, negated })
     }
 
     fn parse_command(&mut self) -> Result<RawCommand, ParseError> {

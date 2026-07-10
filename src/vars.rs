@@ -1084,6 +1084,12 @@ pub fn key_append(name: &str, subscript: &str, value: &str) {
 
 /// Push a fresh, empty local-variable frame — called when entering a
 /// function call (`exec::call_function`).
+/// How many function calls are currently active — the `ERR` trap doesn't
+/// fire inside one (C53; bash's no-`errtrace` default).
+pub fn function_depth() -> usize {
+    LOCAL_STACK.with(|s| s.borrow().len())
+}
+
 pub fn push_local_frame() {
     LOCAL_STACK.with(|s| s.borrow_mut().push(Vec::new()));
 }

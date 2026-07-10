@@ -70,6 +70,54 @@ pub fn check_pending() {
     }
 }
 
+/// Canonical signal-name table for trap-spec normalization (C44): bare
+/// name ↔ conventional number. Numbers are the x86-64 Linux values (the
+/// same ones bash's own `trap -l` shows there) — signal *numbers* are
+/// platform-convention anyway, and the names are what everything
+/// downstream keys on. `EXIT` is 0, per POSIX (`trap 'cmd' 0`).
+const SIGNALS: &[(&str, i32)] = &[
+    ("EXIT", 0),
+    ("HUP", 1),
+    ("INT", 2),
+    ("QUIT", 3),
+    ("ILL", 4),
+    ("TRAP", 5),
+    ("ABRT", 6),
+    ("BUS", 7),
+    ("FPE", 8),
+    ("KILL", 9),
+    ("USR1", 10),
+    ("SEGV", 11),
+    ("USR2", 12),
+    ("PIPE", 13),
+    ("ALRM", 14),
+    ("TERM", 15),
+    ("CHLD", 17),
+    ("CONT", 18),
+    ("STOP", 19),
+    ("TSTP", 20),
+    ("TTIN", 21),
+    ("TTOU", 22),
+];
+
+/// Normalize a `trap` signal spec to the canonical bare name delivery
+/// keys on (C44): numeric (`15` → `TERM`, `0` → `EXIT`), `SIG`-prefixed
+/// (`SIGTERM` → `TERM`), and lowercase (`term`) spellings all collapse to
+/// one form — each accepted by real bash, verified directly. `None` for
+/// anything not in the table (bash: "invalid signal specification").
+/// Without this, a trap registered under `"15"`/`"SIGTERM"` was stored
+/// verbatim and silently orphaned — the delivery side only ever looks up
+/// `"TERM"`, so the handler never ran and the signal took the default
+/// disposition.
+pub fn normalize_signal_spec(spec: &str) -> Option<&'static str> {
+    if let Ok(n) = spec.parse::<i32>() {
+        return SIGNALS.iter().find(|&&(_, num)| num == n).map(|&(name, _)| name);
+    }
+    let upper = spec.to_ascii_uppercase();
+    let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
+    SIGNALS.iter().find(|&&(name, _)| name == bare).map(|&(name, _)| name)
+}
+
 pub fn set(name: &str, command: &str) {
     TRAPS.with(|t| t.borrow_mut().insert(name.to_string(), command.to_string()));
 }
@@ -121,5 +169,23 @@ mod tests {
         assert_eq!(all(), vec![("EXIT".to_string(), "echo bye".to_string())]);
         unset("EXIT");
         assert!(all().is_empty());
+    }
+
+    // C44: numeric, `SIG`-prefixed, and lowercase specs all collapse to
+    // the canonical bare name; unknown specs are rejected.
+    #[test]
+    fn signal_spec_normalization() {
+        assert_eq!(normalize_signal_spec("15"), Some("TERM"));
+        assert_eq!(normalize_signal_spec("SIGTERM"), Some("TERM"));
+        assert_eq!(normalize_signal_spec("sigterm"), Some("TERM"));
+        assert_eq!(normalize_signal_spec("term"), Some("TERM"));
+        assert_eq!(normalize_signal_spec("TERM"), Some("TERM"));
+        assert_eq!(normalize_signal_spec("0"), Some("EXIT"));
+        assert_eq!(normalize_signal_spec("EXIT"), Some("EXIT"));
+        assert_eq!(normalize_signal_spec("1"), Some("HUP"));
+        assert_eq!(normalize_signal_spec("2"), Some("INT"));
+        assert_eq!(normalize_signal_spec("BOGUS"), None);
+        assert_eq!(normalize_signal_spec("99"), None);
+        assert_eq!(normalize_signal_spec(""), None);
     }
 }

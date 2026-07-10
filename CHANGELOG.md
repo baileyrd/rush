@@ -1336,3 +1336,24 @@ literal text `2+3` — wrong values with no diagnostic.
 - Verified against real bash across all of the above (ksh93/zsh
   `typeset -u` agreement spot-checked). Adds 3 unit tests and 3
   integration tests; full suite and clippy stay clean.
+
+### Fix: `trap` with a numeric or `SIG`-prefixed signal spec registered but never fired (C44)
+`trap 'cmd' 15` and `trap 'cmd' SIGTERM` stored the spec verbatim, but
+delivery only ever looks up the canonical bare name (`TERM`) — the trap
+was silently orphaned: the signal arrived, the process took the default
+disposition, and no error appeared at registration time either.
+
+- **New `trap::normalize_signal_spec`** collapses numeric (`15` → `TERM`,
+  `0` → `EXIT`), `SIG`-prefixed, and lowercase spellings (all accepted by
+  real bash, verified) to the canonical bare name, backed by a 22-entry
+  name↔number table. Applies to registration *and* removal (`trap - 15`).
+- **Invalid specs now error** (`trap: BOGUS: invalid signal
+  specification`, status 1) instead of silently registering a dead entry
+  — and, matching bash exactly, don't block other specs in the same call
+  from registering.
+- **Listing format fixed alongside**: `trap` prints real signals
+  `SIG`-prefixed with `EXIT` bare (`trap -- 'echo T' SIGTERM`), matching
+  bash's own output.
+- Verified against real bash across every spelling, `trap - 15` removal
+  (shell dies 143), both invalid-spec cases, and listing. Adds 1 unit
+  test and 3 integration tests; full suite and clippy stay clean.

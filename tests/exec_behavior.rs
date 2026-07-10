@@ -2007,3 +2007,52 @@ fn local_attributes_are_function_scoped() {
     let (out, _) = rush("v=Mixed; f(){ local -u v=abc; echo in=$v; v=ghi; echo in=$v; }; f; echo out=$v; v=next; echo $v");
     assert_eq!(out, "in=ABC\nin=GHI\nout=Mixed\nnext\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn trap_accepts_numeric_and_sig_prefixed_specs() {
+    // C44: a trap registered under `15` or `SIGTERM` was stored verbatim
+    // and silently orphaned — delivery only ever looked up `TERM`, so the
+    // handler never ran and the signal took the default disposition.
+    let (out, _) = rush("trap 'echo caught' 15; kill -TERM $$; sleep 0; echo after");
+    assert_eq!(out, "caught\nafter\n");
+
+    let (out, _) = rush("trap 'echo caught' SIGTERM; kill -15 $$; sleep 0; echo after");
+    assert_eq!(out, "caught\nafter\n");
+
+    // Lowercase works too (bash accepts it — verified), and `0` is EXIT.
+    let (out, _) = rush("trap 'echo caught' sighup; kill -HUP $$; sleep 0; echo after");
+    assert_eq!(out, "caught\nafter\n");
+    let (out, _) = rush("trap 'echo bye' 0; true");
+    assert_eq!(out, "bye\n");
+
+    // `trap - 15` removes a TERM trap: default disposition kills the
+    // shell (128+15) before `after` prints.
+    let (out, status) = rush("trap 'echo caught' TERM; trap - 15; kill -15 $$; echo after");
+    assert_eq!(out, "");
+    assert_eq!(status, 143);
+}
+
+#[cfg(unix)]
+#[test]
+fn trap_rejects_invalid_specs_without_blocking_valid_ones() {
+    // Matching real bash exactly: the invalid spec errors (status 1), the
+    // valid one in the same call still registers.
+    let (out, _) =
+        rush("trap 'echo caught' TERM BOGUS 2>/dev/null; echo st=$?; kill -15 $$; sleep 0; echo after");
+    assert_eq!(out, "st=1\ncaught\nafter\n");
+
+    let (err, status) = rush_stderr("trap 'echo x' 99");
+    assert!(err.contains("99: invalid signal specification"), "got: {err:?}");
+    assert_eq!(status, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn trap_listing_prints_sig_prefixed_names() {
+    // bash's own `trap` output format: real signals SIG-prefixed, EXIT bare.
+    let (out, _) = rush("trap 'echo T' SIGTERM; trap");
+    assert_eq!(out, "trap -- 'echo T' SIGTERM\n");
+    let (out, _) = rush("trap 'echo E' EXIT; trap; trap - EXIT");
+    assert_eq!(out, "trap -- 'echo E' EXIT\n");
+}

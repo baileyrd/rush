@@ -45,7 +45,47 @@ The existing C56 tests (`tests/exec_behavior.rs` ~2460–2495) exercise: classes
 quoted-literal semantics, escaped `.`, whitespace inside groups, and
 invalid-pattern error handling (`(`, `[` → status 2, script continues).
 
-## 3. Cost of the current dependency
+## 3. The regex standards landscape (and where rush sits)
+
+"Regex" is not one standard; the flavors below are the ones that matter for
+placing bash and the `regex` crate relative to each other.
+
+- **POSIX BRE (Basic Regular Expressions).** IEEE 1003.1; the default in
+  `grep`/`sed`/`ed`. Grouping and intervals are *escaped* (`\(...\)`,
+  `\{m,n\}`), classic BRE lacks `|`/`+`/`?`, and backreferences (`\1`) are
+  included. Irrelevant to `=~` except as a contrast.
+- **POSIX ERE (Extended Regular Expressions).** IEEE 1003.1; used by
+  `grep -E`, `awk`, and **bash's `[[ =~ ]]`** (via `regcomp(REG_EXTENDED)`).
+  Unescaped metacharacters, all groups capture, *no* backreferences or
+  lookaround. POSIX additionally mandates **leftmost-longest** match
+  semantics and bracket-expression features: `[[:alpha:]]` classes, collating
+  symbols `[.ch.]`, equivalence classes `[=e=]`. **This is the target
+  standard for a replacement engine.**
+- **PCRE (Perl-Compatible Regular Expressions).** The de facto standard
+  rather than a formal one: Perl syntax as codified by the PCRE/PCRE2
+  library. Adds backreferences, lookaround, lazy/possessive quantifiers,
+  non-capturing and named groups, `\d`/`\w`/`\b`, inline flags — with
+  **leftmost-first** (first-alternative-wins) semantics. Most language
+  runtimes (Python `re`, Ruby, PHP, `grep -P`) are PCRE-ish dialects.
+- **ECMAScript regex.** The other formally specified flavor: ECMA-262
+  precisely defines JavaScript's regex grammar and semantics (named groups,
+  lookbehind, `\u{...}`); it is also `std::regex`'s default mode in C++.
+- **UTS #18 (Unicode Technical Standard #18).** Not a syntax but a
+  conformance standard for *Unicode support* in regex engines — property
+  classes (`\p{Greek}`), case folding, etc. The `regex` crate targets UTS #18
+  Level 1, which is a large part of why it carries the table-heavy machinery
+  rush doesn't need.
+- **The Rust `regex` crate dialect** (rush today) sits in between: Perl-ish
+  syntax deliberately restricted to what can run in guaranteed linear time
+  (no backreferences or lookaround), leftmost-first semantics, UTS #18
+  Unicode.
+
+The tension for rush in one line: bash speaks **POSIX ERE, leftmost-longest**;
+the crate speaks a **PCRE-ish subset, leftmost-first**. They agree on the
+everyday constructs (which is why the C56 tests pass) and diverge on
+alternation submatching and Perl escapes — detailed in §6.
+
+## 4. Cost of the current dependency
 
 From `Cargo.lock`, the full tree is 8 packages. `regex` accounts for **5 of the
 7 external ones**:
@@ -62,7 +102,7 @@ regex 1.13.0 → regex-automata 0.4.15 → regex-syntax 0.8.11, aho-corasick 1.1
   `unicode-width`, both thin table/binding crates).
 - Supply-chain exposure: 5 externally maintained crates vs. potentially 0.
 
-## 4. What the crate gives us that is easy to underestimate
+## 5. What the crate gives us that is easy to underestimate
 
 1. **Guaranteed linear-time matching.** A shell compiles *user/script-supplied*
    patterns; the regex crate's NFA/lazy-DFA design makes catastrophic
@@ -79,7 +119,7 @@ regex 1.13.0 → regex-automata 0.4.15 → regex-syntax 0.8.11, aho-corasick 1.1
    parsing and interval handling. This is the main thing we would be
    re-earning with tests.
 
-## 5. Known divergences from bash we'd have a chance to fix
+## 6. Known divergences from bash we'd have a chance to fix
 
 - **Leftmost-first vs. leftmost-longest.** POSIX requires leftmost-*longest*
   alternation/submatch semantics; the regex crate implements Perl-style
@@ -87,13 +127,13 @@ regex 1.13.0 → regex-automata 0.4.15 → regex-syntax 0.8.11, aho-corasick 1.1
   `a` under the regex crate. This is the "its syntax isn't a byte-for-byte
   POSIX ERE match" caveat in `Cargo.toml`. A homegrown engine could implement
   POSIX-longest and get *closer* to bash than we are today (it is also the
-  single hardest part of the project — see §6).
+  single hardest part of the project — see §7).
 - **Perl escapes.** The regex crate accepts `\d`, `\w`, `\b` etc., which POSIX
   ERE does not define; scripts relying on rush-only patterns would be
   non-portable to bash. A strict-ERE homegrown parser would reject or
   literalize them, matching bash.
 
-## 6. What rolling our own requires
+## 7. What rolling our own requires
 
 Recommended architecture (detailed in `rusty_regx/DESIGN.md`): a classic
 four-stage engine —
@@ -137,7 +177,7 @@ Integration into rush is a ~10-line diff: swap `regex::Regex::new/captures/escap
 for `rusty_regx` equivalents in `exec.rs` and `expand.rs`, then delete the
 dependency (Cargo.lock drops from 8 packages to 3 + rusty_regx).
 
-## 7. Assessment
+## 8. Assessment
 
 | | Keep `regex` | Roll `rusty_regx` |
 |---|---|---|

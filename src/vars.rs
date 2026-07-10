@@ -184,6 +184,22 @@ thread_local! {
     // user has explicitly toggled; `shopt()` falls back to the defaults
     // table for the rest.
     static SHOPTS: RefCell<HashMap<&'static str, bool>> = RefCell::new(HashMap::new());
+    // `$RANDOM`'s LCG state (C67): `None` until first read/seed, then the
+    // rolling state.
+    static RANDOM_STATE: RefCell<Option<u64>> = const { RefCell::new(None) };
+    // `$SECONDS` (C67): the base `Instant` plus the offset assignment set.
+    static SECONDS_BASE: RefCell<Option<(std::time::Instant, i64)>> = const { RefCell::new(None) };
+    // `$LINENO` (C67): the 1-based source line of the pipeline currently
+    // executing, set by `exec::run_andor`.
+    static CURRENT_LINE: RefCell<u32> = const { RefCell::new(0) };
+    // `${FUNCNAME[@]}` (C67): the active function-call stack, innermost
+    // first — pushed/popped by `exec::call_function`, mirrored into the
+    // real `FUNCNAME` array on each change.
+    static FUNC_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    // `${BASH_SOURCE[@]}` (C67): the active source-file stack, innermost
+    // first — the script itself at the bottom, `source`d files pushed on
+    // top; mirrored into the real `BASH_SOURCE` array on each change.
+    static SOURCE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     // Nameref variables (`declare -n`, C62): ref name → target name. An
     // empty target means "declared a nameref, target not chosen yet" —
     // the next plain assignment to the ref *names* the target instead of
@@ -256,6 +272,124 @@ pub fn set_shopt(name: &str, on: bool) -> bool {
     };
     SHOPTS.with(|m| m.borrow_mut().insert(canonical, on));
     true
+}
+
+/// The dynamic special variables (C67): computed on read rather than
+/// stored. `RANDOM` is a 0..=32767 LCG (seedable by assignment);
+/// `SECONDS` counts from shell start or the last assignment;
+/// `EPOCHSECONDS`/`EPOCHREALTIME` come straight from the system clock;
+/// `LINENO` is the executing pipeline's source line.
+fn dynamic_var(name: &str) -> Option<String> {
+    match name {
+        "RANDOM" => Some(next_random().to_string()),
+        "SECONDS" => Some(
+            SECONDS_BASE
+                .with(|b| {
+                    let mut b = b.borrow_mut();
+                    let (base, offset) = b.get_or_insert_with(|| (std::time::Instant::now(), 0));
+                    base.elapsed().as_secs() as i64 + *offset
+                })
+                .to_string(),
+        ),
+        "EPOCHSECONDS" => Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .to_string(),
+        ),
+        "EPOCHREALTIME" => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| format!("{}.{:06}", d.as_secs(), d.subsec_micros())),
+        "LINENO" => Some(CURRENT_LINE.with(|l| *l.borrow()).to_string()),
+        _ => None,
+    }
+}
+
+fn next_random() -> u16 {
+    RANDOM_STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let state = s.get_or_insert_with(|| {
+            // First read with no explicit seed: mix the pid and clock.
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            std::process::id() as u64 ^ (t << 16) ^ 0x9e3779b97f4a7c15
+        });
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((*state >> 33) & 0x7fff) as u16
+    })
+}
+
+/// Seed `$RANDOM` (`RANDOM=42` makes the following reads reproducible,
+/// matching bash) — see `set`.
+fn seed_random(value: &str) {
+    let seed = value.trim().parse::<u64>().unwrap_or(0);
+    RANDOM_STATE.with(|s| *s.borrow_mut() = Some(seed ^ 0x5deece66d));
+}
+
+/// Reset `$SECONDS`'s base (`SECONDS=100` makes it count from 100).
+fn reset_seconds(value: &str) {
+    let offset = value.trim().parse::<i64>().unwrap_or(0);
+    SECONDS_BASE.with(|b| *b.borrow_mut() = Some((std::time::Instant::now(), offset)));
+}
+
+/// `exec::run_andor` records the executing pipeline's source line here.
+pub fn set_current_line(line: u32) {
+    CURRENT_LINE.with(|l| *l.borrow_mut() = line);
+}
+
+/// Push/pop the function-call stack (C67), mirroring it into the real
+/// `FUNCNAME` array (innermost first) so every array read form works.
+pub fn push_function(name: &str) {
+    FUNC_STACK.with(|s| {
+        let mut s = s.borrow_mut();
+        s.push(name.to_string());
+        let stack: Vec<String> = s.iter().rev().cloned().collect();
+        drop(s);
+        set_array("FUNCNAME", stack);
+    });
+}
+
+pub fn pop_function() {
+    FUNC_STACK.with(|s| {
+        let mut s = s.borrow_mut();
+        s.pop();
+        let stack: Vec<String> = s.iter().rev().cloned().collect();
+        drop(s);
+        if stack.is_empty() {
+            unset("FUNCNAME");
+        } else {
+            set_array("FUNCNAME", stack);
+        }
+    });
+}
+
+/// Push/pop the source-file stack (C67) — `BASH_SOURCE`'s backing.
+pub fn push_source(name: &str) {
+    SOURCE_STACK.with(|s| {
+        let mut s = s.borrow_mut();
+        s.push(name.to_string());
+        let stack: Vec<String> = s.iter().rev().cloned().collect();
+        drop(s);
+        set_array("BASH_SOURCE", stack);
+    });
+}
+
+pub fn pop_source() {
+    SOURCE_STACK.with(|s| {
+        let mut s = s.borrow_mut();
+        s.pop();
+        let stack: Vec<String> = s.iter().rev().cloned().collect();
+        drop(s);
+        if stack.is_empty() {
+            unset("BASH_SOURCE");
+        } else {
+            set_array("BASH_SOURCE", stack);
+        }
+    });
 }
 
 /// Follow nameref indirection (C62): the name every read/write of
@@ -501,6 +635,9 @@ pub fn set_last_bg_pid(pid: i32) {
 pub fn get(name: &str) -> Option<String> {
     let name = &resolve_name(name);
     let name = name.as_str();
+    if let Some(v) = dynamic_var(name) {
+        return Some(v);
+    }
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Scalar(s) => Some(s.clone()),
@@ -690,6 +827,20 @@ fn transformed(name: &str, value: &str) -> Option<String> {
 /// `arr[1]`/`arr[2]` alone, verified directly for both array kinds); a
 /// plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
+    // Assigning the dynamic specials re-bases them (C67): `RANDOM=42`
+    // seeds the generator, `SECONDS=100` restarts the counter from 100 —
+    // both matching bash.
+    match name {
+        "RANDOM" => {
+            seed_random(value);
+            return;
+        }
+        "SECONDS" => {
+            reset_seconds(value);
+            return;
+        }
+        _ => {}
+    }
     // A nameref declared without a target (`declare -n ref; ref=x`):
     // this assignment *names* the target rather than writing through
     // (verified against bash, C62).

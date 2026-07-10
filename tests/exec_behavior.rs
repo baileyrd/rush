@@ -2800,3 +2800,35 @@ fn coproc_bidirectional_pipes() {
     let (out, _) = rush(r#"coproc cat; [ "$COPROC_PID" = "$!" ] && [ "$COPROC_PID" -gt 0 ] && echo pids-ok; kill $COPROC_PID; wait $COPROC_PID 2>/dev/null; echo waited-st=$?"#);
     assert_eq!(out, "pids-ok\nwaited-st=143\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn special_variables_grab_bag() {
+    // C67: RANDOM/SECONDS/EPOCH*/FUNCNAME/BASH_SOURCE/LINENO all
+    // expanded empty before.
+    let (out, _) = rush(r#"a=$RANDOM; [ "$a" -ge 0 ] && [ "$a" -le 32767 ] && echo range-ok; RANDOM=42; a=$RANDOM; RANDOM=42; b=$RANDOM; [ "$a" = "$b" ] && echo seeded"#);
+    assert_eq!(out, "range-ok\nseeded\n");
+
+    let (out, _) = rush(r#"SECONDS=100; echo $SECONDS; [ "${EPOCHREALTIME%.*}" = "$EPOCHSECONDS" ] && echo epoch-ok"#);
+    assert_eq!(out, "100\nepoch-ok\n");
+
+    // FUNCNAME: the call stack, innermost first; unset outside functions.
+    let (out, _) = rush(r#"f(){ g; }; g(){ echo "${FUNCNAME[@]}"; }; f; echo "[${FUNCNAME[0]}]""#);
+    assert_eq!(out, "g f\n[]\n");
+
+    // BASH_SOURCE and LINENO in a real script file (LINENO values
+    // byte-identical to bash for the same file).
+    let f = std::env::temp_dir().join(format!("rush_c67_{}.sh", std::process::id()));
+    std::fs::write(&f, "echo \"src=${BASH_SOURCE[0]}\"\necho \"line=$LINENO\"\n\necho \"line2=$LINENO\"\n").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg(&f)
+        .output()
+        .expect("spawn rush");
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(out, format!("src={}\nline=2\n\nline2=4\n", f.display()).replace("\n\n", "\n"));
+    let _ = std::fs::remove_file(&f);
+
+    // Under -c, BASH_SOURCE is empty (same as bash).
+    let (out, _) = rush(r#"echo "[${BASH_SOURCE[0]}]""#);
+    assert_eq!(out, "[]\n");
+}

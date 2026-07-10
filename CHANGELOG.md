@@ -1632,3 +1632,14 @@ child inherited the parent's TERM/HUP deferring handlers and swallowed
 coprocess waits as 143 exactly like bash. Documented narrowings:
 wrapper shell (not a direct exec) and no `jobs`-table entry. Adds 1
 integration test.
+
+### New: `$RANDOM`, `$SECONDS`, `$EPOCHSECONDS`/`$EPOCHREALTIME`, `$FUNCNAME`, `$BASH_SOURCE`, `$LINENO` (C67)
+Closes out Tier IV completely. The clock/PRNG set are dynamic
+variables computed at read time (`RANDOM` seedable, bash's 0..=32767;
+`SECONDS=100` re-bases; epoch pair from the system clock). `FUNCNAME`
+and `BASH_SOURCE` are real arrays mirrored from call/source stacks.
+`LINENO` came cheaper than estimated: `RawPipeline` carries a line
+computed from newline-token counts — values byte-identical to bash for
+the same script. Documented approximations: here-doc bodies don't
+advance `LINENO`; `BASH_SOURCE` in a function reflects the source
+stack, not the definition site. Adds 1 integration test.

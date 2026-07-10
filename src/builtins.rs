@@ -1434,62 +1434,86 @@ fn unalias_cmd(argv: &[String]) -> i32 {
 /// flags/`-o` names aren't implemented yet; naming one is an error rather
 /// than a silently-ignored no-op.
 fn set_cmd(argv: &[String]) -> i32 {
+    // Flag changes are collected first and only applied once the *whole*
+    // invocation has validated — an invalid flag anywhere means nothing is
+    // applied at all, matching real bash exactly (verified directly:
+    // `set -eu -z` leaves errexit/nounset both off, and the shell survives
+    // even though `-e` textually preceded the bad `-z`; partial application
+    // would have errexit-killed the shell on `set`'s own failure).
+    let mut pending: Vec<(char, bool)> = Vec::new();
+    let apply = |pending: &[(char, bool)]| {
+        for &(flag, on) in pending {
+            match flag {
+                'e' => crate::vars::set_errexit(on),
+                'u' => crate::vars::set_nounset(on),
+                'x' => crate::vars::set_xtrace(on),
+                'p' => crate::vars::set_pipefail(on),
+                _ => unreachable!(),
+            }
+        }
+    };
     let mut args = argv[1..].iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "-e" => crate::vars::set_errexit(true),
-            "+e" => crate::vars::set_errexit(false),
-            "-u" => crate::vars::set_nounset(true),
-            "+u" => crate::vars::set_nounset(false),
-            "-x" => crate::vars::set_xtrace(true),
-            "+x" => crate::vars::set_xtrace(false),
-            // An invalid `-o`/`+o` name or a missing one is a hard error too
-            // (same "stop immediately" rule as an unrecognized flag below) —
-            // verified directly: `set -o badname a b` leaves `$1`/`$2`
-            // untouched, same as `set -z a b` does.
-            "-o" | "+o" => {
-                let on = arg == "-o";
-                match args.next().map(String::as_str) {
-                    Some("pipefail") => crate::vars::set_pipefail(on),
-                    Some(name) => {
-                        eprintln!("set: {name}: invalid option name");
-                        return 1;
-                    }
-                    None => {
-                        eprintln!("{}: option requires an argument -- 'o'", argv[0]);
-                        return 1;
-                    }
-                }
-            }
             // `--`: everything after becomes the new positional parameters,
             // even if it looks like a flag (`set -- -x` makes `$1` the
             // literal text `-x`, not the xtrace flag) — verified directly.
             "--" => {
+                apply(&pending);
                 crate::vars::set_positional(args.cloned().collect());
                 return 0;
             }
             // A bare word, not `-`/`+`-prefixed (so a genuinely unknown flag
-            // like `-z` still falls through to the `other` arm below and
+            // like `-z` still falls through to the flag arm below and
             // errors, matching real bash): this and everything after it
             // becomes the new positional parameters — `set a b c`, no `--`
             // needed, works exactly like `set -- a b c` does. `$0` is never
-            // touched by either form.
+            // touched by either form. Flags before the first bare word still
+            // apply (`set -e a b` turns errexit on *and* sets `$1`).
             other if !other.starts_with(['-', '+']) => {
+                apply(&pending);
                 let mut new_args = vec![other.to_string()];
                 new_args.extend(args.cloned());
                 crate::vars::set_positional(new_args);
                 return 0;
             }
-            // An unrecognized flag (`-z`) is a hard error — it must *not*
-            // fall through to the bare-word branch above and reassign
-            // positional parameters from whatever follows it, matching
-            // real bash exactly (`set -z a b` leaves `$1`/`$2` untouched).
+            // A `-`/`+`-prefixed flag word, possibly clustered (`set -eu`,
+            // `set -euo pipefail` — the near-universal script header) —
+            // each letter queues in turn; `o` consumes the *next word* as
+            // its option name even mid-cluster, same as real bash.
+            //
+            // An unrecognized letter (`set -z`, `set -ez`) is a hard error —
+            // it must *not* fall through and reassign positional parameters
+            // from whatever follows it, matching real bash exactly
+            // (`set -z a b` leaves `$1`/`$2` untouched). Same rule for an
+            // invalid or missing `-o` name — verified directly: `set -o
+            // badname a b` leaves `$1`/`$2` untouched too.
             other => {
-                eprintln!("set: {other}: not supported");
-                return 1;
+                let on = other.starts_with('-');
+                for c in other[1..].chars() {
+                    match c {
+                        'e' | 'u' | 'x' => pending.push((c, on)),
+                        'o' => match args.next().map(String::as_str) {
+                            Some("pipefail") => pending.push(('p', on)),
+                            Some(name) => {
+                                eprintln!("set: {name}: invalid option name");
+                                return 1;
+                            }
+                            None => {
+                                eprintln!("{}: option requires an argument -- 'o'", argv[0]);
+                                return 1;
+                            }
+                        },
+                        _ => {
+                            eprintln!("set: {other}: not supported");
+                            return 1;
+                        }
+                    }
+                }
             }
         }
     }
+    apply(&pending);
     0
 }
 

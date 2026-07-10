@@ -1086,6 +1086,19 @@ fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, St
                     out.push_str(&pid.to_string());
                 }
             }
+            // `$$` — the shell's own pid (C41). One process per shell here,
+            // so `std::process::id()` is the answer everywhere — rush runs
+            // subshell-ish constructs in-process, and real bash's `$$` is
+            // likewise the *parent* shell's pid even inside `(...)`/`$(...)`.
+            Some('$') => {
+                chars.next();
+                out.push_str(&std::process::id().to_string());
+            }
+            // `$-` — the currently-set single-letter options (C41).
+            Some('-') => {
+                chars.next();
+                out.push_str(&crate::vars::option_flags());
+            }
             // `$#` — number of positional parameters.
             Some('#') => {
                 chars.next();
@@ -1394,6 +1407,10 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         "#" => return Ok(crate::vars::arg_count().to_string()),
         "@" => return Ok(crate::vars::args().join(" ")),
         "*" => return Ok(crate::vars::args().join(&Ifs::current().star_sep)),
+        // `${$}` and `${-}` — braced spellings of `$$`/`$-` (C41), same as
+        // real bash.
+        "$" => return Ok(std::process::id().to_string()),
+        "-" => return Ok(crate::vars::option_flags()),
         _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
             let n: usize = inner.parse().map_err(|_| format!("${{{inner}}}: bad substitution"))?;
             return arg_checked(n);

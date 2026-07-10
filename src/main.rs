@@ -165,6 +165,13 @@ fn main() -> rustyline::Result<()> {
         vars::set_exported(&name, &value);
     }
 
+    // `$PPID` (C41): the invoking process's pid, seeded once at startup as
+    // an ordinary (non-exported, same as bash) shell variable — after the
+    // environment loop above, so a stale inherited `PPID` from a parent
+    // shell's environment can't shadow the real value.
+    #[cfg(unix)]
+    vars::set("PPID", &unsafe { libc::getppid() }.to_string());
+
     let args: Vec<String> = std::env::args().collect();
 
     // Non-interactive modes: `rush -c "cmd" [name args…]` and `rush FILE [args…]`.
@@ -207,6 +214,7 @@ fn run_source(src: &str) -> i32 {
 }
 
 fn interactive() -> rustyline::Result<()> {
+    vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
     let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::new()?;
     rl.set_helper(Some(completion::RushHelper::new()));
     let hist = history_path();

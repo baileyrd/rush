@@ -316,7 +316,7 @@ syntax directly.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 14 (11 done, 3 open — C42–C44)
+- **Tier I — correctness/POSIX risk:** 14 (12 done, 2 open — C43–C44)
 - **Tier II — missing standard builtins:** 17 (12 done, 5 open — C45–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
@@ -324,8 +324,8 @@ syntax directly.
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41 is now
-done and the remaining 32 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41 and C42
+are now done and the remaining 31 are open.
 
 ---
 
@@ -740,7 +740,7 @@ pipefail's letterlessness (`vars.rs`), plus five integration tests
 (including the stale-inherited-`PPID` shadowing case), `$-` lifecycle,
 clustered `set` flags, and the invalid-flag full-rollback semantics.
 
-### C42 — POSIX bracket character classes (`[[:alpha:]]`, `[[:digit:]]`, …) in globs/`case` (tracked)
+### C42 — POSIX bracket character classes (`[[:alpha:]]`, `[[:digit:]]`, …) in globs/`case` ✅ done
 POSIX-mandated; present in dash/bash/ksh/zsh (this one genuinely works in
 dash, unlike most of Tier IV's bash-family extensions — it's a POSIX
 baseline glob feature, not a convenience). `glob.rs`'s bracket-expression
@@ -753,6 +753,36 @@ and the `${v#pat}`-family pattern-removal operators alike, since they all
 share the same matcher. **Effort: S–M** — localized to `glob.rs`'s
 bracket parser: recognize `[:name:]` and map the standard POSIX class
 names to predicates.
+
+Implemented, exactly per the sketch: `parse_class` now recognizes
+`[:name:]` members, with the bracket's member list generalized from
+plain `(char, char)` ranges to a `ClassItem` enum (`Range` |
+`Named(predicate)`), so named classes mix freely with ordinary
+members/ranges (`[[:alpha:]5]`) and negate correctly (`[![:digit:]]`).
+All twelve standard names map to predicates: `digit`/`xdigit` are
+ASCII-only even in a Unicode locale (matching bash), the letter-ish
+classes use Rust's Unicode-aware predicates (agreeing with bash under
+the usual UTF-8 locales). Because `case`, filename globbing, and the
+pattern-removal operators all share this one matcher, one fix covered
+all three surfaces — each verified separately.
+
+Two edge cases were probed char-by-char against real bash rather than
+assumed: a *properly-delimited unknown name* (`[[:bogus:]]`) is a member
+that matches nothing, not a parse error; and an *unclosed* `[:`
+(`a[[:digit]`) triggers a genuine bash quirk — bash drops the `[` itself
+and keeps `:digit` as ordinary members (matches `ad`/`a:`, not `a[`),
+where dash keeps the `[` as a member too. Rush follows bash, this
+document's reference shell, on both.
+
+Verified against real bash (and dash for the POSIX-baseline cases; both
+invoked directly on identical fixture files): `a[[:digit:]]`,
+`a[[:alpha:]]`, `a[[:upper:]]`, `a[[:lower:]]`, `a[[:punct:]]`,
+`[[:alpha:]]*`, the mixed/negated forms, both edge cases, `case 5 in
+[[:digit:]])`, and `${v%%[[:digit:]]*}` — byte-identical output on every
+pattern. Regression tests: two unit tests in `glob.rs` (the full class
+table plus the edge cases) and two integration tests in
+`tests/exec_behavior.rs` (`case`/pattern-removal, and filename globbing
+against real fixture files).
 
 ### C43 — `declare -u` / `-l` / `-i` attributes are silently ignored (tracked)
 Present in bash/zsh (as `typeset`), and ksh93 (`typeset -u/-l/-i`); no
@@ -2468,6 +2498,6 @@ some natural orderings:
   — new lexer tokens, a new recursive parser production, and a new
   evaluator — but it's also a prerequisite for C56 (`=~` regex), so it's
   worth sequencing before rather than after that one.
-- **C42 (POSIX character classes) and C49 (`typeset`)** are both
+- **C42 (POSIX character classes, now done) and C49 (`typeset`)** are both
   small, self-contained wins with no dependencies on anything else in the
   new batch — good candidates to knock out first.

@@ -1281,3 +1281,30 @@ printed the literal two-character text `$$` (breaking the ubiquitous
 - Verified directly against real bash (plus dash/ksh, installed and
   invoked directly) across all of the above. Adds 1 unit test and 5
   integration tests; full suite and clippy stay clean.
+
+### Fix: POSIX bracket character classes (`[[:alpha:]]`, `[[:digit:]]`, …) misparsed as literal characters (C42)
+`case 5 in [[:digit:]])` silently never matched and `ls [[:alpha:]]*`
+silently matched nothing — the bracket parser only understood single
+characters and `c-c` ranges, so a `[:name:]` member was read as its own
+literal characters. One fix covers `case` patterns, filename globbing,
+and the `${v#pat}`-family pattern-removal operators, which all share
+`glob.rs`'s matcher.
+
+- **`parse_class` (`glob.rs`)** now recognizes `[:name:]` members; the
+  member list generalized from `(char, char)` ranges to a `ClassItem`
+  enum (`Range` | `Named(predicate)`), so named classes mix freely with
+  ordinary members (`[[:alpha:]5]`) and negate correctly
+  (`[![:digit:]]`). All twelve standard names are mapped;
+  `digit`/`xdigit` stay ASCII-only even in a Unicode locale, matching
+  bash.
+- **Edge cases probed char-by-char against real bash** rather than
+  assumed: a properly-delimited unknown name (`[[:bogus:]]`) is a member
+  matching nothing, not an error; an unclosed `[:` (`a[[:digit]`) hits a
+  real bash quirk — bash drops the `[` member itself and keeps `:digit`
+  as ordinary members (dash keeps the `[` too; rush follows bash, the
+  reference).
+- Verified against real bash (and dash) on identical fixture files
+  across all twelve classes, mixed/negated forms, both edge cases,
+  `case`, and pattern removal — byte-identical output on every pattern.
+  Adds 2 unit tests and 2 integration tests; full suite and clippy stay
+  clean.

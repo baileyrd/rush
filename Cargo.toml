@@ -21,3 +21,13 @@ rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", branch = "main"
 # raw libc bindings are the most stable surface for it.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Optional raw-syscall backend for the Unix syscall surface, selected by the
+# `rusty-libc` feature. libc stays a dependency either way (types, constants,
+# and fork — which stays on glibc per docs/LIBC_DEPENDENCY_ANALYSIS.md §4.2).
+rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", branch = "main", optional = true }
+
+[features]
+# Route rush's syscalls (signals, wait, job control, fds, rlimit, umask)
+# through the hand-rolled rusty_libc crate instead of the libc crate. Linux
+# only. Off by default until it proves out on the full suite and both arches.
+rusty-libc = ["dep:rusty_libc"]

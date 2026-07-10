@@ -22,6 +22,8 @@ mod history_expand;
 mod job;
 mod lexer;
 mod parser;
+#[cfg(unix)]
+mod sys;
 mod trap;
 mod vars;
 
@@ -151,7 +153,7 @@ fn hostname() -> String {
 
 #[cfg(unix)]
 fn prompt_char() -> char {
-    if unsafe { libc::getuid() } == 0 { '#' } else { '$' }
+    if unsafe { crate::sys::getuid() } == 0 { '#' } else { '$' }
 }
 
 #[cfg(not(unix))]
@@ -174,7 +176,7 @@ fn main() -> std::io::Result<()> {
     // rather than panicking).
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        crate::sys::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     // `TERM`/`HUP` traps (C21) need to work in every mode, not just
     // interactively — the target use case (a container's PID 1 catching
@@ -204,7 +206,7 @@ fn main() -> std::io::Result<()> {
     // environment loop above, so a stale inherited `PPID` from a parent
     // shell's environment can't shadow the real value.
     #[cfg(unix)]
-    vars::set("PPID", &unsafe { libc::getppid() }.to_string());
+    vars::set("PPID", &unsafe { crate::sys::getppid() }.to_string());
 
     let args: Vec<String> = std::env::args().collect();
 

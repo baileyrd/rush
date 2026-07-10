@@ -13,14 +13,20 @@ name = "rush"
 version = "0.1.1"
 dependencies = [
  "libc",
+ "rusty_libc",
  "rusty_lines",
  "rusty_regx",
 ]
 
 [[package]]
+name = "rusty_libc"
+version = "0.0.1"
+source = "git+https://github.com/baileyrd/rusty_libc?branch=main#45e0ba48e09a054f6b965d30f39aad40c224804e"
+
+[[package]]
 name = "rusty_lines"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_lines?branch=main#ca7de9fb4e91a5cfe03aec6880a2d43eeaab3a48"
+source = "git+https://github.com/baileyrd/rusty_lines?branch=main#0a4aac1c3dfaf0c73056ddd6bb6f9cdc500efce7"
 dependencies = [
  "libc",
  "unicode-width",

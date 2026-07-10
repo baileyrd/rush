@@ -36,8 +36,8 @@ extern "C" fn record_signal(sig: libc::c_int) {
 #[cfg(unix)]
 pub fn install_signal_handlers() {
     unsafe {
-        libc::signal(libc::SIGTERM, record_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, record_signal as *const () as libc::sighandler_t);
+        crate::sys::signal(libc::SIGTERM, record_signal as *const () as libc::sighandler_t);
+        crate::sys::signal(libc::SIGHUP, record_signal as *const () as libc::sighandler_t);
     }
 }
 
@@ -65,9 +65,9 @@ fn sync_signal_disposition(name: &str, trapped: bool) {
     if let Some(&(_, sig)) = crate::job::SIGNAL_TABLE.iter().find(|(n, _)| *n == name) {
         unsafe {
             if trapped {
-                libc::signal(sig, record_signal as *const () as libc::sighandler_t);
+                crate::sys::signal(sig, record_signal as *const () as libc::sighandler_t);
             } else {
-                libc::signal(sig, libc::SIG_DFL);
+                crate::sys::signal(sig, libc::SIG_DFL);
             }
         }
     }

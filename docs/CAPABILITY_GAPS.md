@@ -318,15 +318,15 @@ syntax directly.
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
-- **Tier II — missing standard builtins:** 17 (15 done, 2 open — C48–C49)
+- **Tier II — missing standard builtins:** 17 (16 done, 1 open — C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C47 are
-now done (re-closing Tier I completely) and the remaining 26 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C48 are
+now done (re-closing Tier I completely) and the remaining 25 are open.
 
 ---
 
@@ -1345,7 +1345,7 @@ Verified against real bash for every form above (including the
 test: one integration test covering execution, both lookup spellings,
 builtin precedence, and the clean not-found diagnostic.
 
-### C48 — `type -a` (list every match, not just the first) not supported (tracked)
+### C48 — `type -a` (list every match, not just the first) not supported ✅ done
 Present in bash/ksh93/zsh (not dash, which has no `type -a`). `type`/
 `type -t` (C12) already report the single highest-precedence match
 (function, then builtin, then `$PATH`); `-a` additionally lists every
@@ -1356,6 +1356,20 @@ Present in bash/ksh93/zsh (not dash, which has no `type -a`). `type`/
 showing the shadowed alternatives. **Effort: M** — `type`'s classifier
 needs to keep going past the first hit and scan every `$PATH` directory
 for additional matches, not stop at the first.
+
+Implemented: a new `classify_all` alongside the existing single-hit
+classifier — alias, keyword, function, builtin in precedence order,
+then *every* `$PATH` directory's match in order (duplicate directories
+deliberately not deduped: real bash lists `ls` twice for
+`PATH=/bin:/usr/bin:/bin`, verified directly, and rush now matches
+byte-for-byte). `type`'s flag parsing generalizes to clustered
+`-a`/`-t` words (`type -at echo` → `builtin`/`file`/`file`, same as
+bash). One accepted narrowing, documented: for a function, bash's
+`type -a` prints the full function *body* after the header line; rush
+keeps its existing one-line `f is a function` form. Verified against
+real bash byte-identically for the builtin+files, `-at`, and
+duplicate-directory cases; not-found stays status 1. One integration
+test covers all of the above.
 
 ### C49 — `typeset` (ksh/zsh's own spelling of `declare`) isn't registered at all (tracked)
 ksh93 has *only* `typeset` (no `declare` at all); zsh and bash accept

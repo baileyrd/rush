@@ -1264,6 +1264,38 @@ fn classify(name: &str, keywords: bool) -> Option<Kind> {
     resolve_in_path(name).map(Kind::File)
 }
 
+/// Every way `name` resolves, highest-precedence first — `type -a` (C48):
+/// alias, keyword, function, builtin, then *every* `$PATH` match, one per
+/// directory in order (duplicate directories deliberately not deduped —
+/// real bash lists `ls` twice for `PATH=/bin:/usr/bin:/bin`, verified
+/// directly).
+fn classify_all(name: &str) -> Vec<Kind> {
+    let mut kinds = Vec::new();
+    if let Some(value) = crate::alias::get(name) {
+        kinds.push(Kind::Alias(value));
+    }
+    if crate::parser::RESERVED.contains(&name) {
+        kinds.push(Kind::Keyword);
+    }
+    if crate::func::exists(name) {
+        kinds.push(Kind::Function);
+    }
+    if is_builtin(name) {
+        kinds.push(Kind::Builtin);
+    }
+    if name.contains('/') {
+        kinds.extend(resolve_in_path(name).map(Kind::File));
+    } else if let Some(path) = crate::vars::get("PATH") {
+        kinds.extend(
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .filter(|c| is_executable_file(c))
+                .map(Kind::File),
+        );
+    }
+    kinds
+}
+
 /// Search `$PATH` for an executable file named `name`. A `name` containing
 /// `/` is treated as an explicit path (checked directly, not searched for)
 /// rather than a `$PATH` lookup.
@@ -1388,20 +1420,43 @@ fn command_v(names: &[String], verbose: bool, default_path: bool) -> i32 {
 /// `-t` prints just the one-word classification instead of the full
 /// sentence — useful in a script (`[ "$(type -t foo)" = function ]`).
 fn type_cmd(argv: &[String]) -> i32 {
-    let (just_kind, names) =
-        if argv.get(1).map(String::as_str) == Some("-t") { (true, &argv[2..]) } else { (false, &argv[1..]) };
+    // `-t` (one-word label) and `-a` (every match, C48) — alone or
+    // clustered (`type -at`), same as bash.
+    let mut just_kind = false;
+    let mut all = false;
+    let mut idx = 1;
+    while idx < argv.len() {
+        let Some(flags) = argv[idx].strip_prefix('-').filter(|f| !f.is_empty() && f.chars().all(|c| matches!(c, 't' | 'a'))) else {
+            break;
+        };
+        for c in flags.chars() {
+            match c {
+                't' => just_kind = true,
+                'a' => all = true,
+                _ => unreachable!(),
+            }
+        }
+        idx += 1;
+    }
+    let names = &argv[idx..];
     if names.is_empty() {
-        eprintln!("type: usage: type [-t] name ...");
+        eprintln!("type: usage: type [-at] name ...");
         return 2;
     }
     let mut status = 0;
     for name in names {
-        match classify(name, true) {
-            Some(kind) => println!("{}", if just_kind { kind.label().to_string() } else { kind.describe(name) }),
-            None => {
-                eprintln!("type: {name}: not found");
-                status = 1;
-            }
+        let kinds = if all {
+            classify_all(name)
+        } else {
+            classify(name, true).into_iter().collect()
+        };
+        if kinds.is_empty() {
+            eprintln!("type: {name}: not found");
+            status = 1;
+            continue;
+        }
+        for kind in kinds {
+            println!("{}", if just_kind { kind.label().to_string() } else { kind.describe(name) });
         }
     }
     status

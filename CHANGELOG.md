@@ -1418,3 +1418,12 @@ still wins over a default-path file, same as bash. Also fixed alongside:
 the synthetic trailing `/` used internally to force a clean NotFound no
 longer leaks into "command not found" diagnostics. Verified against
 real bash for every form; adds 1 integration test.
+
+### Fix: `type -a` parsed `-a` as a name to look up (C48)
+`type -a echo` reported `-a: not found` next to echo's single match,
+never showing shadowed alternatives. New `classify_all` lists every
+match — alias/keyword/function/builtin in precedence order, then every
+`$PATH` directory's hit in order (duplicates not deduped, matching
+bash byte-for-byte). Flags cluster (`type -at`). Accepted narrowing:
+bash prints a function's full body under `type -a`; rush keeps its
+one-line form. Verified against real bash; adds 1 integration test.

@@ -2194,3 +2194,26 @@ fn command_p_uses_the_default_system_path() {
     assert!(err.contains("totallynonexistent_c47: command not found"), "got: {err:?}");
     assert!(!err.contains("totallynonexistent_c47/"), "synthetic slash leaked: {err:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn type_a_lists_every_match() {
+    // C48: `type -a` used to parse `-a` as a name to look up. It now
+    // lists every match — builtin first, then every $PATH hit in
+    // directory order (byte-identical to bash for `type -a echo` here).
+    let (out, _) = rush("PATH=/bin:/usr/bin; type -a echo");
+    assert_eq!(out, "echo is a shell builtin\necho is /bin/echo\necho is /usr/bin/echo\n");
+
+    // Clustered with -t; duplicate PATH directories deliberately not
+    // deduped (bash lists ls twice for /bin:/usr/bin:/bin — verified).
+    let (out, _) = rush("PATH=/bin:/usr/bin; type -at echo");
+    assert_eq!(out, "builtin\nfile\nfile\n");
+    let (out, _) = rush("PATH=/bin:/usr/bin:/bin; type -a ls");
+    assert_eq!(out.lines().count(), 3, "got: {out:?}");
+
+    // Alias/keyword/function still rank ahead; not-found is status 1.
+    let (out, _) = rush("type -a if");
+    assert_eq!(out, "if is a shell keyword\n");
+    let (_, status) = rush("type -a nosuch_c48 2>/dev/null");
+    assert_eq!(status, 1);
+}

@@ -797,6 +797,7 @@ mod tests {
             assignments: vec![],
             heredoc: None,
             local_decls: vec![],
+            decl_attrs: crate::vars::Attrs::default(),
         })
     }
 

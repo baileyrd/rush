@@ -1959,3 +1959,51 @@ fn posix_character_classes_in_filename_globbing() {
     assert_eq!(out, "aB ab\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn declare_case_attributes_transform_assignments() {
+    // C43: `declare -u/-l` used to be misparsed as bare variable names —
+    // the assignment proceeded untransformed with no diagnostic.
+    let (out, _) = rush("declare -u u=hello; echo $u; u=bye; echo $u");
+    assert_eq!(out, "HELLO\nBYE\n");
+
+    let (out, _) = rush("declare -l L=ABC; echo $L");
+    assert_eq!(out, "abc\n");
+
+    // Not retroactive: an existing value stays; future assignments map.
+    let (out, _) = rush("x=abc; declare -u x; echo $x; x=def; echo $x");
+    assert_eq!(out, "abc\nDEF\n");
+
+    // Attributes apply per array element; `unset` drops the attribute.
+    let (out, _) = rush("declare -au arr=(a b); echo ${arr[@]}");
+    assert_eq!(out, "A B\n");
+    let (out, _) = rush("declare -u u=x; unset u; u=abc; echo $u");
+    assert_eq!(out, "abc\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn declare_integer_attribute_routes_through_arithmetic() {
+    // C43: `declare -i n; n=2+3` used to store the literal text `2+3`.
+    let (out, _) = rush("declare -i n; n=2+3; echo $n");
+    assert_eq!(out, "5\n");
+
+    // Names resolve inside the expression; `+=` is arithmetic addition.
+    let (out, _) = rush("m=7; declare -i k; k=m+2; echo $k; declare -i n=5; n+=3; echo $n");
+    assert_eq!(out, "9\n8\n");
+
+    // An unresolvable word is 0 (same as bash); a syntax error keeps the
+    // old value and prints a diagnostic.
+    let (out, _) = rush("declare -i n; n=foo; echo [$n]; n=7; n=2+ 2>/dev/null; echo [$n]");
+    assert_eq!(out, "[0]\n[7]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn local_attributes_are_function_scoped() {
+    // C43: `local -u` — the attribute applies inside the call and is gone
+    // (along with the local value) after it returns.
+    let (out, _) = rush("v=Mixed; f(){ local -u v=abc; echo in=$v; v=ghi; echo in=$v; }; f; echo out=$v; v=next; echo $v");
+    assert_eq!(out, "in=ABC\nin=GHI\nout=Mixed\nnext\n");
+}

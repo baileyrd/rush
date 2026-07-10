@@ -224,7 +224,8 @@ below).
 `arr+=([k]=v ...)` merge-by-key, `unset 'arr[k]'`, and `local`/`declare -A
 arr=(...)` are all done. Not supported: a literal multi-word key written
 directly inside `[...]` in an assignment (`arr[key with spaces]=val`; the
-`k="b c"; arr[$k]=val` idiom works); `declare -p`/`-x`/`-r`/`-i`/`-f`;
+`k="b c"; arr[$k]=val` idiom works); `declare -p`/`-x`/`-r`/`-f`
+(`-u`/`-l`/`-i` attribute transforms are done — C43);
 `declare`'s function-local scoping (always global/current-scope in rush).
 
 †† Comma-lists (`{a,b,c}`), nesting, cross products (`{a,b}{c,d}`), and
@@ -316,7 +317,7 @@ syntax directly.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 14 (12 done, 2 open — C43–C44)
+- **Tier I — correctness/POSIX risk:** 14 (13 done, 1 open — C44)
 - **Tier II — missing standard builtins:** 17 (12 done, 5 open — C45–C49)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
@@ -324,8 +325,8 @@ syntax directly.
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41 and C42
-are now done and the remaining 31 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C43 are
+now done and the remaining 30 are open.
 
 ---
 
@@ -784,7 +785,7 @@ table plus the edge cases) and two integration tests in
 `tests/exec_behavior.rs` (`case`/pattern-removal, and filename globbing
 against real fixture files).
 
-### C43 — `declare -u` / `-l` / `-i` attributes are silently ignored (tracked)
+### C43 — `declare -u` / `-l` / `-i` attributes are silently ignored ✅ done
 Present in bash/zsh (as `typeset`), and ksh93 (`typeset -u/-l/-i`); no
 POSIX/dash equivalent. The `declare`/`local` flag parser (`expand.rs`)
 recognizes only `-a`/`-A`; any other flag (`-u`, `-l`, `-i`, `-r`, `-n`,
@@ -798,6 +799,43 @@ root cause (no attribute field on `Var` beyond `exported: bool`).
 **Effort: M** — needs an attribute flag on `Var` (`vars.rs`), applied at
 every assignment (`-u`/`-l` transform the value; `-i` routes the RHS
 through the arithmetic evaluator `arith.rs` already provides).
+
+Implemented, with one deliberate deviation from the sketch: attributes
+live in their own `ATTRS: HashMap<String, Attrs>` map (`vars.rs`) rather
+than as a field on `Var`, because an attribute can be declared on a name
+with no value yet (`declare -i n; n=2+3` — the item's own headline
+repro) and bash keeps the variable *genuinely unset* in that state
+(`${n+set}` stays empty); `VARS` has no unset-but-existing
+representation, and inventing one would have rippled through every
+exhaustive `VarValue` match in the codebase. The transforms hook the
+central assignment paths (`set`, `set_exported`, `append_scalar`,
+`set_array` per-element, `array_set`, `assoc_set`), so every assignment
+form — plain, `+=`, array literal, one-element — transforms.
+
+Semantics were probed against real bash case-by-case rather than
+assumed, and several turned out non-obvious: attributes are **not
+retroactive** (`x=abc; declare -u x` leaves `abc`; the next assignment
+maps); `-u` and `-l` **displace each other across separate
+declarations** but **cancel when clustered together** (`declare -lu
+w=Abc` leaves `Abc` untouched — a real bash quirk, matched); under `-i`,
+`+=` becomes **arithmetic addition** (`declare -i n=5; n+=3` → 8), an
+unresolvable name evaluates to 0, and a syntax error keeps the old value
+(bash also returns status 1 there — the diagnostic is matched, the
+status is an accepted simplification, documented in the code); `unset`
+drops attributes along with the value; and a `local -u` binding starts
+from its own declared attributes (not the shadowed outer variable's)
+with the outer attribute state restored on return — local frames now
+capture prior attributes alongside prior values.
+
+The flag parser in `expand.rs` (shared by `local`/`declare`) now accepts
+clustered flag words over `-a/-A/-u/-l/-i` (`declare -ui n`), threading
+the attributes through a new `Command::decl_attrs` field to
+`local_from_decls`/`declare_from_decls`. A word with any *other* letter
+still ends flag parsing exactly as before, keeping `-r`/`-n`/`-x`/`-p`
+(C45/C62/C48) no worse than they were. Verified against real bash on
+all of the above plus ksh93/zsh's `typeset -u` equivalents for the
+headline cases; regression tests: three unit tests (`vars.rs`) and three
+integration tests (`tests/exec_behavior.rs`).
 
 ### C44 — `trap` with a numeric or `SIG`-prefixed signal spec registers but never fires (tracked)
 POSIX explicitly permits the numeric form; present in bash/dash. Multiple

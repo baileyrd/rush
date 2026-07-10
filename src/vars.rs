@@ -33,6 +33,34 @@ struct Var {
     exported: bool,
 }
 
+/// A variable's declared attributes (`declare -u/-l/-i`, C43): transforms
+/// applied at *every* subsequent assignment, not just the declaring one.
+/// Kept in their own map (`ATTRS`) rather than on [`Var`] because an
+/// attribute can be declared on a name that has no value yet (`declare -i
+/// n; n=2+3`) — bash keeps the variable genuinely unset in that state
+/// (`${n+set}` is empty), and `VARS` has no unset-but-existing
+/// representation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Attrs {
+    /// `-u`: assigned values are uppercased. When `lower` is *also* set
+    /// (only reachable via one clustered `declare -lu`), neither transform
+    /// applies — verified directly against real bash, where `declare -lu
+    /// w=Abc` leaves `Abc` untouched.
+    pub upper: bool,
+    /// `-l`: assigned values are lowercased.
+    pub lower: bool,
+    /// `-i`: the assigned value is evaluated as an arithmetic expression
+    /// (variable names resolve, an unset name is 0), and `+=` becomes
+    /// arithmetic addition.
+    pub integer: bool,
+}
+
+impl Attrs {
+    pub fn any(&self) -> bool {
+        self.upper || self.lower || self.integer
+    }
+}
+
 /// The value side of an assignment word — scalar (`NAME=value`), a whole
 /// indexed-array literal's already-expanded elements (`NAME=(a b c)`), or
 /// an associative-array literal's key/value pairs (`NAME=([k]=v ...)`,
@@ -118,7 +146,7 @@ thread_local! {
     // One frame per active function call, pushed/popped by
     // `push_local_frame`/`pop_local_frame`. Each frame lists the names
     // `local` has shadowed *in that call*, alongside what they were
-    // beforehand (`None` meaning "didn't exist") — see `declare_local`.
+    // beforehand (`None` meaning "didn't exist") — see `declare_local_attrs`.
     static LOCAL_STACK: RefCell<Vec<LocalFrame>> = const { RefCell::new(Vec::new()) };
     // `getopts`'s internal progress within the *current* `$OPTIND` word —
     // `(optind, char_pos)`. Not a shell-visible variable (bash doesn't
@@ -130,13 +158,19 @@ thread_local! {
     // Whether this shell is running its interactive REPL — `$-` includes
     // `i` when set (see `option_flags`).
     static INTERACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    // Declared variable attributes (`declare -u/-l/-i`, C43) — see `Attrs`'s
+    // own doc comment for why this is a separate map rather than a `Var`
+    // field.
+    static ATTRS: RefCell<HashMap<String, Attrs>> = RefCell::new(HashMap::new());
 }
 
 /// A prior value (`value`, `exported`) to restore when a `local`-shadowed
 /// name's function call returns, or `None` if the name didn't exist before.
 type PriorValue = Option<(VarValue, bool)>;
-/// One function call's set of `local`-shadowed names, in declaration order.
-type LocalFrame = Vec<(String, PriorValue)>;
+/// One function call's set of `local`-shadowed names, in declaration order,
+/// each with the prior value and the prior declared attributes (C43) to
+/// restore on return.
+type LocalFrame = Vec<(String, PriorValue, Attrs)>;
 
 pub fn set_errexit(on: bool) {
     ERREXIT.with(|e| *e.borrow_mut() = on);
@@ -372,11 +406,105 @@ pub fn is_assoc(name: &str) -> bool {
     VARS.with(|v| matches!(v.borrow().get(name).map(|x| &x.value), Some(VarValue::Assoc(_))))
 }
 
-/// Remove a shell variable (`unset NAME`) — scalar or array, the whole thing.
+/// Remove a shell variable (`unset NAME`) — scalar or array, the whole
+/// thing, including any declared attributes (`unset` drops `-u/-l/-i` in
+/// real bash too, verified directly: `declare -u u=x; unset u; u=abc`
+/// leaves `abc` untransformed).
 pub fn unset(name: &str) {
     VARS.with(|v| {
         v.borrow_mut().remove(name);
     });
+    ATTRS.with(|a| {
+        a.borrow_mut().remove(name);
+    });
+}
+
+/// Remove just a variable's *value*, keeping any declared attributes —
+/// `declare_local`'s bare `local name` uses this so `local -u v; v=hi`
+/// still uppercases (the intervening "leave it unset" step must not strip
+/// the attribute the same invocation just declared).
+fn remove_value(name: &str) {
+    VARS.with(|v| {
+        v.borrow_mut().remove(name);
+    });
+}
+
+/// `name`'s declared attributes (default: none).
+pub fn attrs_of(name: &str) -> Attrs {
+    ATTRS.with(|a| a.borrow().get(name).copied().unwrap_or_default())
+}
+
+/// Merge newly-declared attributes into `name`'s existing ones (`declare
+/// -u x` after `declare -i x` keeps both). `-u` and `-l` displace each
+/// other when declared *separately* (verified: `declare -l x; declare -u
+/// x` leaves only `-u`) but coexist when declared in one cluster
+/// (`declare -lu`), where they cancel — see `Attrs::upper`.
+pub fn set_attrs(name: &str, new: Attrs) {
+    ATTRS.with(|a| {
+        let mut m = a.borrow_mut();
+        let cur = m.entry(name.to_string()).or_default();
+        if new.integer {
+            cur.integer = true;
+        }
+        match (new.upper, new.lower) {
+            (true, true) => {
+                cur.upper = true;
+                cur.lower = true;
+            }
+            (true, false) => {
+                cur.upper = true;
+                cur.lower = false;
+            }
+            (false, true) => {
+                cur.lower = true;
+                cur.upper = false;
+            }
+            (false, false) => {}
+        }
+    });
+}
+
+/// Replace `name`'s attributes outright (used by `local`'s fresh binding,
+/// which doesn't inherit the outer variable's attributes).
+fn reset_attrs(name: &str, attrs: Attrs) {
+    ATTRS.with(|a| {
+        let mut m = a.borrow_mut();
+        if attrs.any() {
+            m.insert(name.to_string(), attrs);
+        } else {
+            m.remove(name);
+        }
+    });
+}
+
+/// Apply `name`'s declared attribute transforms to an incoming value
+/// (C43): `-i` evaluates it as arithmetic (empty → 0, same as bash), then
+/// `-u`/`-l` case-map it. `None` means the assignment must be dropped
+/// entirely — an invalid arithmetic expression under `-i` keeps the old
+/// value, matching bash (which errors with status 1; the diagnostic is
+/// printed here, the status is an accepted simplification).
+fn transformed(name: &str, value: &str) -> Option<String> {
+    let attrs = attrs_of(name);
+    let mut v = value.to_string();
+    if attrs.integer {
+        if v.trim().is_empty() {
+            v = "0".to_string();
+        } else {
+            match crate::arith::eval(&v) {
+                Ok(n) => v = n.to_string(),
+                Err(e) => {
+                    eprintln!("rush: {name}: {value}: {e}");
+                    return None;
+                }
+            }
+        }
+    }
+    if attrs.upper && !attrs.lower {
+        v = v.to_uppercase();
+    } else if attrs.lower && !attrs.upper {
+        v = v.to_lowercase();
+    }
+    Some(v)
 }
 
 /// Set a variable's scalar value, preserving its exported flag if it already
@@ -386,6 +514,10 @@ pub fn unset(name: &str) {
 /// `arr[1]`/`arr[2]` alone, verified directly for both array kinds); a
 /// plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
+    let Some(value) = transformed(name, value) else {
+        return;
+    };
+    let value = value.as_str();
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -410,11 +542,11 @@ pub fn set(name: &str, value: &str) {
 /// `exported`), so this niche interaction with a pre-existing array isn't
 /// specially handled.
 pub fn set_exported(name: &str, value: &str) {
+    let Some(value) = transformed(name, value) else {
+        return;
+    };
     VARS.with(|v| {
-        v.borrow_mut().insert(
-            name.to_string(),
-            Var { value: VarValue::Scalar(value.to_string()), exported: true },
-        );
+        v.borrow_mut().insert(name.to_string(), Var { value: VarValue::Scalar(value), exported: true });
     });
 }
 
@@ -435,7 +567,14 @@ pub fn export(name: &str) {
 /// (arrays are never actually exported — see `exported` — but there's no
 /// reason to drop the flag if a future export-arrays feature needs it).
 pub fn set_array(name: &str, elements: Vec<String>) {
-    let array: BTreeMap<usize, String> = elements.into_iter().enumerate().collect();
+    // Attributes apply per element (`declare -au arr=(a b)` uppercases
+    // both, verified against bash); an element `-i` can't evaluate keeps
+    // its raw text rather than dropping the whole assignment.
+    let array: BTreeMap<usize, String> = elements
+        .into_iter()
+        .map(|e| transformed(name, &e).unwrap_or(e))
+        .enumerate()
+        .collect();
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         let exported = m.get(name).is_some_and(|x| x.exported);
@@ -556,6 +695,10 @@ pub fn array_len(name: &str) -> usize {
 /// `index` itself *is* 0, which just overwrites it) — both verified
 /// directly against real bash.
 pub fn array_set(name: &str, index: usize, value: &str) {
+    let Some(value) = transformed(name, value) else {
+        return;
+    };
+    let value = value.as_str();
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -665,6 +808,24 @@ pub fn array_append(name: &str, elements: Vec<String>) {
 /// other element untouched. Creates a fresh scalar if `name` didn't exist
 /// yet.
 pub fn append_scalar(name: &str, value: &str) {
+    // Attribute-aware paths (C43): under `-i`, `+=` is arithmetic
+    // *addition* (`declare -i n=5; n+=3` → 8, verified against bash);
+    // under `-u`/`-l`, the appended text is case-mapped too, which routing
+    // the combined value back through `set` handles in one place.
+    let attrs = attrs_of(name);
+    if attrs.integer {
+        let old = get(name).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        match crate::arith::eval(value) {
+            Ok(n) => set(name, &(old + n).to_string()),
+            Err(e) => eprintln!("rush: {name}: {value}: {e}"),
+        }
+        return;
+    }
+    if attrs.any() {
+        let combined = format!("{}{}", get(name).unwrap_or_default(), value);
+        set(name, &combined);
+        return;
+    }
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -711,6 +872,10 @@ pub fn assoc_unset_key(name: &str, key: &str) {
 /// entry point; calling this directly on a non-associative name would
 /// silently convert it, which is why it's not `pub`).
 fn assoc_set(name: &str, key: &str, value: &str) {
+    let Some(value) = transformed(name, value) else {
+        return;
+    };
+    let value = value.as_str();
     VARS.with(|v| {
         let mut m = v.borrow_mut();
         match m.get_mut(name) {
@@ -816,15 +981,16 @@ pub fn pop_local_frame() {
     };
     VARS.with(|v| {
         let mut m = v.borrow_mut();
-        for (name, prior) in frame {
+        for (name, prior, prior_attrs) in frame {
             match prior {
                 Some((value, exported)) => {
-                    m.insert(name, Var { value, exported });
+                    m.insert(name.clone(), Var { value, exported });
                 }
                 None => {
                     m.remove(&name);
                 }
             }
+            reset_attrs(&name, prior_attrs);
         }
     });
 }
@@ -839,41 +1005,51 @@ pub fn pop_local_frame() {
 /// in *this same* call keeps its originally-captured prior value, so a
 /// second `local x` in one call still restores to the pre-call value, not
 /// the first `local`'s.
-pub fn declare_local(name: &str, value: Option<&str>) -> bool {
+/// `local name[=value]` with declared attributes (`local -u/-l/-i`, C43),
+/// installed before the initializer applies.
+/// The local binding starts from the *declared* attributes alone — it does
+/// not inherit the shadowed outer variable's — and the attributes are
+/// installed before the initializer applies, so `local -u v=hi` uppercases.
+/// A bare `local -u v` (no initializer) removes only the value, keeping the
+/// just-declared attribute for later assignments in the call.
+pub fn declare_local_attrs(name: &str, value: Option<&str>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
+        reset_attrs(name, attrs);
         match value {
             Some(v) => set(name, v),
-            None => unset(name),
+            None => remove_value(name),
         }
     }
     declared
 }
 
-/// As [`declare_local`], but for `local arr=(a b c)` — the array-literal
-/// form. Same shadow/restore contract, just setting a fresh array instead
-/// of a scalar.
-pub fn declare_local_array(name: &str, elements: Vec<String>) -> bool {
+/// As [`declare_local_attrs`], but for `local arr=(a b c)` — the
+/// array-literal form. Same shadow/restore contract, just setting a fresh
+/// array instead of a scalar.
+pub fn declare_local_array_attrs(name: &str, elements: Vec<String>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
+        reset_attrs(name, attrs);
         set_array(name, elements);
     }
     declared
 }
 
-/// As [`declare_local`], but for `local -A arr=([k]=v ...)` — the
+/// As [`declare_local_attrs`], but for `local -A arr=([k]=v ...)` — the
 /// associative-array-literal form.
-pub fn declare_local_assoc(name: &str, pairs: Vec<(String, String)>) -> bool {
+pub fn declare_local_assoc_attrs(name: &str, pairs: Vec<(String, String)>, attrs: Attrs) -> bool {
     let declared = capture_for_local(name);
     if declared {
+        reset_attrs(name, attrs);
         set_assoc(name, pairs);
     }
     declared
 }
 
-/// Shared by `declare_local`/`declare_local_array`: capture `name`'s prior
+/// Shared by `declare_local_attrs`/`declare_local_array_attrs`: capture `name`'s prior
 /// value into the current function call's frame (only the *first* time
-/// this name is made local within that one call — see `declare_local`'s own
+/// this name is made local within that one call — see `declare_local_attrs`'s own
 /// doc comment for why a second `local` in the same call must not
 /// re-capture), reporting whether there's an active frame to declare into
 /// at all.
@@ -883,9 +1059,9 @@ fn capture_for_local(name: &str) -> bool {
         let Some(frame) = stack.last_mut() else {
             return false;
         };
-        if !frame.iter().any(|(n, _)| n == name) {
+        if !frame.iter().any(|(n, ..)| n == name) {
             let prior = VARS.with(|v| v.borrow().get(name).map(|x| (x.value.clone(), x.exported)));
-            frame.push((name.to_string(), prior));
+            frame.push((name.to_string(), prior, attrs_of(name)));
         }
         true
     })
@@ -986,7 +1162,7 @@ mod tests {
 
     #[test]
     fn local_outside_a_function_is_rejected() {
-        assert!(!declare_local("RUSH_LOCAL_TOP", Some("1")));
+        assert!(!declare_local_attrs("RUSH_LOCAL_TOP", Some("1"), Attrs::default()));
         // Rejected: must not fall through to setting it as a plain global.
         assert_eq!(get("RUSH_LOCAL_TOP"), None);
     }
@@ -996,17 +1172,17 @@ mod tests {
         set("RUSH_LOCAL_X", "outer");
 
         push_local_frame();
-        assert!(declare_local("RUSH_LOCAL_X", Some("inner")));
+        assert!(declare_local_attrs("RUSH_LOCAL_X", Some("inner"), Attrs::default()));
         assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("inner"));
 
         // A bare `local name` (no `=value`) leaves it genuinely unset, not
         // merely set to `""`.
-        assert!(declare_local("RUSH_LOCAL_Y", None));
+        assert!(declare_local_attrs("RUSH_LOCAL_Y", None, Attrs::default()));
         assert_eq!(get("RUSH_LOCAL_Y"), None);
 
         // A second `local` for the same name in the *same* frame doesn't
         // re-capture — it must still restore to the pre-frame value.
-        assert!(declare_local("RUSH_LOCAL_X", Some("inner2")));
+        assert!(declare_local_attrs("RUSH_LOCAL_X", Some("inner2"), Attrs::default()));
         assert_eq!(get("RUSH_LOCAL_X").as_deref(), Some("inner2"));
 
         pop_local_frame();
@@ -1020,10 +1196,10 @@ mod tests {
         set("RUSH_LOCAL_N", "top");
 
         push_local_frame();
-        declare_local("RUSH_LOCAL_N", Some("outer_call"));
+        declare_local_attrs("RUSH_LOCAL_N", Some("outer_call"), Attrs::default());
 
         push_local_frame();
-        declare_local("RUSH_LOCAL_N", Some("inner_call"));
+        declare_local_attrs("RUSH_LOCAL_N", Some("inner_call"), Attrs::default());
         assert_eq!(get("RUSH_LOCAL_N").as_deref(), Some("inner_call"));
         pop_local_frame();
 
@@ -1040,7 +1216,7 @@ mod tests {
     fn local_of_a_name_that_never_existed_is_removed_on_pop() {
         unset("RUSH_LOCAL_NEW");
         push_local_frame();
-        declare_local("RUSH_LOCAL_NEW", Some("value"));
+        declare_local_attrs("RUSH_LOCAL_NEW", Some("value"), Attrs::default());
         assert_eq!(get("RUSH_LOCAL_NEW").as_deref(), Some("value"));
         pop_local_frame();
         assert_eq!(get("RUSH_LOCAL_NEW"), None);
@@ -1123,7 +1299,7 @@ mod tests {
         set_array("RUSH_LOCAL_ARR", vec!["outer".into()]);
 
         push_local_frame();
-        assert!(declare_local_array("RUSH_LOCAL_ARR", vec!["inner1".into(), "inner2".into()]));
+        assert!(declare_local_array_attrs("RUSH_LOCAL_ARR", vec!["inner1".into(), "inner2".into()], Attrs::default()));
         assert_eq!(array_values("RUSH_LOCAL_ARR"), vec!["inner1", "inner2"]);
         pop_local_frame();
 
@@ -1185,7 +1361,7 @@ mod tests {
         set_assoc("RUSH_LOCAL_ASSOC", vec![("a".into(), "outer".into())]);
 
         push_local_frame();
-        assert!(declare_local_assoc("RUSH_LOCAL_ASSOC", vec![("a".into(), "inner".into())]));
+        assert!(declare_local_assoc_attrs("RUSH_LOCAL_ASSOC", vec![("a".into(), "inner".into())], Attrs::default()));
         assert_eq!(assoc_get("RUSH_LOCAL_ASSOC", "a").as_deref(), Some("inner"));
         pop_local_frame();
 
@@ -1210,5 +1386,82 @@ mod tests {
         // (verified against real bash).
         set_pipefail(true);
         assert_eq!(option_flags(), "iux");
+    }
+
+    // C43: declared attributes transform every subsequent assignment —
+    // each expectation below mirrors a directly-verified bash behavior.
+    #[test]
+    fn attrs_transform_assignments() {
+        let upper = Attrs { upper: true, ..Default::default() };
+        let integer = Attrs { integer: true, ..Default::default() };
+
+        unset("RUSH_ATTR_U");
+        set_attrs("RUSH_ATTR_U", upper);
+        set("RUSH_ATTR_U", "hello");
+        assert_eq!(get("RUSH_ATTR_U").as_deref(), Some("HELLO"));
+        // `+=` case-maps the appended text too.
+        append_scalar("RUSH_ATTR_U", "bye");
+        assert_eq!(get("RUSH_ATTR_U").as_deref(), Some("HELLOBYE"));
+        // `unset` drops the attribute along with the value.
+        unset("RUSH_ATTR_U");
+        set("RUSH_ATTR_U", "abc");
+        assert_eq!(get("RUSH_ATTR_U").as_deref(), Some("abc"));
+        unset("RUSH_ATTR_U");
+
+        unset("RUSH_ATTR_I");
+        set_attrs("RUSH_ATTR_I", integer);
+        set("RUSH_ATTR_I", "2+3");
+        assert_eq!(get("RUSH_ATTR_I").as_deref(), Some("5"));
+        // `+=` under `-i` is arithmetic addition.
+        append_scalar("RUSH_ATTR_I", "3");
+        assert_eq!(get("RUSH_ATTR_I").as_deref(), Some("8"));
+        // An unresolvable word evaluates to 0 (unset names are 0); an
+        // outright syntax error keeps the old value.
+        set("RUSH_ATTR_I", "no_such_var_xyz");
+        assert_eq!(get("RUSH_ATTR_I").as_deref(), Some("0"));
+        set("RUSH_ATTR_I", "7");
+        set("RUSH_ATTR_I", "2+");
+        assert_eq!(get("RUSH_ATTR_I").as_deref(), Some("7"));
+        unset("RUSH_ATTR_I");
+    }
+
+    // C43: `-u` and `-l` displace each other across separate declarations
+    // but cancel when declared together in one cluster — both verified
+    // against real bash (`declare -l x; declare -u x` leaves only `-u`;
+    // `declare -lu w=Abc` transforms nothing).
+    #[test]
+    fn upper_and_lower_interact_like_bash() {
+        unset("RUSH_ATTR_UL");
+        set_attrs("RUSH_ATTR_UL", Attrs { lower: true, ..Default::default() });
+        set_attrs("RUSH_ATTR_UL", Attrs { upper: true, ..Default::default() });
+        set("RUSH_ATTR_UL", "Abc");
+        assert_eq!(get("RUSH_ATTR_UL").as_deref(), Some("ABC"));
+        unset("RUSH_ATTR_UL");
+
+        set_attrs("RUSH_ATTR_UL", Attrs { upper: true, lower: true, ..Default::default() });
+        set("RUSH_ATTR_UL", "Abc");
+        assert_eq!(get("RUSH_ATTR_UL").as_deref(), Some("Abc"));
+        unset("RUSH_ATTR_UL");
+    }
+
+    // C43: a local binding starts from its own declared attributes (not
+    // the shadowed outer variable's), and the outer attribute state is
+    // restored when the frame pops.
+    #[test]
+    fn local_attrs_are_scoped_to_the_frame() {
+        unset("RUSH_ATTR_LOCAL");
+        set("RUSH_ATTR_LOCAL", "Outer");
+
+        push_local_frame();
+        let upper = Attrs { upper: true, ..Default::default() };
+        assert!(declare_local_attrs("RUSH_ATTR_LOCAL", None, upper));
+        set("RUSH_ATTR_LOCAL", "hi");
+        assert_eq!(get("RUSH_ATTR_LOCAL").as_deref(), Some("HI"));
+        pop_local_frame();
+
+        assert_eq!(get("RUSH_ATTR_LOCAL").as_deref(), Some("Outer"));
+        set("RUSH_ATTR_LOCAL", "plain");
+        assert_eq!(get("RUSH_ATTR_LOCAL").as_deref(), Some("plain"));
+        unset("RUSH_ATTR_LOCAL");
     }
 }

@@ -1130,3 +1130,44 @@ every other failing command.
   found-but-not-executable file/directory (126 vs. 127), `set -e`,
   command substitution, and backgrounding. Adds 5 new integration tests;
   full suite and clippy stay clean.
+
+### Fix: redirects to any fd other than 0/1/2 silently collapsed onto fd 1 (C38)
+`cmd 3>file`, `cmd 4<&5`, `exec 3>file` (holding a descriptor open for
+later) are all ordinary shell idioms. Both of rush's redirect code paths
+used to force any fd that wasn't literally 0 or 2 onto fd **1** — `cmd
+3>file` silently redirected the command's *stdout*, not a real fd 3.
+
+- **`redirect_stdio` (builtins, in-process)**: the fd-collapsing closure
+  is simply gone — `StdioGuard`'s own save/restore bookkeeping was
+  already keyed by plain `i32`, needing no structural change. This also
+  fixed two related bugs the collapse was silently responsible for: a
+  `Dup`'s *source* side collapsed exactly like its destination
+  (`4>&3` botched fd 3 too, not just an unusual destination), and a
+  `Read`-mode redirect to fd 1 or 2 was silently dropped entirely rather
+  than merely collapsed.
+- **`build_stage` (real spawned children)**: `std::process::Command` has
+  no generic "set fd N" API, so fd 3+ redirects are now collected into a
+  new `FdAction` list (`Open(File, fd)` / `Dup { source, dest }`, in
+  their own source order) and applied via one `pre_exec` `dup2` sequence
+  — the same `CommandExt::pre_exec` mechanism `job.rs` already uses for
+  process groups, composing cleanly with it.
+- **A real, general bug found and fixed along the way**: a freshly
+  opened file's own fd is often *exactly* the fd being redirected to
+  (its own "lowest available fd" landing on the requested number) —
+  overwhelmingly likely for fd 3+, since 0/1/2 are essentially always
+  already open but 3+ usually isn't. `dup2` on identical fds is a
+  defined no-op, so the file *is* the live redirect already at that
+  point — letting it drop normally (as the original code did) closed the
+  very fd the redirect had just set up. Fixed by detecting this and
+  `mem::forget`-ing the file instead in `redirect_stdio`;
+  `build_stage`'s `pre_exec`-closure design was naturally immune (its
+  captured files are never dropped in the parent before `exec` replaces
+  the child's whole process image).
+- **Also fixed**: the lexer's `<&n` (read-side fd duplication, e.g.
+  `4<&5`) didn't parse at all — only `>&n` did. A new, shared
+  `lex_lt_op` (mirroring `lex_gt_op`) fixes both places `<` is lexed.
+- Verified directly against real bash across a standalone `3>file`,
+  multi-hop `<&`/`>&` chains, `exec 3>file`'s permanent form, and the
+  self-dup coincidence bug, for both a builtin and a real external
+  command. Adds 2 lexer unit tests plus 3 integration tests; full suite
+  and clippy stay clean (Windows cross-compile checked too).

@@ -235,7 +235,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     }));
                     pending.push(Pending { idx, delim, strip });
                 } else {
-                    tokens.push(Token::Redirect(Redir { fd: 0, op: RedirOp::Read }));
+                    tokens.push(Token::Redirect(Redir { fd: 0, op: lex_lt_op(&mut chars)? }));
                 }
             }
             '>' => {
@@ -365,10 +365,35 @@ fn read_line(chars: &mut Peekable<Chars>) -> Option<String> {
 /// a leading file-descriptor number (`2>`), if one was lexed.
 fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, LexError> {
     match chars.next() {
-        Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: RedirOp::Read }),
+        Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: lex_lt_op(chars)? }),
         Some('>') => Ok(Redir { fd: explicit_fd.unwrap_or(1), op: lex_gt_op(chars)? }),
         _ => unreachable!("lex_redirect called off a redirection"),
     }
+}
+
+/// The operator that follows an already-consumed `<`: `<&target` (dup) or
+/// plain `<` (read) — shared by `lex_redirect` (the explicit-fd-prefixed
+/// case, `4<...`) and the top-level `'<'` dispatch (which needs to peek for
+/// `<(`/`<<`/`<<<` first before falling back to this). `RedirOp::Dup`
+/// doesn't distinguish which arrow spelled it (`<&n` and `>&n` both just
+/// mean "`dup2` this fd onto that one" — direction is already baked into
+/// whatever `n` itself was opened as), so this mirrors `lex_gt_op` exactly,
+/// just without its `>>` case.
+fn lex_lt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
+    Ok(match chars.peek() {
+        Some('&') => {
+            chars.next();
+            let mut target = String::new();
+            while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                target.push(chars.next().unwrap());
+            }
+            let t = target
+                .parse()
+                .map_err(|_| LexError::Syntax("expected a file descriptor after `<&`".into()))?;
+            RedirOp::Dup(t)
+        }
+        _ => RedirOp::Read,
+    })
 }
 
 /// The operator that follows an already-consumed `>`: `>>`, `>&target`
@@ -864,6 +889,22 @@ mod tests {
         assert_eq!(lex("&> f").unwrap(), vec![r(1, Both), bare("f")]);
         // A digit not before a redirect is just a word.
         assert_eq!(lex("echo 2").unwrap(), vec![bare("echo"), bare("2")]);
+    }
+
+    /// C38: `<&n` (read-side fd duplication) used to not parse at all — only
+    /// `>&n` did — since `lex_redirect`'s `<` arm never checked for a
+    /// following `&`, unlike its `>` arm. Covers both dispatch points: the
+    /// explicit-fd-prefixed form (`4<&5`, through `lex_redirect`) and the
+    /// bare form (`<&5`, through the top-level `'<'` case) — both funnel
+    /// through the same new `lex_lt_op`.
+    #[test]
+    fn fd_dup_read_side_parses_too() {
+        use RedirOp::*;
+        let r = |fd, op| Token::Redirect(Redir { fd, op });
+        assert_eq!(lex("<&5").unwrap(), vec![r(0, Dup(5))]);
+        assert_eq!(lex("4<&5").unwrap(), vec![r(4, Dup(5))]);
+        // Still a plain read when there's no `&`.
+        assert_eq!(lex("4< f").unwrap(), vec![r(4, Read), bare("f")]);
     }
 
     #[test]

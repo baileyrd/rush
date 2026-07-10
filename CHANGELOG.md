@@ -1383,3 +1383,26 @@ the missing command).
 - Verified against real bash across fourteen probe scenarios (dash for
   the POSIX abort). Adds 2 unit tests and 4 integration tests; full
   suite and clippy stay clean.
+
+### New: `ulimit` builtin (C46), and builtins/functions inside `$(...)` actually run
+`ulimit` was "command not found", blocking the ubiquitous `ulimit -n`/
+`ulimit -c 0` operational-script openers.
+
+- **`ulimit [-SH] [-a | -<letter> [limit]]`** over real `getrlimit`/
+  `setrlimit`: 15 resources in bash's own units and `-a` label format,
+  `unlimited`, bare `ulimit` = `-f`, soft/hard split (read soft unless
+  `-H`; set both unless `-S`/`-H`), children inherit. Unknown flag →
+  usage/status 2; bad number → status 1. Linux-only resources cfg-gated.
+- **Broader pre-existing gap found while verifying**: a sole builtin or
+  shell function inside `$(...)` was spawned as an external —
+  `$(umask)`, `$(type x)`, `$(myfunc)`, `$(ulimit -n)` all failed with
+  "command not found" unless an external twin existed on PATH (why
+  `$(pwd)` had always *seemed* fine). Now captured in-process via the
+  same fork/pipe scheme `capture_compound` uses — a real subshell,
+  matching bash's `$(...)` semantics (side effects don't escape).
+  Documented remaining narrowing: multi-command substitutions still run
+  pipelines separately in the parent context (`$(cd /tmp; pwd)` prints
+  the parent's cwd), a separate architectural item.
+- Verified against real bash (`-a` dump line-identical over the
+  implemented set). Adds 1 integration test; full suite and clippy stay
+  clean.

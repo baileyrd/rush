@@ -42,6 +42,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "eval" => Some(eval_cmd(argv)),
         "exec" => Some(crate::exec::exec_cmd(argv)),
         "umask" => Some(umask_cmd(argv)),
+        "ulimit" => Some(ulimit_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -51,7 +52,8 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
 pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
-    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "declare", "readonly",
+    "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "declare",
+    "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1460,6 +1462,147 @@ fn symbolic_umask(mask: libc::mode_t) -> String {
 
 #[cfg(not(unix))]
 fn umask_cmd(argv: &[String]) -> i32 {
+    eprintln!("{}: not supported on this platform", argv[0]);
+    1
+}
+
+/// One `ulimit` resource: flag letter, `RLIMIT_*` id, the label bash's own
+/// `-a` output uses, and the unit scale (bash reports and accepts values
+/// in these units — 512-byte blocks for `-c`/`-f`, kbytes for the memory
+/// ones — converting to raw bytes for `setrlimit`).
+#[cfg(unix)]
+struct UlimitResource {
+    letter: char,
+    resource: i32,
+    label: &'static str,
+    scale: u64,
+}
+
+#[cfg(unix)]
+const ULIMIT_RESOURCES: &[UlimitResource] = &[
+    UlimitResource { letter: 'c', resource: libc::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512 },
+    UlimitResource { letter: 'd', resource: libc::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024 },
+    UlimitResource { letter: 'f', resource: libc::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512 },
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'e', resource: libc::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1 },
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'i', resource: libc::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1 },
+    UlimitResource { letter: 'l', resource: libc::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024 },
+    UlimitResource { letter: 'm', resource: libc::RLIMIT_RSS as i32, label: "max memory size             (kbytes, -m)", scale: 1024 },
+    UlimitResource { letter: 'n', resource: libc::RLIMIT_NOFILE as i32, label: "open files                          (-n)", scale: 1 },
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'q', resource: libc::RLIMIT_MSGQUEUE as i32, label: "POSIX message queues         (bytes, -q)", scale: 1 },
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'r', resource: libc::RLIMIT_RTPRIO as i32, label: "real-time priority                  (-r)", scale: 1 },
+    UlimitResource { letter: 's', resource: libc::RLIMIT_STACK as i32, label: "stack size                  (kbytes, -s)", scale: 1024 },
+    UlimitResource { letter: 't', resource: libc::RLIMIT_CPU as i32, label: "cpu time                   (seconds, -t)", scale: 1 },
+    UlimitResource { letter: 'u', resource: libc::RLIMIT_NPROC as i32, label: "max user processes                  (-u)", scale: 1 },
+    UlimitResource { letter: 'v', resource: libc::RLIMIT_AS as i32, label: "virtual memory              (kbytes, -v)", scale: 1024 },
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'x', resource: libc::RLIMIT_LOCKS as i32, label: "file locks                          (-x)", scale: 1 },
+];
+
+/// `ulimit [-SH] [-a | -<letter> [limit]]` (C46) — get/set process resource
+/// limits over real `getrlimit`/`setrlimit` calls, in bash's units (blocks
+/// for `-c`/`-f`, kbytes for memory sizes) with the `unlimited` keyword.
+/// With no resource flag, `-f` (file size) is the subject, same as bash.
+/// Reading reports the soft limit unless `-H`; setting applies to both
+/// limits unless `-S`/`-H` narrows it. `-a` dumps every resource in bash's
+/// own labeled format. Not implemented (accepted narrowing, documented in
+/// docs/CAPABILITY_GAPS.md): bash's read-only `-p` (pipe size) and `-b`/
+/// `-k`/`-P`/`-T`, and the `hard`/`soft` keywords as a limit operand.
+#[cfg(unix)]
+fn ulimit_cmd(argv: &[String]) -> i32 {
+    let mut soft_only = false;
+    let mut hard_only = false;
+    let mut all = false;
+    let mut letter: Option<char> = None;
+    let mut operand: Option<&str> = None;
+
+    for arg in &argv[1..] {
+        if let Some(flags) = arg.strip_prefix('-').filter(|f| !f.is_empty() && f.chars().all(char::is_alphabetic)) {
+            for c in flags.chars() {
+                match c {
+                    'S' => soft_only = true,
+                    'H' => hard_only = true,
+                    'a' => all = true,
+                    c if ULIMIT_RESOURCES.iter().any(|r| r.letter == c) => letter = Some(c),
+                    _ => {
+                        eprintln!("ulimit: -{c}: invalid option");
+                        eprintln!("ulimit: usage: ulimit [-SHa{}] [limit]", ULIMIT_RESOURCES.iter().map(|r| r.letter).collect::<String>());
+                        return 2;
+                    }
+                }
+            }
+        } else if operand.is_none() {
+            operand = Some(arg);
+        } else {
+            eprintln!("ulimit: too many arguments");
+            return 1;
+        }
+    }
+
+    let display = |raw: libc::rlim_t, scale: u64| -> String {
+        if raw == libc::RLIM_INFINITY { "unlimited".to_string() } else { (raw / scale).to_string() }
+    };
+    let get = |res: &UlimitResource| -> Option<libc::rlimit> {
+        let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        (unsafe { libc::getrlimit(res.resource as _, &mut rl) } == 0).then_some(rl)
+    };
+
+    if all {
+        for res in ULIMIT_RESOURCES {
+            if let Some(rl) = get(res) {
+                let raw = if hard_only { rl.rlim_max } else { rl.rlim_cur };
+                println!("{} {}", res.label, display(raw, res.scale));
+            }
+        }
+        return 0;
+    }
+
+    let res = match letter {
+        Some(c) => ULIMIT_RESOURCES.iter().find(|r| r.letter == c).unwrap(),
+        None => ULIMIT_RESOURCES.iter().find(|r| r.letter == 'f').unwrap(),
+    };
+    let Some(mut rl) = get(res) else {
+        eprintln!("ulimit: cannot read limit: {}", std::io::Error::last_os_error());
+        return 1;
+    };
+
+    let Some(operand) = operand else {
+        let raw = if hard_only { rl.rlim_max } else { rl.rlim_cur };
+        println!("{}", display(raw, res.scale));
+        return 0;
+    };
+
+    let new_raw: libc::rlim_t = if operand == "unlimited" {
+        libc::RLIM_INFINITY
+    } else {
+        match operand.parse::<u64>() {
+            Ok(n) => n.saturating_mul(res.scale) as libc::rlim_t,
+            Err(_) => {
+                eprintln!("ulimit: {operand}: invalid number");
+                return 1;
+            }
+        }
+    };
+    // Without -S/-H a new limit applies to both; -S leaves the hard limit
+    // alone, -H the soft — same as bash.
+    if !hard_only {
+        rl.rlim_cur = new_raw;
+    }
+    if !soft_only {
+        rl.rlim_max = new_raw;
+    }
+    if unsafe { libc::setrlimit(res.resource as _, &rl) } != 0 {
+        eprintln!("ulimit: cannot modify limit: {}", std::io::Error::last_os_error());
+        return 1;
+    }
+    0
+}
+
+#[cfg(not(unix))]
+fn ulimit_cmd(argv: &[String]) -> i32 {
     eprintln!("{}: not supported on this platform", argv[0]);
     1
 }

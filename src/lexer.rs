@@ -98,6 +98,9 @@ pub enum RedirOp {
     Both,        // `&>`       — stdout+stderr to a file (truncate)
     BothAppend,  // `&>>`      — stdout+stderr to a file (append)
     Dup(u32),    // `>&n`/`<&n`— fd duplicates fd n
+    /// `>&$word`/`<&"${arr[N]}"` — the target fd comes from a word,
+    /// resolved at expansion time (C66's coproc plumbing).
+    DupWord,
     /// `<<` here-document: `body` is the collected text, `expand` is false when
     /// the delimiter was quoted.
     Heredoc { body: String, expand: bool },
@@ -585,10 +588,14 @@ fn lex_lt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
             while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
                 target.push(chars.next().unwrap());
             }
-            let t = target
-                .parse()
-                .map_err(|_| LexError::Syntax("expected a file descriptor after `<&`".into()))?;
-            RedirOp::Dup(t)
+            if target.is_empty() {
+                RedirOp::DupWord // `<&$word` (C66) — see lex_gt_op's twin arm
+            } else {
+                let t = target
+                    .parse()
+                    .map_err(|_| LexError::Syntax("expected a file descriptor after `<&`".into()))?;
+                RedirOp::Dup(t)
+            }
         }
         _ => RedirOp::Read,
     })
@@ -611,10 +618,16 @@ fn lex_gt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
             while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
                 target.push(chars.next().unwrap());
             }
-            let t = target
-                .parse()
-                .map_err(|_| LexError::Syntax("expected a file descriptor after `>&`".into()))?;
-            RedirOp::Dup(t)
+            if target.is_empty() {
+                // `>&$word` (C66): the fd number arrives via expansion —
+                // the parser reads the word like any redirect target.
+                RedirOp::DupWord
+            } else {
+                let t = target
+                    .parse()
+                    .map_err(|_| LexError::Syntax("expected a file descriptor after `>&`".into()))?;
+                RedirOp::Dup(t)
+            }
         }
         // `>|` — noclobber override (C50): truncate even under `set -C`.
         Some('|') => {

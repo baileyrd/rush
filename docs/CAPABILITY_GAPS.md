@@ -320,14 +320,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (21 done, 2 open — C66–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (22 done, 1 open — C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C65 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C66 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-8 are open.
+7 are open.
 
 ---
 
@@ -2716,7 +2716,7 @@ listing format with optional filtering (specs normalized, so
 (case-insensitive, no number, no `SIG` spelling — like `ERR`). One
 integration test covers all four.
 
-### C66 — `coproc` (named bidirectional coprocess) (tracked)
+### C66 — `coproc` (named bidirectional coprocess) ✅ done
 Present in bash (`coproc`) and zsh; ksh93 uses different (`|&`) syntax;
 not in dash/fish. A specialized, powerful tool — a long-lived helper
 process with a shell-visible bidirectional pipe (`${NAME[0]}`/`${NAME[1]}`
@@ -2729,6 +2729,29 @@ this would need is itself a prerequisite, not just the keyword/parsing.
 **Effort: L** — new parser grammar, a fork with two real pipes, and
 populating a shell array with the resulting two fd numbers, plus
 background-job bookkeeping to track the coprocess itself.
+
+Implemented, prerequisite first: **`fd>&$word` / `fd<&"${arr[N]}"`
+redirects** — the fd number arriving via expansion, which the doc
+correctly flagged as the real blocker — got a new `RedirOp::DupWord`
+lexed when `>&`/`<&` isn't followed by digits, resolved to a numeric fd
+at expansion time (a non-numeric expansion is "bad file descriptor").
+Then `coproc [NAME] command` itself: a new parser production (NAME
+accepted before a `{ ... }` group, bash's own rule; unnamed uses
+`COPROC`), and an executor that forks with two real pipes — the child
+gets them on stdin/stdout and runs the command; the parent publishes
+`NAME=(read_fd write_fd)` and `NAME_PID`, marks both fds close-on-exec
+(matching bash — ordinary children don't inherit them; an explicit
+`>&$fd` still works since `dup2` clears the flag on the copy), and
+records the pid as `$!`. One bug caught by testing rather than review:
+the forked child inherits the parent's TERM/HUP record-and-defer
+handlers and would swallow a plain `kill $COPROC_PID` while blocked —
+the child now resets both to `SIG_DFL`, and a killed coprocess `wait`s
+as 143 exactly like bash. Documented narrowings: the coprocess is a
+forked shell wrapping the command (bash execs a simple command
+directly), and it isn't listed in the interactive `jobs` table, though
+`wait $COPROC_PID` works through the ordinary pid path. Verified
+against bash for the full echo→read round-trip, the named-group form,
+`$!`, and the kill/wait status. One integration test.
 
 ### C67 — Rarer special variables: `$LINENO`, `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `$EPOCHSECONDS`/`$EPOCHREALTIME` (tracked)
 A grab-bag of bash-specific special variables (ksh93/zsh have some under

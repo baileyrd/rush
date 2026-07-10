@@ -2782,3 +2782,21 @@ fn trap_debug_return_and_introspection() {
     let (out, _) = rush("trap 'echo x' TERM EXIT; trap -p TERM; trap - EXIT");
     assert_eq!(out, "trap -- 'echo x' SIGTERM\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn coproc_bidirectional_pipes() {
+    // C66: coproc didn't exist, and neither did the `<&"${arr[N]}"`
+    // fd-from-a-word redirects it needs. All verified against bash.
+    let (out, _) = rush(r#"coproc cat; echo hello >&"${COPROC[1]}"; read line <&"${COPROC[0]}"; echo "got: $line"; kill $COPROC_PID 2>/dev/null; echo done"#);
+    assert_eq!(out, "got: hello\ndone\n");
+
+    // The named form takes a `{ ... }` group; NAME[0]/NAME[1]/NAME_PID.
+    let (out, _) = rush(r#"coproc up { cat; }; echo hi >&"${up[1]}"; read x <&"${up[0]}"; echo "got=$x"; kill $up_PID 2>/dev/null"#);
+    assert_eq!(out, "got=hi\n");
+
+    // $! is the coprocess pid; a killed coprocess waits as 143 (TERM),
+    // same as bash.
+    let (out, _) = rush(r#"coproc cat; [ "$COPROC_PID" = "$!" ] && [ "$COPROC_PID" -gt 0 ] && echo pids-ok; kill $COPROC_PID; wait $COPROC_PID 2>/dev/null; echo waited-st=$?"#);
+    assert_eq!(out, "pids-ok\nwaited-st=143\n");
+}

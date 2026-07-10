@@ -281,6 +281,10 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
         // `[[ expr ]]` (C55): 0 when true, 1 when false, 2 on an
         // evaluation error (bad operator, unfinished `=~`) — bash's own
         // status convention — without aborting the script.
+        // `coproc [NAME] command` (C66): fork the command with a
+        // bidirectional pipe, publishing `NAME[0]` (read from its
+        // stdout) / `NAME[1]` (write to its stdin) and `NAME_PID`.
+        Compound::Coproc { name, cmd } => run_coproc(name, cmd),
         Compound::Cond(ast) => match eval_cond(ast) {
             Ok(true) => Ok(0),
             Ok(false) => Ok(1),
@@ -853,6 +857,65 @@ fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
 
 fn trace_assoc_pairs(pairs: &[(String, String)]) -> String {
     pairs.iter().map(|(k, v)| format!("[{k}]={}", trace_quote(v))).collect::<Vec<_>>().join(" ")
+}
+
+/// `coproc` (C66), Unix only: two real pipes, a fork, and two shell
+/// variables. The child gets the parent→child pipe on stdin and the
+/// child→parent pipe on stdout, then runs `cmd` and exits with its
+/// status. The parent publishes `NAME=(read_fd write_fd)` and
+/// `NAME_PID`, marks both fds close-on-exec (matching bash — ordinary
+/// spawned children don't inherit them; an explicit `>&$fd` redirect
+/// still works, since `dup2` clears the flag on the copy), and records
+/// the pid as `$!`. Documented narrowing: the coprocess isn't entered
+/// in the interactive job table (bash lists it under `jobs`), but
+/// `wait $COPROC_PID` works through the ordinary pid path.
+#[cfg(unix)]
+fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String> {
+    use std::os::unix::io::{AsRawFd, IntoRawFd};
+
+    let (to_child_read, to_child_write) = make_pipe()?; // parent writes → child stdin
+    let (from_child_read, from_child_write) = make_pipe()?; // child stdout → parent reads
+    match unsafe { libc::fork() } {
+        -1 => Err(std::io::Error::last_os_error().to_string()),
+        0 => {
+            unsafe {
+                libc::dup2(to_child_read.as_raw_fd(), 0);
+                libc::dup2(from_child_write.as_raw_fd(), 1);
+                // The coprocess must die on a plain `kill $NAME_PID`: the
+                // parent's TERM/HUP record-and-defer handlers are
+                // inherited across fork and would otherwise swallow the
+                // signal while blocked on the inner command.
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            }
+            drop(to_child_read);
+            drop(to_child_write);
+            drop(from_child_read);
+            drop(from_child_write);
+            let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false };
+            let status = run_foreground(&pipeline).unwrap_or(1);
+            crate::trap::exit_shell(status);
+        }
+        pid => {
+            drop(to_child_read);
+            drop(from_child_write);
+            let read_fd = from_child_read.into_raw_fd();
+            let write_fd = to_child_write.into_raw_fd();
+            unsafe {
+                libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            crate::vars::set_array(name, vec![read_fd.to_string(), write_fd.to_string()]);
+            crate::vars::set(&format!("{name}_PID"), &pid.to_string());
+            crate::vars::set_last_bg_pid(pid);
+            Ok(0)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn run_coproc(_name: &str, _cmd: &crate::parser::RawCommand) -> Result<i32, String> {
+    Err("coproc is not supported on this platform".into())
 }
 
 /// Evaluate a parsed `[[ ... ]]` expression (C55). Operands expand with
@@ -2098,6 +2161,7 @@ pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
                 Compound::Case { .. } => "case ...".to_string(),
                 Compound::Arith(_) => "((...))".to_string(),
                 Compound::Cond(_) => "[[ ... ]]".to_string(),
+                Compound::Coproc { name, .. } => format!("coproc {name} ..."),
                 Compound::Group(_) => "{ ... }".to_string(),
                 Compound::Subshell(_) => "( ... )".to_string(),
                 Compound::FuncDef { name, .. } => format!("{name}() {{ ... }}"),

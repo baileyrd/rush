@@ -17,6 +17,7 @@ mod exec;
 mod expand;
 mod func;
 mod glob;
+mod history_expand;
 #[cfg(unix)]
 mod job;
 mod lexer;
@@ -226,6 +227,18 @@ fn interactive() -> rustyline::Result<()> {
                 if buffer.is_empty() && line.trim().is_empty() {
                     continue;
                 }
+                let entries: Vec<String> = rl.history().iter().cloned().collect();
+                let line = match history_expand::expand(&line, &entries) {
+                    Ok(None) => line,
+                    Ok(Some(expanded)) => {
+                        println!("{expanded}");
+                        expanded
+                    }
+                    Err(e) => {
+                        eprintln!("rush: {e}");
+                        continue;
+                    }
+                };
                 rl.add_history_entry(&line)?;
                 if !buffer.is_empty() {
                     buffer.push('\n');

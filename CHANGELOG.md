@@ -1643,3 +1643,12 @@ computed from newline-token counts — values byte-identical to bash for
 the same script. Documented approximations: here-doc bodies don't
 advance `LINENO`; `BASH_SOURCE` in a function reflects the source
 stack, not the definition site. Adds 1 integration test.
+
+### New: live syntax highlighting and validation of the command line (C68)
+Fish-style, in RushHelper's existing Highlighter: command-position
+words resolve through the keyword/builtin/function/alias/$PATH chain
+and render green or red (pre-Enter command-not-found); strings yellow
+with an unmatched quote's tail red; comments dimmed; `$var` cyan;
+operators magenta. A dedicated span scanner rather than a re-lex (the
+real lexer has no byte spans and hard-errors on incomplete input).
+Unit tests cover the classification matrix.

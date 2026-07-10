@@ -1638,7 +1638,13 @@ fn source_cmd(argv: &[String]) -> i32 {
         return 2;
     };
     match crate::exec::source_file(name, &argv[2..]) {
-        Ok(status) => status,
+        Ok(status) => {
+            // `trap 'cmd' RETURN` (C65) fires as a sourced script
+            // finishes, same as a function return.
+            crate::vars::set_last_status(status);
+            crate::trap::fire_preserving("RETURN");
+            status
+        }
         Err(e) => {
             eprintln!("{}: {name}: {e}", argv[0]);
             1
@@ -2129,6 +2135,32 @@ fn set_cmd(argv: &[String]) -> i32 {
 /// `trap` (list) / `trap 'command' NAME...` (register) / `trap - NAME...`
 /// (reset to default). Only `EXIT` and `INT` are ever fired (see `trap.rs`).
 fn trap_cmd(argv: &[String]) -> i32 {
+    // `trap -l` (C65): the numbered signal-name table, in bash's own
+    // five-per-line tab-separated format.
+    if argv.get(1).map(String::as_str) == Some("-l") {
+        let entries: Vec<String> = crate::trap::signal_list()
+            .iter()
+            .map(|(name, num)| format!("{num:>2}) SIG{name}"))
+            .collect();
+        for chunk in entries.chunks(5) {
+            println!("{}", chunk.join("\t"));
+        }
+        return 0;
+    }
+    // `trap -p [name...]` (C65): print registered traps re-runnably —
+    // the same format bare `trap` uses, optionally filtered.
+    if argv.get(1).map(String::as_str) == Some("-p") {
+        let filter: Vec<&str> =
+            argv[2..].iter().filter_map(|s| crate::trap::normalize_signal_spec(s)).collect();
+        for (name, command) in crate::trap::all() {
+            if !argv[2..].is_empty() && !filter.contains(&name.as_str()) {
+                continue;
+            }
+            let display = if name == "EXIT" { name } else { format!("SIG{name}") };
+            println!("trap -- '{command}' {display}");
+        }
+        return 0;
+    }
     if argv.len() == 1 {
         for (name, command) in crate::trap::all() {
             // Listing prints real signals `SIG`-prefixed, `EXIT` bare —

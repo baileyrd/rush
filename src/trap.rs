@@ -139,12 +139,24 @@ pub fn normalize_signal_spec(spec: &str) -> Option<&'static str> {
     if spec.eq_ignore_ascii_case("ERR") {
         return Some("ERR");
     }
+    if spec.eq_ignore_ascii_case("DEBUG") {
+        return Some("DEBUG");
+    }
+    if spec.eq_ignore_ascii_case("RETURN") {
+        return Some("RETURN");
+    }
     if let Ok(n) = spec.parse::<i32>() {
         return SIGNALS.iter().find(|&&(_, num)| num == n).map(|&(name, _)| name);
     }
     let upper = spec.to_ascii_uppercase();
     let bare = upper.strip_prefix("SIG").unwrap_or(&upper);
     SIGNALS.iter().find(|&&(name, _)| name == bare).map(|&(name, _)| name)
+}
+
+/// The real-signal names and numbers (`EXIT`/pseudo-signals excluded) —
+/// `trap -l`'s listing (C65).
+pub fn signal_list() -> Vec<(&'static str, i32)> {
+    SIGNALS.iter().filter(|&&(_, n)| n != 0).map(|&(n, s)| (n, s)).collect()
 }
 
 pub fn set(name: &str, command: &str) {
@@ -182,6 +194,19 @@ pub fn fire(name: &str) {
     FIRING.with(|f| {
         f.borrow_mut().remove(name);
     });
+}
+
+/// Fire a trap while preserving `$?` across the handler's own commands —
+/// `DEBUG` and `RETURN` (C65) both leave the surrounding status exactly
+/// as they found it (verified against bash: `trap 'echo D' DEBUG; false;
+/// echo $?` still prints 1). A cheap no-op when `name` isn't registered.
+pub fn fire_preserving(name: &str) {
+    if !TRAPS.with(|t| t.borrow().contains_key(name)) {
+        return;
+    }
+    let saved = crate::vars::last_status();
+    fire(name);
+    crate::vars::set_last_status(saved);
 }
 
 /// Fire the `ERR` trap (if registered) for a command that failed with

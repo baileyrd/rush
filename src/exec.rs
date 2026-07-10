@@ -997,15 +997,18 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                         _ => matches!((ma.and_then(|m| m.modified()), mb.and_then(|m| m.modified())), (Ok(a), Ok(b)) if a < b),
                     })
                 }
-                // `=~` (C56): an unanchored ERE search. On a match,
-                // `BASH_REMATCH[0]` is the whole match and `[n]` the
+                // `=~` (C56): an unanchored ERE search with POSIX
+                // leftmost-longest semantics (what bash's regcomp/regexec
+                // report — `[[ ab =~ a|ab ]]` matches `ab`, not `a`). On a
+                // match, `BASH_REMATCH[0]` is the whole match and `[n]` the
                 // capture groups (an unmatched optional group is present
                 // as an empty string); on a failed match the array is
                 // *unset* — both verified against bash. An invalid regex
                 // is an evaluation error (status 2, script continues).
                 "=~" => {
                     let pattern = crate::expand::expand_cond_regex(rhs)?;
-                    let re = rusty_regx::Regex::new(&pattern).map_err(|e| format!("invalid regex: {e}"))?;
+                    let re = rusty_regx::Regex::new_posix(&pattern)
+                        .map_err(|e| format!("invalid regex: {e}"))?;
                     match re.captures(&l) {
                         Some(caps) => {
                             let groups: Vec<String> = (0..caps.len())

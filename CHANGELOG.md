@@ -1776,3 +1776,15 @@ all C56 tests pass unchanged. Known residual divergence from real
 bash (leftmost-first vs. POSIX leftmost-longest submatching on
 patterns like `a|ab`) is unchanged from the `regex` crate and is the
 engine's planned v2 mode.
+
+### Changed: `=~` now uses POSIX leftmost-longest matching
+The `[[ $s =~ pattern ]]` conditional switched from `rusty_regx`'s
+leftmost-first mode (the `regex` crate's semantics, kept through the
+engine swap for a behavior-neutral transition) to its POSIX
+leftmost-longest mode — what real bash's `regcomp`/`regexec` report.
+The long-standing divergence is closed: `[[ ab =~ a|ab ]]` now sets
+`BASH_REMATCH[0]` to `ab` (previously `a`; verified against bash).
+In the engine's 20,000-case differential sweep the overall match now
+agrees with bash on every case; submatch reporting follows the POSIX
+longest-alternative rule, which glibc itself deviates from in rare
+corners (~0.01% of generated cases). All C56 tests pass unchanged.

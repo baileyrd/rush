@@ -1519,3 +1519,17 @@ quoted parts literal, unquoted (incl. `$var`) live regex;
 `BASH_REMATCH[0]` + capture groups (unmatched optional group = empty
 string); failed match unsets the array; invalid live pattern = status-2
 error without aborting. Adds 1 integration test.
+
+### New: extended globbing — `?(pat)` `*(pat)` `+(pat)` `@(pat)` `!(pat)` (C57)
+`@(a|b)` used to mis-tokenize into `@` plus a subshell. Now: real
+alternation/backtracking in the glob matcher (nesting and mixed
+wildcards recurse naturally; semantics probed against bash first —
+`?(…)` is exactly 0-or-1, `!(…)` matches any prefix not matched in full
+by an alternative); the lexer swallows a balanced group after
+`?`/`*`/`+`/`@`/`!` into the word (a bare `(...)` is still a subshell);
+and the field-splitter's globbable detection recognizes the new
+openers so filename expansion fires. Always-on, like ksh93 (without
+extglob these are hard syntax errors in bash, so always-on is strictly
+more compatible). All four matcher surfaces — `case`, `[[ ]]`, filename
+expansion, `${v%pat}` — landed at once; filename expansion verified
+byte-identical to bash. Adds 1 unit + 1 integration test.

@@ -668,6 +668,16 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                 let elements = lex_array_literal(chars)?;
                 parts.push(WordPart::ArrayLiteral(elements));
             }
+            // An extglob group (C57): `(` directly after `?`/`*`/`+`/`@`/
+            // `!` *within* a word is part of the pattern, not a subshell
+            // open — `@(a|b)file` is one word. The balanced group is
+            // swallowed raw (alternation `|` included) for the glob
+            // matcher to interpret.
+            Some(&'(') if ends_with_extglob_prefix(&parts) => {
+                let mut s = String::new();
+                consume_balanced_paren(chars, &mut s)?;
+                push_unquoted(&mut parts, &s);
+            }
             Some(&c)
                 if c == ' '
                     || c == '\t'
@@ -785,6 +795,13 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
 /// again in `expand::assignment_split`): it only needs to be right about
 /// *whether to keep lexing as one word*, not about whether the eventual
 /// assignment is well-formed.
+/// Whether the word accumulated so far ends in one of the extglob prefix
+/// characters (`?`, `*`, `+`, `@`, `!`) as unquoted text — the `(` about
+/// to be read then belongs to the pattern (C57).
+fn ends_with_extglob_prefix(parts: &Word) -> bool {
+    matches!(parts.last(), Some(WordPart::Unquoted(s)) if s.ends_with(['?', '*', '+', '@', '!']))
+}
+
 fn looks_like_array_assign_prefix(parts: &Word) -> bool {
     let [WordPart::Unquoted(s)] = parts.as_slice() else {
         return false;

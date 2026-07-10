@@ -2492,3 +2492,34 @@ fn regex_match_and_bash_rematch() {
     let (out, _) = rush(r#"[[ abc =~ "(" ]]; echo st=$?; p='['; [[ abc =~ $p ]] 2>/dev/null; echo st=$?; echo alive"#);
     assert_eq!(out, "st=1\nst=2\nalive\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn extended_globs_across_surfaces() {
+    // C57: `@(a|b)` used to mis-tokenize into `@` + a subshell. Always-on
+    // (like ksh93 — bash gates them behind `shopt -s extglob`, and
+    // *without* it these are hard syntax errors there, so always-on is
+    // strictly more compatible). Verified against bash with extglob on.
+    let (out, _) = rush("for s in afile bfile cfile abfile; do case $s in @(a|b)file) echo \"$s: at\";; *) :;; esac; done");
+    assert_eq!(out, "afile: at\nbfile: at\n");
+
+    // [[ ]] pattern matching and the ${v%%pat} family share the matcher.
+    let (out, _) = rush("[[ aaa = +(a) ]] && echo plus; [[ cfile = !(a|b)file ]] && echo neg; v=foo.tar.gz; echo ${v%%+(.*)}");
+    assert_eq!(out, "plus\nneg\nfoo\n");
+
+    // Filename expansion, byte-identical to bash on the same fixtures.
+    let dir = std::env::temp_dir().join(format!("rush_c57_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["afile", "bfile", "cfile", "abfile", "file"] {
+        std::fs::write(dir.join(f), "").unwrap();
+    }
+    let cd = format!("cd {}; ", dir.display());
+    let (out, _) = rush(&format!("{cd}echo @(a|b)file; echo !(a|b)file; echo +(a|b)file"));
+    assert_eq!(out, "afile bfile\nabfile cfile file\nabfile afile bfile\n");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // No match → literal (the shared no-match rule), and a bare subshell
+    // `(...)` is still a subshell.
+    let (out, _) = rush("echo @(zz|yy)qq; (echo subshell)");
+    assert_eq!(out, "@(zz|yy)qq\nsubshell\n");
+}

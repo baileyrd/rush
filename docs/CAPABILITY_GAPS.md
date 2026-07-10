@@ -321,14 +321,14 @@ syntax directly.
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
-- **Tier IV — bash/ksh/zsh language parity:** 23 (12 done, 11 open — C57–C67)
+- **Tier IV — bash/ksh/zsh language parity:** 23 (13 done, 10 open — C58–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C56 are
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C57 are
 now done (re-closing Tiers I, II, and III completely) and the remaining
-17 are open.
+16 are open.
 
 ---
 
@@ -2367,7 +2367,7 @@ pattern is a status-2 evaluation error that doesn't abort. ksh/zsh's
 different capture-variable names (`.sh.match`, `$MATCH`) are out of
 scope — bash is the reference. One integration test covers the matrix.
 
-### C57 — Extended globbing: `?(pat)` `*(pat)` `+(pat)` `@(pat)` `!(pat)` (tracked)
+### C57 — Extended globbing: `?(pat)` `*(pat)` `+(pat)` `@(pat)` `!(pat)` ✅ done
 Native in ksh93 and zsh (`setopt kshglob`/`extendedglob`); bash requires
 `shopt -s extglob` first (itself missing — see C58) — not in dash/POSIX.
 Rush's glob matcher (`glob.rs`) has no alternation/grouping at all, and —
@@ -2379,6 +2379,39 @@ case`), not a silent no-match. **Effort: L** — needs real alternation/
 backtracking in the glob matcher, lexer changes so `(` after
 `?`/`*`/`+`/`@`/`!` in a word context isn't read as a subshell, and `case`
 pattern-parsing support for the new pattern shape. Independent of C55.
+
+Implemented, all three pieces:
+
+- **Matcher** (`glob.rs`): `parse_extglob` splits a group into top-level
+  `|` alternatives (nesting-aware), and `match_extglob` does real
+  backtracking — every split point tried, alternatives being full glob
+  patterns themselves so nesting (`@(f@(o|x)o)`) and mixed wildcards
+  (`@(*.txt|*.rs)`) recurse naturally. Semantics probed against bash
+  (`shopt -s extglob`) first: `?(…)` is exactly 0-or-1 (`aax` does NOT
+  match `?(a)x`), `*`/`+` are 0+/1+ repetitions of alternative-matched
+  chunks, `@` exactly one, and `!(…)` matches any prefix *not* matched
+  in full by an alternative (`abfile` matches `!(a|b)file`; `afile`
+  doesn't) — each of which is easy to get wrong from the docs alone.
+  An unterminated group falls back to literal characters, matching the
+  matcher's existing `[`-fallback convention.
+- **Lexer**: a `(` directly after `?`/`*`/`+`/`@`/`!` *within* a word
+  swallows the balanced group (alternation `|` included) into the word
+  instead of ending it at a subshell boundary — `@(a|b)file` is one
+  word, `case … in @(a|b)file)` parses, and a bare `(...)` is still a
+  subshell. Pipeline negation is unaffected (`!(…)` is a word; `! cmd`
+  needs the space, same as bash).
+- **Expansion**: the field-splitter's globbable detection now recognizes
+  extglob openers (`@(`/`+(`/`!(` — `?(`/`*(` were already covered by
+  their first character), so filename expansion actually fires.
+
+Always-on, like ksh93 — bash gates these behind `shopt -s extglob`
+(C58), and *without* extglob bash makes them hard syntax errors anyway,
+so always-on is strictly more compatible than the old mis-tokenization.
+Because `case`, `[[ ]]`, filename expansion, and the `${v%pat}` family
+all share the one matcher, all four surfaces landed at once — filename
+expansion verified byte-identical to bash on shared fixtures. One unit
+test (the semantics matrix) and one integration test (all four
+surfaces) cover it.
 
 ### C58 — `shopt` builtin, and the glob options it gates: `nullglob`, `failglob`, `dotglob`, `globstar` (tracked)
 `shopt` itself is bash-specific; the *behaviors* it toggles have rough

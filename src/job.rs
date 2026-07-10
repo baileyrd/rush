@@ -511,6 +511,13 @@ fn job_pgid(id: usize) -> Option<pid_t> {
     STATE.with(|s| s.borrow().jobs.iter().find(|j| j.id == id).map(|j| j.pgid))
 }
 
+/// Every current job's own id — for completion (`%n` job-spec arguments to
+/// `fg`/`bg`/`kill`/`wait`), matching the plain `%N` format those builtins
+/// themselves parse (see `select_index`/`wait_one`/`kill_cmd`).
+pub fn ids() -> Vec<usize> {
+    STATE.with(|s| s.borrow().jobs.iter().map(|j| j.id).collect())
+}
+
 fn parse_signal(name: &str) -> Option<c_int> {
     if let Ok(n) = name.parse::<c_int>() {
         return Some(n);

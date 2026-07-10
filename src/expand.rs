@@ -163,7 +163,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // inside a function — an accepted, documented simplification; use
     // `local` explicitly for function-scoped declarations.)
     let decl_word = if idx < rc.argv.len() { expand_argv_word(&rc.argv[idx])?.into_iter().next() } else { None };
-    let (argv, local_decls, decl_attrs) = if matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("readonly")) {
+    let (argv, local_decls, decl_attrs) = if matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("typeset") | Some("readonly")) {
         let cmd_name = decl_word.unwrap();
         let mut rest = &rc.argv[idx + 1..];
         // Leading flags apply to every name that follows in this same

@@ -1427,3 +1427,11 @@ match — alias/keyword/function/builtin in precedence order, then every
 bash byte-for-byte). Flags cluster (`type -at`). Accepted narrowing:
 bash prints a function's full body under `type -a`; rush keeps its
 one-line form. Verified against real bash; adds 1 integration test.
+
+### New: `typeset` as a synonym of `declare` (C49)
+ksh93 has *only* `typeset` (no `declare`); bash/zsh accept both.
+Registered at the decl-word dispatch, the builtin dispatch (same
+`declare_from_decls`), and the name table — so the C43 attribute
+transforms, both array forms, and C45's `-r` all work under `typeset`
+with zero additional code (verified against ksh93/zsh directly). Adds
+1 integration test.

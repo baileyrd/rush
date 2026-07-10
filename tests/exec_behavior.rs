@@ -2217,3 +2217,22 @@ fn type_a_lists_every_match() {
     let (_, status) = rush("type -a nosuch_c48 2>/dev/null");
     assert_eq!(status, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn typeset_is_a_synonym_for_declare() {
+    // C49: `typeset` (ksh93's only spelling; a bash/zsh synonym) wasn't
+    // registered at all. Everything declare supports rides along —
+    // attributes (C43), arrays, readonly (C45).
+    let (out, _) = rush("typeset -u u=hello; echo $u; typeset -i n; n=2+3; echo $n");
+    assert_eq!(out, "HELLO\n5\n");
+
+    let (out, _) = rush("typeset -A m; m[k]=v; echo ${m[k]}; typeset -a arr=(x y); echo ${arr[1]}");
+    assert_eq!(out, "v\ny\n");
+
+    let (out, status) = rush("typeset -r ro=1; ro=2; echo nope");
+    assert_eq!((out.as_str(), status), ("", 1));
+
+    let (out, _) = rush("type -t typeset");
+    assert_eq!(out, "builtin\n");
+}

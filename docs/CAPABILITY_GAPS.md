@@ -318,15 +318,16 @@ syntax directly.
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
-- **Tier II — missing standard builtins:** 17 (16 done, 1 open — C49)
+- **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (5 done, 5 open — C50–C54)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C48 are
-now done (re-closing Tier I completely) and the remaining 25 are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C49 are
+now done (re-closing Tiers I and II completely) and the remaining 24
+are open.
 
 ---
 
@@ -1371,7 +1372,7 @@ real bash byte-identically for the builtin+files, `-at`, and
 duplicate-directory cases; not-found stays status 1. One integration
 test covers all of the above.
 
-### C49 — `typeset` (ksh/zsh's own spelling of `declare`) isn't registered at all (tracked)
+### C49 — `typeset` (ksh/zsh's own spelling of `declare`) isn't registered at all ✅ done
 ksh93 has *only* `typeset` (no `declare` at all); zsh and bash accept
 both as synonyms. Portable ksh/zsh-targeting scripts use `typeset`
 exclusively, and get a flat `command not found` from rush today — even
@@ -1382,6 +1383,16 @@ alongside `"declare"` at the one dispatch point that already recognizes
 (`builtins.rs`); everything `declare` already supports (and everything
 future work adds to it, including C43/C45's attribute flags) becomes
 available under `typeset` for free.
+
+Implemented exactly per the sketch — `"typeset"` added at the decl-word
+dispatch (`expand.rs`), the builtin dispatch (`exec.rs`, routing to the
+same `declare_from_decls`), and the builtin name table. Verified the
+prediction held: the C43 attribute transforms (`typeset -u u=hello` →
+`HELLO`, `typeset -i n; n=2+3` → `5`), both array forms (`-a`/`-A`),
+and C45's `-r` (readonly, with the same fatal-assignment semantics) all
+work under `typeset` with zero additional code, matching ksh93/zsh's
+own `typeset -u` output directly. `type typeset` reports a shell
+builtin. One integration test covers all of it.
 
 ---
 
@@ -2672,6 +2683,6 @@ some natural orderings:
   — new lexer tokens, a new recursive parser production, and a new
   evaluator — but it's also a prerequisite for C56 (`=~` regex), so it's
   worth sequencing before rather than after that one.
-- **C42 (POSIX character classes, now done) and C49 (`typeset`)** are both
+- **C42 (POSIX character classes) and C49 (`typeset`)** were both
   small, self-contained wins with no dependencies on anything else in the
-  new batch — good candidates to knock out first.
+  new batch — both done.

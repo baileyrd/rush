@@ -17,28 +17,31 @@ rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", branch = "main" }
 # trait (completion, hints, highlighting, abbreviations, vi-mode flag).
 rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", branch = "main", default-features = false }
 
-# Job control (process groups, terminal hand-off, signals) is Unix-only. The
-# whole syscall surface goes through the `sys` facade, so both backends are
-# optional dependencies selected by the features below.
-[target.'cfg(unix)'.dependencies]
-# Default backend. Optional so `--no-default-features --features rusty-libc`
-# links no libc at all.
-libc = { version = "0.2", optional = true }
-# Alternative backend (Linux only): the hand-rolled raw-syscall crate.
+# Job control (signals, wait, process groups, fds, rlimit) is Unix-only and
+# goes through the `sys` facade. The backend is target-driven (see the cfgs in
+# src/sys.rs): rusty_libc on Linux by default, the libc crate on other Unix.
+
+# Linux: rusty_libc is the default backend; libc only when forced.
+[target.'cfg(target_os = "linux")'.dependencies]
 rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", branch = "main", optional = true }
+libc = { version = "0.2", optional = true }
+
+# Other Unix (macOS/BSD): the libc backend is the only option (rusty_libc is
+# Linux-only), so libc is a plain dependency there.
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+libc = "0.2"
 
 # The integration tests drive the built binary and also make a few syscalls of
-# their own, so they always need libc regardless of which backend is selected.
+# their own, so they always need libc.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
 [features]
-# The default: rush's `sys` facade — and the line editor's — are backed by the
-# `libc` crate.
-default = ["libc-backend"]
-libc-backend = ["dep:libc", "rusty_lines/libc-backend"]
-# Back the syscall surface with the hand-rolled rusty_libc crate instead (Linux
-# only), and select the line editor's matching backend. With
-# `--no-default-features --features rusty-libc`, no `libc` is linked anywhere.
-# When both are enabled, rusty-libc wins.
+# rush's `sys` facade — and the line editor's — are backed by the hand-rolled
+# rusty_libc crate by default. That is Linux-only, so the backend is actually
+# chosen by target (src/sys.rs): rusty_libc on Linux, libc on other Unix.
+default = ["rusty-libc"]
 rusty-libc = ["dep:rusty_libc", "rusty_lines/rusty-libc"]
+# Escape hatch: force the libc backend on Linux too
+# (`--no-default-features --features libc-backend`).
+libc-backend = ["dep:libc", "rusty_lines/libc-backend"]

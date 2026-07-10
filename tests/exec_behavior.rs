@@ -1147,3 +1147,57 @@ fn heredoc_trailing_a_compound_command_feeds_it() {
         "L:a\nL:b\n"
     );
 }
+
+#[test]
+fn brace_expansion_comma_lists_and_cross_products() {
+    // A plain comma-list turns one word into several argv words.
+    assert_eq!(rush("echo {a,b,c}").0, "a b c\n");
+    // Concatenated with a prefix/suffix, and two groups cross-product.
+    assert_eq!(rush("echo x{a,b}y{1,2}z").0, "xay1z xay2z xby1z xby2z\n");
+    // A single, comma-less `{a}` isn't a valid group — left as literal
+    // text — but that doesn't block a *valid* group elsewhere in the word.
+    assert_eq!(rush("echo {a}{b,c}").0, "{a}b {a}c\n");
+    // Nested groups: an inner valid group's own alternatives become
+    // separate top-level alternatives, not a concatenated sub-string.
+    assert_eq!(rush("echo {a,{b,c},d}").0, "a b c d\n");
+    // Escaped braces are never structural.
+    assert_eq!(rush(r"echo \{a,b\}").0, "{a,b}\n");
+    // Quoted commas/braces are inert to the scan but their content still
+    // rides along in whichever alternative it lands in.
+    assert_eq!(rush(r#"echo pre{"a,b",c}post"#).0, "prea,bpost precpost\n");
+}
+
+#[test]
+fn brace_expansion_ranges() {
+    assert_eq!(rush("echo {1..5}").0, "1 2 3 4 5\n");
+    // Descending, and a letter range with a step.
+    assert_eq!(rush("echo {5..1}").0, "5 4 3 2 1\n");
+    assert_eq!(rush("echo {a..e..2}").0, "a c e\n");
+    // A leading zero on either endpoint zero-pads every generated term to
+    // that endpoint's own width — including the sign, for a negative one.
+    assert_eq!(rush("echo {01..5}").0, "01 02 03 04 05\n");
+    assert_eq!(rush("echo {-01..05}").0, "-01 000 001 002 003 004 005\n");
+    // A malformed range (mismatched types) is left as literal text.
+    assert_eq!(rush("echo {1..a}").0, "{1..a}\n");
+    // For loops are the idiomatic use.
+    assert_eq!(rush("for i in {1..3}; do echo n=$i; done").0, "n=1\nn=2\nn=3\n");
+}
+
+#[test]
+fn brace_expansion_runs_before_dollar_expansion_and_skips_assignments() {
+    // Brace expansion is purely textual and runs first: an endpoint that's
+    // a variable reference at this stage (not yet a literal integer) makes
+    // the group invalid — left as literal text — even though the `$n`
+    // inside it still resolves normally afterwards.
+    assert_eq!(rush("n=5; echo {1..$n}").0, "{1..5}\n");
+    // `{$x,world}` expands the braces into two *words* first, each then
+    // expanded normally — so `$x` still resolves.
+    assert_eq!(rush("x=hello; echo {$x,world}").0, "hello world\n");
+    // A bare assignment statement's own value is never brace-expanded,
+    // matching real bash exactly (only ordinary command-argument words
+    // are) — `x` keeps the literal text.
+    assert_eq!(rush(r#"x={a,b}; echo "$x""#).0, "{a,b}\n");
+    // An array literal's elements are ordinary argument words, though, so
+    // they *do* brace-expand.
+    assert_eq!(rush(r#"arr=({a,b} c); echo "${arr[@]}" "${#arr[@]}""#).0, "a b c 3\n");
+}

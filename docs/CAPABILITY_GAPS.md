@@ -36,11 +36,15 @@ case for a container's graceful-shutdown pattern — closing Tier III out
 completely. Tier IV (bash/ksh/zsh language parity, the least POSIX-y and
 largest tier) is now underway: indexed arrays (C22) — `arr=(a b c)`,
 `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, sparse arrays, `arr[i]=`/`arr[i]+=`,
-`unset 'arr[i]'`, `local arr=(...)` — are done, and associative arrays
+`unset 'arr[i]'`, `local arr=(...)` — are done, associative arrays
 (C23) — a new `declare -A` builtin, `arr[key]=`/`arr[key]+=`,
 `arr+=([k]=v ...)` merge-by-key, `${arr[@]}`/`${!arr[@]}` — followed on
-top of them, the first real dent in what's otherwise still a dash-shaped
-core.
+top of them, and brace expansion (C24) — `{a,b,c}`, `{1..5}`,
+`{a..z..2}`, nesting, cross products — closes out what had been the
+single most dangerous *silent* gap in this whole document (`mkdir
+{a,b,c}` used to make one wrongly-named directory instead of three, with
+no warning at all), the first real dent in what's otherwise still a
+dash-shaped core.
 
 ---
 
@@ -65,7 +69,7 @@ applicable to that shell's own model.
 | `set -e` / `-u` / `-o pipefail` / `-x` | ✅§ | 🟡 | ✅ | ✅ | ✅ | — |
 | Indexed arrays | ✅¶ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Associative arrays (`declare -A`) | ✅** | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Brace expansion `{a,b,c}` | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Brace expansion `{a,b,c}` | ✅†† | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
@@ -107,6 +111,16 @@ directly inside `[...]` in an assignment (`arr[key with spaces]=val`; the
 `k="b c"; arr[$k]=val` idiom works); `declare -p`/`-x`/`-r`/`-i`/`-f`;
 `declare`'s function-local scoping (always global/current-scope in rush).
 
+†† Comma-lists (`{a,b,c}`), nesting, cross products (`{a,b}{c,d}`), and
+numeric/single-letter ranges (`{1..5}`, `{a..z..2}`, zero-padding via a
+leading zero on either endpoint) are all done, on ordinary command
+arguments, `for`-loop word lists, array-literal elements, and
+`local`/`declare`'s own arguments — matching real bash's expansion order
+exactly (purely textual, before `$`/glob expansion). Not brace-expanded,
+matching an accepted, documented scope narrowing: redirect targets, case
+subjects/patterns, and (matching real bash, not a gap) assignment
+statements' own values.
+
 ---
 
 ## Summary counts
@@ -114,7 +128,7 @@ directly inside `[...]` in an assignment (`arr[key with spaces]=val`; the
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 4 (4 done — complete)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (2 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (3 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -845,12 +859,84 @@ the merge-by-key `+=` semantics, the `declare -A` prerequisite, and the
 literal-vs-arithmetic subscript split — was verified directly against real
 bash.
 
-### C24 — Brace expansion: `{a,b,c}`, `{1..5}`
-Present in bash/ksh/zsh/fish (not POSIX sh/dash). The most dangerous
-*silent* gap in this whole document: rush doesn't error on `mkdir
-{a,b,c}` — it creates one literally-named directory called `{a,b,c}`
-instead of three. A bash script relying on this produces the wrong result
-under rush with no warning at all. **Effort: M.**
+### C24 — Brace expansion: `{a,b,c}`, `{1..5}` ✅ done
+Present in bash/ksh/zsh/fish (not POSIX sh/dash). Was the most dangerous
+*silent* gap in this whole document: rush didn't error on `mkdir
+{a,b,c}` — it created one literally-named directory called `{a,b,c}`
+instead of three, with no warning at all.
+
+**Where it runs, and where it deliberately doesn't**: brace expansion
+happens purely on a word's raw, unexpanded text, before `$`/glob
+expansion — same order as real bash, verified directly (`{$x,y}` expands
+the braces into two words first; `$x` then resolves normally in whichever
+one it lands in, and `{1..$n}` is an *invalid* range at brace-expansion
+time since `$n` isn't yet a literal integer — the whole group is left as
+literal text even though `$n` itself still expands afterwards). It's
+wired into `expand_argv_word` (so it covers ordinary command
+arguments, `for`-loop word lists, and array-literal elements — all three
+already funnel through it) and into `local`/`declare`'s own
+argument-parsing loop (verified directly: `local x={a,b}` *does*
+brace-expand, becoming two words `x=a` then `x=b` applied in order,
+leaving `x=b` — bash treats `local`'s arguments as ordinary command
+words, not assignment-statement syntax). It's deliberately *not* wired
+into assignment-statement values: a bare `x={a,b}` or a prefix `FOO={a,b}
+cmd` keeps the literal text unexpanded, matching real bash exactly (only
+`local`/`declare`'s pseudo-assignment words differ, precisely because
+they're ordinary argv words under the hood, not real assignment syntax).
+Redirect targets and case subjects/patterns are also left un-expanded —
+an accepted, documented narrowing (real bash *does* brace-expand a
+redirect target, producing "ambiguous redirect" if it comes out to more
+than one word; rush's redirect-target expansion doesn't go through this
+path at all, so `> {a,b}` still just creates a literally-named file).
+
+**Implementation** (`expand.rs`): a new `BraceAtom` enum re-represents a
+`Word`'s content for scanning purposes — `Ch(char)` for a character from
+an `Unquoted` part (eligible to be `{`/`,`/`.`, or ordinary text) or
+`Opaque(WordPart)` for a `Quoted`/`Literal`/`ArrayLiteral` chunk, inert to
+brace syntax but still carried through verbatim into whichever
+alternative it lands in (`pre{"a,b",c}post` splits on the *unquoted*
+comma only — the quoted one is just literal content — verified directly
+against bash). `brace_expand_atoms` scans left to right for the first
+*valid* `{...}` group (depth-tracked bracket matching via
+`matching_close`) and expands it, recursing into the suffix for any
+further group (`{a,b}{c,d}` is a cross product); an invalid group (no
+top-level comma and not a valid range — `{a}`, `{1..$n}`, unterminated)
+is left as a literal `{` and the scan resumes right after it, so one
+invalid group doesn't block a valid one later in the same word (`{{a,b}`
+→ `{a`, `{b`: the outer `{` is unterminated as its own group since the
+first `}` closes the inner one instead, falls back to literal, and the
+scan finds `{a,b}` starting one character later — verified directly).
+`expand_group` tries a comma-list first (splitting only on *top-level*
+commas — one inside a nested `{...}` doesn't count, and each segment is
+itself recursively brace-expanded, so `{a,{b,c},d}` → `a b c d`, not
+`a {b,c} d`); failing that, a range (`expand_range`) — numeric
+(`{1..5}`, `{-3..3}`) or single-letter (`{a..z}`, stepping raw ASCII code
+points even across a mixed-case pair like `{A..z}`), both with an
+optional third `..step` field (its sign is ignored — direction is always
+inferred from the endpoints — and an explicit step of `0` is treated as
+`1`, matching bash exactly). Zero-padding: a leading `0` on either
+endpoint (after an optional sign, and with more than one digit) triggers
+padding of every generated term to that endpoint's own total literal
+width, sign included — `{-01..05}` produces `-01 000 001 002 003 004
+005`, each three characters, matching bash's own documented example
+exactly; a leading `+` never counts (`{+1..+3}` is plain `1 2 3`,
+unpadded).
+
+Explicitly out of scope, each a documented, accepted gap: redirect
+targets and case subjects/patterns aren't brace-expanded (see above);
+assignment-statement values aren't either (matches bash, not a gap, but
+noted since it's easy to expect otherwise); a generated range element
+that happens to itself be a shell metacharacter — specifically a bare `\`
+from a mixed-case ASCII range crossing code point 92, e.g. one term of
+`{A..z}` — doesn't get real bash's own post-generation
+backslash-consumption quirk (bash silently drops that one term; rush
+prints the literal `\`), an extremely obscure corner no real script
+depends on. Every other case — comma-lists, nesting, cross products,
+quoting interactions, numeric/letter ranges with and without an explicit
+step, zero-padding (including negative and all-zero cases), the
+assignment-vs-argument-word distinction, and the `$`-expansion ordering —
+was verified directly against real bash across more than 60 scenarios,
+matching exactly.
 
 ### C25 — `case` fallthrough: `;&` / `;;&`
 Present in bash 4+/ksh93/zsh (not POSIX). Moderate-value convenience; the

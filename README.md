@@ -55,6 +55,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Positional parameters | ✅ | `$0`, `$1`…, `${10}`, `$#`, `$*`, `$@` (incl. `"$@"` forwarding) |
 | Indexed arrays | ✅ | `arr=(a b c)`, `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, `${#arr[@]}`, `${!arr[@]}`, sparse arrays, `arr[i]=`/`arr[i]+=`, `unset 'arr[i]'`, `local arr=(...)` |
 | Associative arrays | ✅ | `declare -A arr`, `arr[key]=val`, `${arr[key]}`/`${arr[@]}`/`${arr[*]}`, `${!arr[@]}` (keys), `${#arr[@]}`, `arr+=([k]=v ...)` merge-by-key, `unset 'arr[key]'`, `local`/`declare -A arr=(...)` |
+| Brace expansion | ✅ | `{a,b,c}` (comma-lists, nesting, cross products), `{1..5}`/`{a..z..2}` (numeric/letter ranges, zero-padding); command arguments, `for` word lists, array literals, `local`/`declare` |
 | Scripts | ✅ | `rush script.sh args…` runs a file; `rush -c "cmds"` runs a string |
 | Ctrl-C / Ctrl-D handling | ✅ | abort line / exit shell |
 | Variable expansion (`$VAR`, `~`, `$(...)`) | ✅ | `$VAR`, `${VAR}`, `$?`, `${V:-def}`/`:=`/`:+`/`:?`, `${#V}`, `${V#pat}`/`##`/`%`/`%%` (prefix/suffix pattern removal), tilde, command substitution; unquoted results field-split on `$IFS` |

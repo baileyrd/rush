@@ -2879,3 +2879,29 @@ fn set_o_vi_and_emacs_toggle_the_edit_mode_option() {
     let (out, _) = rush("set -o vi; set -o emacs; set +o");
     assert!(out.lines().any(|l| l == "set +o vi"), "got: {out:?}");
 }
+
+// A fork-under-load stress test: each `$(...)` command substitution forks a
+// child that keeps running the interpreter, and each iteration also drives a
+// here-document (a memfd on Linux). Hundreds of iterations in one process is
+// what would expose a raw-fork deadlock (a child inheriting a lock held by a
+// helper thread) or a here-doc regression. Meaningful in both backends; under
+// `--features rusty-libc` it exercises the raw `clone(SIGCHLD)` fork directly.
+#[test]
+fn fork_and_heredoc_under_load() {
+    let src = r#"
+        total=0
+        for i in $(seq 1 300); do
+            n=$(cat <<EOF
+$i
+EOF
+)
+            total=$((total + n))
+        done
+        echo "$total"
+    "#;
+    let (out, code) = rush(src);
+    // 1 + 2 + … + 300 = 45150. A hang would trip the harness; a wrong sum or
+    // a dropped here-doc would change this number.
+    assert_eq!(out.trim(), "45150", "got: {out:?}");
+    assert_eq!(code, 0);
+}

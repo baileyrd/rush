@@ -321,13 +321,15 @@ syntax directly.
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
-- **Tier V — interactive UX:** 9 (8 done, 1 open — C71, dependency-blocked)
+- **Tier V — interactive UX:** 9 (9 done, 0 open — closed out)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which all are now done
-except C71 (the right-side prompt), which remains dependency-blocked on
-rustyline's architecture — the fresh pass's one open item.
+comparison pass against dash/bash/ksh93/zsh/fish — and all 73 are now
+done. The last holdout, C71 (the right-side prompt), was
+dependency-blocked on rustyline's architecture until rustyline itself
+was replaced with a hand-rolled line editor (`src/editor.rs`) — see
+C71's write-up.
 
 ---
 
@@ -2887,7 +2889,7 @@ key-event plumbing; the builtins have an integration test. Expansion
 triggers on space (fish also expands on Enter — a documented
 narrowing).
 
-### C71 — No right-side prompt (`$RPS1` / fish right prompt) (tracked)
+### C71 — No right-side prompt (`$RPS1` / fish right prompt) (tracked) ✅ done
 Native in zsh (`$RPS1`) and fish (`fish_right_prompt`) — text
 right-justified on the current input line (commonly exit status, git
 branch, or a clock), distinct from and independent of the left prompt
@@ -2900,6 +2902,41 @@ left-hand prompt only. Supporting this would mean either patching
 (e.g. `reedline`, which does support a right prompt) — a materially
 larger undertaking than the rush-side-only work every other Tier V item
 needs. **Effort: L / dependency-blocked.**
+
+Implemented — by taking the write-up's "materially larger undertaking"
+head-on: `rustyline` is gone entirely, replaced by a hand-rolled line
+editor (`src/editor.rs`, ~900 lines) that owns the terminal directly —
+raw mode via termios (with an RAII restore guard), its own key decoder
+(CSI parsing with a 30 ms poll-based lone-ESC disambiguation), and its
+own repaint engine with ANSI-aware display-width math (the
+`unicode-width` crate) and soft-wrap row accounting. Owning the render
+loop is exactly what makes this item trivial where it was impossible
+before: each repaint, if `$RPS1` (expanded fresh every prompt, so
+`$?`-style content stays live) fits after the input text with a gap
+(`wtotal + wrps1 + 1 < cols`), the editor emits `ESC[{col}G` to park it
+flush right, then repositions the cursor; when the input grows into it,
+the right prompt simply isn't drawn — zsh's own behavior. Everything
+rustyline provided was reimplemented rather than dropped: emacs
+keybindings, a vi keymap (`set -o vi`, now switchable live per-read with
+no editor rebuild and no history loss — retroactively simplifying C73),
+history with consecutive-dedup plus Ctrl-R incremental search, tab
+completion (longest-common-prefix insertion, then a columned candidate
+list) including a new self-contained filename completer, the C69
+history-hint ghost text (Right/End accepts), the C68 syntax
+highlighting, and the C70 abbr-on-space expansion — `completion.rs` is
+now pure candidate/hint/highlight logic with no editor-crate types in
+its API. Verified end-to-end with a real terminal via a Python
+`pty.fork()` harness (`tests/pty/editor_pty_test.py`, 14 scenarios:
+editing, history, completion, hint, abbr, vi mode, Ctrl-R, Ctrl-C,
+wrap, and the right prompt itself), which caught a genuine bug unit
+tests couldn't: reading input through `io::stdin()`'s userspace buffer
+made `poll(2)` on fd 0 lie (bytes already buffered aren't "ready"), so
+arrow keys decoded as lone ESC + literal `[A` — fixed by reading fd 0
+raw. Documented narrowings: the vi keymap is a practical subset (motions
+h/l/0/$/b/w/e, x/X/D/dd/dw/db/d$/d0, i/I/a/A, j/k history), non-tty
+stdin and non-Unix fall back to a plain buffered reader (so piped
+"interactive" input still works, as rustyline's did), and long
+completion lists print unpaged.
 
 ### C72 — `cd` niceties: spelling correction, `pushd`/`popd`/`dirs`, `cd -N`, `$CDPATH` ✅ done
 A bundle of `cd`-adjacent conveniences, none present in rush today

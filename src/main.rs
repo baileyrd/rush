@@ -13,6 +13,7 @@ mod alias;
 mod arith;
 mod builtins;
 mod completion;
+mod editor;
 mod exec;
 mod expand;
 mod func;
@@ -27,9 +28,7 @@ mod vars;
 
 use std::path::PathBuf;
 
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::Editor;
+use editor::{Editor, ReadResult};
 
 fn history_path() -> Option<PathBuf> {
     let mut p = PathBuf::from(std::env::var_os("HOME")?);
@@ -125,7 +124,7 @@ fn prompt_char() -> char {
     '$'
 }
 
-fn main() -> rustyline::Result<()> {
+fn main() -> std::io::Result<()> {
     // Rust's runtime sets `SIGPIPE` to `SIG_IGN` at startup, so a builtin's
     // `print!`/`println!` surfaces a closed pipe as an `Err` that those
     // macros then *panic* on — a real, general bug found while verifying
@@ -229,33 +228,13 @@ fn run_source(src: &str) -> i32 {
     }
 }
 
-/// Build the interactive editor for the current line-editing mode —
-/// called at startup and again whenever `set -o vi`/`set -o emacs`
-/// (C73) flips the mode mid-session.
-fn make_editor(vi: bool) -> rustyline::Result<Editor<completion::RushHelper, DefaultHistory>> {
-    // `CompletionType::List` (C69): Tab shows the columned, paged list of
-    // every candidate — bash's own Tab-Tab display — instead of the
-    // default `Circular`, which cycles candidates in place one at a time
-    // with nothing on screen listing the alternatives.
-    let config = rustyline::Config::builder()
-        .completion_type(rustyline::CompletionType::List)
-        .edit_mode(if vi { rustyline::EditMode::Vi } else { rustyline::EditMode::Emacs })
-        .build();
-    let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::with_config(config)?;
-    rl.set_helper(Some(completion::RushHelper::new()));
-    // Abbreviations (C70): a space after a defined abbreviation in
-    // command position rewrites it in place before the space lands.
-    rl.bind_sequence(
-        rustyline::KeyEvent::new(' ', rustyline::Modifiers::NONE),
-        rustyline::EventHandler::Conditional(Box::new(completion::AbbrSpaceHandler)),
-    );
-    Ok(rl)
-}
-
-fn interactive() -> rustyline::Result<()> {
+fn interactive() -> std::io::Result<()> {
     vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
-    let mut edit_mode_vi = vars::edit_mode_vi();
-    let mut rl = make_editor(edit_mode_vi)?;
+    // Rush's own hand-rolled editor (src/editor.rs) — completion,
+    // hints, highlighting, abbreviations, emacs/vi keymaps (checked
+    // live, so `set -o vi` needs no rebuild), and the right prompt
+    // ($RPS1, C71) all live there.
+    let mut rl = Editor::new();
     let hist = history_path();
     if let Some(ref h) = hist {
         let _ = rl.load_history(h);
@@ -279,18 +258,6 @@ fn interactive() -> rustyline::Result<()> {
     let mut buffer = String::new();
 
     loop {
-        // `set -o vi`/`set -o emacs` ran since the last prompt (C73):
-        // rebuild the editor with the new keybindings, carrying the
-        // in-memory history across.
-        if vars::edit_mode_vi() != edit_mode_vi {
-            edit_mode_vi = vars::edit_mode_vi();
-            let entries: Vec<String> = rl.history().iter().cloned().collect();
-            let mut fresh = make_editor(edit_mode_vi)?;
-            for e in entries {
-                let _ = fresh.add_history_entry(e);
-            }
-            rl = fresh;
-        }
         // Report any background jobs that finished or stopped since last prompt.
         #[cfg(unix)]
         job::reap_background();
@@ -300,13 +267,17 @@ fn interactive() -> rustyline::Result<()> {
         trap::check_pending();
 
         let prompt = if buffer.is_empty() { prompt() } else { "> ".to_string() };
-        match rl.readline(&prompt) {
-            Ok(line) => {
+        // The right prompt ($RPS1, C71): ordinary `$`-expansion each
+        // time, like $PS3 — empty (hidden) when unset.
+        let rprompt = vars::get("RPS1")
+            .and_then(|raw| expand::expand_dollars(&raw).ok())
+            .unwrap_or_default();
+        match rl.read_line(&prompt, &rprompt)? {
+            ReadResult::Line(line) => {
                 if buffer.is_empty() && line.trim().is_empty() {
                     continue;
                 }
-                let entries: Vec<String> = rl.history().iter().cloned().collect();
-                let line = match history_expand::expand(&line, &entries) {
+                let line = match history_expand::expand(&line, rl.history()) {
                     Ok(None) => line,
                     Ok(Some(expanded)) => {
                         println!("{expanded}");
@@ -317,7 +288,7 @@ fn interactive() -> rustyline::Result<()> {
                         continue;
                     }
                 };
-                rl.add_history_entry(&line)?;
+                rl.add_history_entry(&line);
                 if !buffer.is_empty() {
                     buffer.push('\n');
                 }
@@ -340,17 +311,13 @@ fn interactive() -> rustyline::Result<()> {
             }
             // Ctrl-C at an idle prompt (not a running foreground job — that's
             // a child process under job control, and never reaches here).
-            Err(ReadlineError::Interrupted) => {
+            ReadResult::Interrupted => {
                 trap::fire("INT");
                 buffer.clear();
                 continue;
             }
             // Ctrl-D on an empty line: exit.
-            Err(ReadlineError::Eof) => break,
-            Err(e) => {
-                eprintln!("rush: {e}");
-                break;
-            }
+            ReadResult::Eof => break,
         }
     }
 

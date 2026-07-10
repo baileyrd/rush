@@ -34,7 +34,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 
 | Feature | Status | Notes |
 |---|---|---|
-| REPL with line editing | ✅ | via [`rustyline`](https://crates.io/crates/rustyline) |
+| REPL with line editing | ✅ | hand-rolled (`src/editor.rs`): raw-mode terminal, emacs + vi keymaps, history + Ctrl-R search, `$RPS1` right prompt |
 | Tab completion | ✅ | builtins and `$PATH` executables in command position; `$`/`${` completes variable names, `cd` completes directories only, `export`/`unset`/`local`/`declare` complete variable names, `alias`/`unalias` complete alias names, `fg`/`bg`/`kill`/`wait` complete `%n` job specs (Unix); files otherwise |
 | Persistent history | ✅ | stored in `~/.rush_history` |
 | History expansion (`!!`, `!n`, `!$`, `!*`, `!:n`) | ✅ | bash-style bang-history recall; interactive only, quoting/escaping matches bash |

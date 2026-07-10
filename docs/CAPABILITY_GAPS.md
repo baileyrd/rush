@@ -52,8 +52,13 @@ bash/ksh93/zsh's own, and C-style `for`/standalone `((expr))`/richer
 arithmetic (C27–C29, done together in one pass since all three needed
 the same lexer/`arith.rs` groundwork) rounded out arithmetic to real
 C-like completeness — `++`/`--`, compound assignment, `**`, bitwise
-operators, the ternary `?:`, all with genuine short-circuit evaluation —
-the first real dent in what's otherwise still a dash-shaped core.
+operators, the ternary `?:`, all with genuine short-circuit evaluation.
+Here-strings (C30) — `cmd <<< "$var"` — turned out to be exactly the
+small, low-effort item predicted, reusing the heredoc-feeding mechanism
+already in place with no `exec.rs` changes at all. Tier IV now stands at
+9 of 10 done — only process substitution (C31, genuinely the biggest
+remaining lift in this tier) is left — the first real dent in what's
+otherwise still a dash-shaped core.
 
 ---
 
@@ -82,6 +87,7 @@ applicable to that shell's own model.
 | `case` fallthrough `;&` / `;;&` | ✅ | ❌ | ✅ | ✅ | ✅ | — |
 | `select` (numbered-menu prompt) | ✅‡‡ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | C-style `for ((;;))` / `((expr))` / `++`/`--`/bitwise/`?:` | ✅§§ | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Here-strings `<<<` | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
@@ -155,7 +161,7 @@ comma operator.
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (8 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (9 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -1148,11 +1154,32 @@ returning the new vs. old value respectively, and `&&`/`||`/`?:` never
 running the untaken side's side effects — was verified directly against
 real bash and matches exactly.
 
-### C30 — Here-strings: `<<<`
+### C30 — Here-strings: `<<<` ✅ done
 Present in bash/ksh/zsh (not POSIX sh/dash). A small, extremely convenient
-shorthand for `cmd <<< "$var"` instead of a full heredoc — low effort
-relative to how often it shows up, and reuses the heredoc-feeding mechanism
-already in `exec.rs`. **Effort: S.**
+shorthand for `cmd <<< "$var"` instead of a full heredoc.
+
+Turned out to be exactly the low-effort item predicted: a new
+`RedirOp::HereString` (lexer) — checked for right after `<<`, before
+falling into the ordinary heredoc-delimiter reading, so `<<<` never gets
+misread as `<<` followed by a stray `<` — and a new
+`RawRedirect::HereString(Word)` (parser), whose word the parser reads
+exactly like any other redirect's filename. Expansion (`expand.rs`)
+treats that word like a normal redirect target — single-word expansion
+only, no splitting/globbing (verified directly: `x="a b"; cat <<< $x`
+still feeds `a b` as one line, not two) — appends exactly one `\n`
+(always, even if the expanded text already ends with one, matching real
+bash's own behavior exactly), and drops the result straight into the
+same `heredoc: Option<String>` slot a real here-document's body already
+uses — meaning `exec.rs` itself needed zero changes; the entire feeding
+path (`redirect_stdio`, `feed_heredoc`) was already generic over "some
+string feeds stdin," regardless of which redirect produced it. A later
+`<<`/`<<<` on the same command overwrites an earlier one, same "last
+redirect for a given fd wins" rule as any other redirect, verified
+directly. Every case — a literal string, an unquoted variable (no
+splitting), a multi-line quoted string, the always-append-one-newline
+rule, and the last-redirect-wins interaction with a real heredoc on the
+same command — was verified directly against real bash and matches
+exactly.
 
 ### C31 — Process substitution: `<(cmd)`, `>(cmd)`
 Present in bash/ksh/zsh (not POSIX sh/dash). Treats a command's output as a

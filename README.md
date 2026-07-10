@@ -62,7 +62,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Arithmetic (`$((...))`) | ✅ | `+ - * / %`, comparisons, `&& \|\| !`, parentheses, variables (`i=$((i+1))`) |
 | Globbing (`*`, `?`, `[…]`) | ✅ | hand-rolled matcher; ranges, `[!…]`, multi-component (`src/*.rs`); dotfiles skipped unless pattern starts with `.` |
 | Operators (`&&`, `\|\|`, `;`) | ✅ | left-to-right, exit-status short-circuiting |
-| Control flow | ✅ | `if`/`while`/`until`/`for` (`for x; do` with no `in` iterates `"$@"`), `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
+| Control flow | ✅ | `if`/`while`/`until`/`for`/`select` (`for`/`select x; do` with no `in` iterates `"$@"`), `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`, `local [name[=value]]…` for function-scoped variables; brace groups `{ …; }` |
 | Subshells | ✅ | `( … )` forks a real child on Unix (genuine isolation, incl. `exit`); state save/restore fallback elsewhere |
 | Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`/`wait`, `$!`) | ✅ | **Unix only** — process groups, terminal hand-off, signals (`libc`) |
@@ -114,7 +114,7 @@ commands only and `&` is rejected.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture, data-flow
   diagrams, module reference, and roadmap.
 - **[docs/CAPABILITY_GAPS.md](docs/CAPABILITY_GAPS.md)** — capability
-  assessment against dash/bash/ksh93/zsh/fish: 38 ranked gaps, by consequence.
+  assessment against dash/bash/ksh93/zsh/fish: 39 ranked gaps, by consequence.
 - **[CHANGELOG.md](CHANGELOG.md)** — what's been built, by area.
 
 ## Project Layout

@@ -63,6 +63,27 @@ fn rush_stdin(src: &str, input: &str) -> (String, i32) {
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
 }
 
+/// Like [`rush_stdin`], but returning stderr instead of stdout — for
+/// `select`'s menu/prompt, which (like real bash) goes to stderr rather
+/// than stdout.
+fn rush_stdin_stderr(src: &str, input: &str) -> (String, i32) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg(src)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rush");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait rush");
+    (String::from_utf8_lossy(&output.stderr).into_owned(), output.status.code().unwrap_or(-1))
+}
+
 #[test]
 fn pipeline_wires_stdout_to_stdin_across_two_real_processes() {
     let (out, status) = rush("echo hi | tr a-z A-Z");
@@ -1177,6 +1198,82 @@ fn case_dsemi_amp_resumes_pattern_testing() {
 #[test]
 fn case_terminator_omitted_on_last_item_defaults_to_break() {
     assert_eq!(rush("case a in a) echo one;;esac").0, "one\n");
+}
+
+#[test]
+fn select_prints_a_numbered_menu_and_prompts_on_stderr() {
+    let (err, _) = rush_stdin_stderr("select x in apple banana; do echo hi; break; done", "1\n");
+    assert_eq!(err, "1) apple\n2) banana\n#? ");
+}
+
+#[test]
+fn select_reads_a_valid_index_or_blank_name_on_no_match() {
+    // A valid 1-based index sets `NAME` to that word; `$REPLY` always
+    // holds the raw line either way.
+    assert_eq!(
+        rush_stdin("select x in a b c; do echo \"x=[$x] reply=[$REPLY]\"; break; done", "2\n").0,
+        "x=[b] reply=[2]\n"
+    );
+    // Out of range, non-numeric, or negative: `NAME` is empty, no error.
+    assert_eq!(
+        rush_stdin("select x in a b c; do echo \"x=[$x] reply=[$REPLY]\"; break; done", "foo\n").0,
+        "x=[] reply=[foo]\n"
+    );
+    assert_eq!(
+        rush_stdin("select x in a b c; do echo \"x=[$x]\"; break; done", "0\n").0,
+        "x=[]\n"
+    );
+    // Surrounding whitespace and a leading `+`/zero are tolerated.
+    assert_eq!(rush_stdin("select x in a b c; do echo \"x=$x\"; break; done", " 2 \n").0, "x=b\n");
+    assert_eq!(rush_stdin("select x in a b c; do echo \"x=$x\"; break; done", "+2\n").0, "x=b\n");
+}
+
+#[test]
+fn select_blank_line_redisplays_without_running_the_body() {
+    // A truly empty line doesn't run the body at all — just redisplays
+    // the menu and prompts again — while an all-whitespace line *does*
+    // run it (with `$REPLY` holding those literal spaces, unlike ordinary
+    // `read`'s own IFS-trimming).
+    assert_eq!(
+        rush_stdin("select x in a b; do echo \"ran reply=[$REPLY]\"; break; done", "\n2\n").0,
+        "ran reply=[2]\n"
+    );
+    assert_eq!(
+        rush_stdin("select x in a b; do echo \"ran reply=[$REPLY]\"; break; done", "   \nq\n").0,
+        "ran reply=[   ]\n"
+    );
+}
+
+#[test]
+fn select_eof_ends_the_loop_with_status_1_overriding_the_last_body_status() {
+    let (out, status) = rush_stdin("select x in a b; do echo hi; done", "q\n");
+    assert_eq!(out, "hi\n");
+    assert_eq!(status, 1);
+    // An explicit `break` still reports the last command's own status —
+    // EOF's status-1 override only applies when the loop ends *without*
+    // one.
+    let (out, status) = rush_stdin("select x in a b; do false; break; done", "1\n");
+    assert_eq!(out, "");
+    assert_eq!(status, 0);
+}
+
+#[test]
+fn select_without_in_iterates_positional_params_and_empty_list_is_a_no_op() {
+    // No positional params set: the list is empty, same as `for`'s own
+    // `in`-omitted convention — zero iterations, status 0, no read at all
+    // (nothing is ever written to its stdin, unlike the other cases here).
+    let (out, status) = rush("select x; do echo \"x=$x\"; break; done");
+    assert_eq!(out, "");
+    assert_eq!(status, 0);
+}
+
+#[test]
+fn select_ps3_prompt_defaults_and_dollar_expands() {
+    let (err, _) = rush_stdin_stderr("select x in a; do break; done", "1\n");
+    assert_eq!(err, "1) a\n#? ");
+    let (err, _) =
+        rush_stdin_stderr(r#"name=world; PS3="pick $name> "; select x in a; do break; done"#, "1\n");
+    assert_eq!(err, "1) a\npick world> ");
 }
 
 #[test]

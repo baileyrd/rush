@@ -32,9 +32,11 @@ pipefail` — the header nearly every production shell script opens with —
 now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
 and `-x` (C20, xtrace) alongside them. `TERM`/`HUP` traps (C21) now fire
 too — including interrupting a blocking wait immediately, the headline
-case for a container's graceful-shutdown pattern — closing Tier III out
-completely. Tier IV (bash/ksh/zsh language parity, the least POSIX-y and
-largest tier) is now underway: indexed arrays (C22) — `arr=(a b c)`,
+case for a container's graceful-shutdown pattern. (One gap turned up
+alongside `-x`: `set --`/`set args…` doesn't reassign positional
+parameters at all — tracked as C39, still open.) Tier IV (bash/ksh/zsh
+language parity, the least POSIX-y and largest tier) is now underway:
+indexed arrays (C22) — `arr=(a b c)`,
 `${arr[N]}`/`${arr[@]}`/`${arr[*]}`, sparse arrays, `arr[i]=`/`arr[i]+=`,
 `unset 'arr[i]'`, `local arr=(...)` — are done, associative arrays
 (C23) — a new `declare -A` builtin, `arr[key]=`/`arr[key]+=`,
@@ -43,8 +45,11 @@ top of them, brace expansion (C24) — `{a,b,c}`, `{1..5}`, `{a..z..2}`,
 nesting, cross products — closed out what had been the single most
 dangerous *silent* gap in this whole document (`mkdir {a,b,c}` used to
 make one wrongly-named directory instead of three, with no warning at
-all), and `case` fallthrough (C25) — `;&`/`;;&` — rounded out `case`
-itself, the first real dent in what's otherwise still a dash-shaped core.
+all), `case` fallthrough (C25) — `;&`/`;;&` — rounded out `case` itself,
+and `select` (C26) — a numbered menu prompt, `$REPLY`, blank-line
+redisplay, EOF handling — brought rush's control-flow keyword set to
+parity with bash/ksh93/zsh's own, the first real dent in what's
+otherwise still a dash-shaped core.
 
 ---
 
@@ -71,6 +76,7 @@ applicable to that shell's own model.
 | Associative arrays (`declare -A`) | ✅** | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Brace expansion `{a,b,c}` | ✅†† | ❌ | ✅ | ✅ | ✅ | ✅ |
 | `case` fallthrough `;&` / `;;&` | ✅ | ❌ | ✅ | ✅ | ✅ | — |
+| `select` (numbered-menu prompt) | ✅‡‡ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
@@ -122,14 +128,20 @@ matching an accepted, documented scope narrowing: redirect targets, case
 subjects/patterns, and (matching real bash, not a gap) assignment
 statements' own values.
 
+‡‡ The numbered menu, `$PS3` prompt (default and custom, `$`-expanded),
+`$REPLY`'s raw/untrimmed content, blank-line redisplay, index parsing,
+`break`, and the EOF-forces-status-1 quirk are all done. Not done, an
+accepted cosmetic (not functional) narrowing: real bash lays the menu out
+in columns sized to `$COLUMNS`; rush always prints one entry per line.
+
 ---
 
 ## Summary counts
 
 - **Tier I — correctness/POSIX risk:** 9 (6 done)
 - **Tier II — missing standard builtins:** 12 (11 done)
-- **Tier III — scripting-safety idioms:** 4 (4 done — complete)
-- **Tier IV — bash/ksh/zsh language parity:** 10 (4 done)
+- **Tier III — scripting-safety idioms:** 5 (4 done)
+- **Tier IV — bash/ksh/zsh language parity:** 10 (5 done)
 - **Tier V — interactive UX:** 3
 
 ---
@@ -654,6 +666,22 @@ exact header format for every compound kind was a bigger lift than this
 item's effort budget justified next to the headline case (seeing every
 command that actually ran).
 
+### C39 — `set -- args…` / `set args…` doesn't reassign positional parameters (tracked)
+POSIX-mandated; present in dash/bash/ksh/zsh. The standard way to
+reassign `$1`/`$2`/…/`$#` mid-script — the textbook idiom right after
+`getopts` finishes (`shift $((OPTIND - 1)); set -- "$@"` to drop the
+parsed flags) — or to split a string into positional fields (`set -- $line`).
+Rush's `set` builtin only recognizes its flag-toggling forms
+(`-e`/`-u`/`-x`/`-o pipefail`); any other argument, including a bare `--`,
+is rejected outright (`set: --: not supported`, status 1) rather than
+becoming the new `$1`/`$2`/…. Found while verifying C26 (`select`
+without an `in` clause iterating `"$@"`) — needed a way to *set* `"$@"`
+for the test and discovered there wasn't one; general, not specific to
+`select` at all. **Effort: S** — `set_cmd` (`builtins.rs`) needs a
+`--`-or-first-non-flag-argument branch that calls into whatever
+`vars.rs` mechanism already backs `$1`/`$2`/`$#`/`"$@"` for a script's own
+initial argv.
+
 ### C21 — Trap signals beyond `EXIT`/`INT` actually firing (tracked) ✅ done
 `TERM`/`HUP` are POSIX-mandated; `ERR`/`DEBUG` are bash/ksh/zsh extensions.
 Rush's `trap` builtin would happily *register* a handler for any name, but
@@ -967,10 +995,50 @@ status propagation through a fallthrough chain, and the terminator-less
 last-item default — was verified directly against real bash across 10
 scenarios, matching exactly.
 
-### C26 — `select` (numbered-menu prompt)
+### C26 — `select` (numbered-menu prompt) ✅ done
 Specified by POSIX and implemented by bash/ksh93/zsh — though dash,
-otherwise a fairly complete POSIX subset, omits it too, so rush would be in
-reasonable company either way. **Effort: M.**
+otherwise a fairly complete POSIX subset, omits it too.
+
+**Grammar** (`parser.rs`): `select NAME [in WORDS]; do BODY; done` — the
+same grammar as `for` (including the `has_in`/`words` convention: an
+omitted `in` iterates `"$@"`; an explicit `in` with no words is a real
+empty list), just a new reserved word and a `Compound::Select` variant.
+
+**Execution** (`exec.rs`), verified directly against real bash across
+more than a dozen scenarios: an empty word list is a no-op (status 0, no
+menu, no read at all — same as `for`). Otherwise, prints the numbered
+menu to *stderr*, then loops: print `$PS3` (default `"#? "` when
+genuinely unset; an explicit `PS3=` prints nothing — both `$`-expanded
+via the same `expand_dollars` `$PS1` itself doesn't use, since `PS1` has
+its own bespoke backslash-escape codes while `PS3` is ordinary
+parameter/command-substitution expansion), read one line. `$REPLY` is
+set to that line *raw* — no `$IFS` splitting or trimming at all, unlike
+ordinary `read` (verified directly: three bare spaces as the whole line
+come back in `$REPLY` as three literal spaces, where `read reply` on the
+same input trims to empty) — though it does still get `read`'s own
+backslash-continuation processing (`a\<newline>b` still joins into `ab`).
+A genuinely empty line (zero length, not merely all-whitespace)
+redisplays the menu and prompts again *without* running `BODY` at all.
+Otherwise: the line, trimmed and parsed as a base-10 integer (leading
+`+`/`-`/zero-padding all tolerated) in `1..=len(words)`, sets `NAME` to
+that word; out of range or unparseable sets `NAME` to `""` — either way
+`BODY` then runs once, with the same `break`/exit-status-propagation
+machinery `for`/`while` already use. EOF while reading ends the whole
+construct with status `1`, *overriding* whatever `BODY`'s last run
+returned — a real, deliberate bash quirk verified directly (distinct
+from `while read line; do …; done`, whose own status after its final
+failing `read` keeps the loop body's last-iteration status instead) —
+and prints a trailing newline first, so the shell doesn't leave the
+cursor stuck at the end of an unanswered prompt.
+
+Explicitly out of scope, a documented, accepted (cosmetic, not
+functional) narrowing: real bash lays the menu out in columns sized to
+`$COLUMNS`; rush always prints one entry per line instead. Every
+functional behavior — numbering, `$REPLY`'s raw/untrimmed/unsplit
+content, the blank-line redisplay, index parsing's tolerance for
+whitespace/sign/leading zeros, out-of-range/unparseable → empty `NAME`,
+`break`'s exit-status semantics, and the EOF-forces-status-1 quirk — was
+verified directly against real bash and matches exactly.
 
 ### C27 — C-style `for (( i=0; i<n; i++ ))`
 Present in bash/ksh93/zsh (not POSIX sh/dash). A very common counted-loop

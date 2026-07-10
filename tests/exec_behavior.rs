@@ -2832,3 +2832,12 @@ fn special_variables_grab_bag() {
     let (out, _) = rush(r#"echo "[${BASH_SOURCE[0]}]""#);
     assert_eq!(out, "[]\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn abbr_builtin_manages_the_table() {
+    // C70: the abbr/unabbr builtins (the live line expansion itself is
+    // interactive-only, unit-tested in completion.rs).
+    let (out, _) = rush("abbr gs='git status'; abbr; abbr gs; unabbr gs; abbr gs 2>/dev/null; echo st=$?");
+    assert_eq!(out, "abbr gs='git status'\nabbr gs='git status'\nst=1\n");
+}

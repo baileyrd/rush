@@ -45,6 +45,8 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "ulimit" => Some(ulimit_cmd(argv)),
         "shopt" => Some(shopt_cmd(argv)),
         "mapfile" | "readarray" => Some(mapfile_cmd(argv)),
+        "abbr" => Some(abbr_cmd(argv)),
+        "unabbr" => Some(unabbr_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -55,7 +57,7 @@ pub const NAMES: &[&str] = &[
     "cd", "pwd", "echo", "export", "unset", "test", "[", "break", "continue", "return", "true",
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
-    "mapfile", "readarray", "declare", "typeset", "readonly",
+    "mapfile", "readarray", "abbr", "unabbr", "declare", "typeset", "readonly",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -2134,6 +2136,45 @@ fn set_cmd(argv: &[String]) -> i32 {
 
 /// `trap` (list) / `trap 'command' NAME...` (register) / `trap - NAME...`
 /// (reset to default). Only `EXIT` and `INT` are ever fired (see `trap.rs`).
+/// `abbr [name=value ...]` (C70) — define fish/zsh-style abbreviations
+/// that live-expand in place on the interactive line (on space, in
+/// command position — see `completion::abbr_expansion`). With no
+/// arguments, list every abbreviation re-runnably.
+fn abbr_cmd(argv: &[String]) -> i32 {
+    if argv.len() == 1 {
+        for (name, value) in crate::alias::abbr_all() {
+            println!("abbr {name}='{value}'");
+        }
+        return 0;
+    }
+    let mut status = 0;
+    for arg in &argv[1..] {
+        match arg.split_once('=') {
+            Some((name, value)) if !name.is_empty() => crate::alias::abbr_set(name, value),
+            _ => match crate::alias::abbr_get(arg) {
+                Some(value) => println!("abbr {arg}='{value}'"),
+                None => {
+                    eprintln!("abbr: {arg}: not found");
+                    status = 1;
+                }
+            },
+        }
+    }
+    status
+}
+
+/// `unabbr name...` — remove abbreviations.
+fn unabbr_cmd(argv: &[String]) -> i32 {
+    let mut status = 0;
+    for name in &argv[1..] {
+        if !crate::alias::abbr_unset(name) {
+            eprintln!("unabbr: {name}: not found");
+            status = 1;
+        }
+    }
+    status
+}
+
 fn trap_cmd(argv: &[String]) -> i32 {
     // `trap -l` (C65): the numbered signal-name table, in bash's own
     // five-per-line tab-separated format.

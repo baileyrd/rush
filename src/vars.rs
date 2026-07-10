@@ -1084,6 +1084,13 @@ pub fn key_append(name: &str, subscript: &str, value: &str) {
 
 /// Push a fresh, empty local-variable frame — called when entering a
 /// function call (`exec::call_function`).
+/// `${PIPESTATUS[@]}` (C54): replace the array with the just-finished
+/// pipeline's per-stage exit statuses — every command updates it, a
+/// single non-piped command included (one element), matching bash.
+pub fn set_pipestatus(statuses: &[i32]) {
+    set_array("PIPESTATUS", statuses.iter().map(i32::to_string).collect());
+}
+
 /// How many function calls are currently active — the `ERR` trap doesn't
 /// fire inside one (C53; bash's no-`errtrace` default).
 pub fn function_depth() -> usize {

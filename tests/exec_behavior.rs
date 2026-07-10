@@ -2394,3 +2394,25 @@ fn bang_negates_a_pipeline() {
     let (out, _) = rush("echo got=$(! true; echo $?)");
     assert_eq!(out, "got=1\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn pipestatus_records_per_stage_statuses() {
+    // C54: `${PIPESTATUS[@]}` always expanded empty. Every expectation
+    // below mirrors directly-verified bash behavior.
+    let (out, _) = rush(r#"sh -c 'exit 3' | sh -c 'exit 5' | true; echo "${PIPESTATUS[@]} ${PIPESTATUS[1]} ${#PIPESTATUS[@]}""#);
+    assert_eq!(out, "3 5 0 5 3\n");
+
+    // Every command replaces it — reading it twice shows the echo's own.
+    let (out, _) = rush(r#"true | false; echo "${PIPESTATUS[@]}"; echo "${PIPESTATUS[@]}""#);
+    assert_eq!(out, "0 1\n0\n");
+
+    // Single commands (builtin, compound, assignment) get one element;
+    // `! false` records the un-negated status; pipefail doesn't distort it.
+    let (out, _) = rush(r#"false; echo "${PIPESTATUS[@]}"; ! false; echo "${PIPESTATUS[@]}""#);
+    assert_eq!(out, "1\n1\n");
+    let (out, _) = rush(r#"if true; then :; fi; echo "${PIPESTATUS[@]}"; x=5; echo "${PIPESTATUS[@]}""#);
+    assert_eq!(out, "0\n0\n");
+    let (out, _) = rush(r#"set -o pipefail; false | true; echo "st=$? ${PIPESTATUS[@]}""#);
+    assert_eq!(out, "st=1 1 0\n");
+}

@@ -320,15 +320,15 @@ syntax directly.
 
 - **Tier I — correctness/POSIX risk:** 14 (14 done, 0 open — closed out again)
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
-- **Tier III — scripting-safety idioms:** 10 (9 done, 1 open — C54)
+- **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (10 done, 13 open — C55–C67)
 - **Tier V — interactive UX:** 9 (3 done, 6 open — C68–C73)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C53 are
-now done (re-closing Tiers I and II completely) and the remaining 20
-are open.
+comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C54 are
+now done (re-closing Tiers I, II, and III completely) and the remaining
+19 are open.
 
 ---
 
@@ -1682,7 +1682,7 @@ exemption threaded through `run_andor`'s existing `last_ran` signal.
 Verified against real bash across fourteen scenarios. Two integration
 tests cover the ERR matrix and the negation semantics.
 
-### C54 — `${PIPESTATUS[@]}` (per-stage pipeline exit statuses) not implemented (tracked)
+### C54 — `${PIPESTATUS[@]}` (per-stage pipeline exit statuses) not implemented ✅ done
 Present in bash (zsh has the same idea under `$pipestatus`, lowercase;
 not in ksh93/dash) — lets a script tell *which* stage of a pipeline
 failed, not just the last/pipefail-adjusted status `$?` gives. `set -o
@@ -1693,6 +1693,25 @@ exposed as a variable at all — `${PIPESTATUS[@]}` always expands empty.
 itself); the work is capturing that same vector into a real indexed-array
 variable after every pipeline runs (indexed arrays are fully supported,
 C22) rather than discarding it.
+
+Implemented per the sketch: `vars::set_pipestatus` replaces the
+`PIPESTATUS` indexed array with the just-finished pipeline's per-stage
+statuses, recorded at two points — the multi-stage vector exactly where
+the stages are reaped (`job::wait_pgid`, the same `codes` pipefail
+already consumes), and a one-element array for every single-stage
+command in `run_pipeline_node` (builtins, functions, compounds,
+assignment statements, and `cmd &` — bash updates it for *every*
+command, verified). Semantics probed against bash and matched: reading
+it twice shows the first `echo`'s own `(0)` the second time; `! false`
+records the *un*-negated `(1)` (recorded before C53's negation);
+`set -o pipefail` doesn't distort the per-stage values; and
+`${PIPESTATUS[1]}`/`${#PIPESTATUS[@]}` compose with all the existing
+array read forms for free. Deliberately *not* set by pipelines run
+inside `$(...)` capture — a real bash substitution is a subshell whose
+`PIPESTATUS` never escapes, so the parent's copy staying untouched is
+the matching behavior. zsh's lowercase `$pipestatus` spelling is out of
+scope (bash is this codebase's reference). One integration test covers
+the matrix.
 
 ---
 

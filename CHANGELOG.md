@@ -984,3 +984,41 @@ in zsh.
   rustyline's own `Context::new` testing constructor, rather than the
   piped-stdin integration pattern used elsewhere. Adds 3 unit tests; full
   suite and clippy stay clean.
+
+### Argument- and context-aware completion (C34)
+Closes out Tier V completely, 3 of 3. Rush's completion used to be file/
+PATH/builtin-name only; it now recognizes a fixed set of the highest-value
+cases where that's rarely what's actually wanted, rather than a full
+fish/zsh completion-spec engine.
+
+- **Variable names** — a bare, still-open `$name`/`${name}` completes
+  every shell + environment variable name, reconstructing `$name` or
+  `${name}` (auto-closing the brace) in the replacement. New
+  `vars::names()` enumerates the shell-variable side.
+- **`cd`'s argument** completes directories only — reuses rustyline's own
+  `FilenameCompleter` for the actual matching, then filters to
+  directories via a plain filesystem check. Confirmed directly that this
+  isn't bash's own default behavior either (bare readline, no
+  bash-completion, still lists files alongside directories) — a genuine
+  fish/zsh-parity addition.
+- **`export`/`unset`/`local`/`declare`'s arguments** complete variable
+  names (same enumeration as above); a word starting with `-` is left
+  uncompleted rather than nonsensically offering variable names for a flag.
+- **`alias`/`unalias`'s arguments** complete existing alias names
+  (`alias::all()` already existed) — only before an `=`, which starts a
+  new alias's value instead.
+- **(Unix only) `fg`/`bg`/`kill`/`wait`'s arguments** complete `%n` job
+  specs from the live job table, in the exact plain `%N` format those
+  builtins already parse. New `job::ids()` enumerates the job table.
+- Explicitly out of scope: flag completion for any builtin; variable
+  completion when `$`/`${` isn't the start of the word being completed, or
+  unwrapped out of an open double quote; per-external-command argument
+  specs (`git <TAB>` subcommands, `ssh <TAB>` known hosts) — the rest of
+  what a real fish/zsh completion *system* provides beyond this fixed
+  case list.
+- Verified end-to-end against the compiled binary under a real
+  pseudo-terminal (`pty.fork()`) across all five cases, including that
+  `cd`'s directory filtering excludes a real file sitting next to a real
+  directory and that a job spawned with `sleep 100 &` completes `fg %`
+  to `fg %1`. Adds 8 new unit tests exercising the pure completion
+  functions directly; full suite and clippy stay clean.

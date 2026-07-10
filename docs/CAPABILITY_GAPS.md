@@ -78,7 +78,12 @@ completion of the current line from history, fish's own signature
 feature — followed right behind it, turning out to be almost entirely
 `rustyline`'s own ready-made `HistoryHinter` and key bindings once
 `RushHelper` actually delegated to it instead of its previous no-op
-`Hinter` impl.
+`Hinter` impl. Argument- and context-aware completion (C34) — variable
+names after `$`/`${`, directories-only for `cd`, variable names for
+`export`/`unset`/`local`/`declare`, alias names for `alias`/`unalias`,
+and `%n` job specs for `fg`/`bg`/`kill`/`wait` — closes out Tier V
+completely, 3 of 3, bounded deliberately to this fixed case list rather
+than a full fish/zsh-style completion-spec engine.
 
 ---
 
@@ -112,7 +117,7 @@ applicable to that shell's own model.
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
 | Bang-history recall (`!!`/`!n`/`!$`/etc.) | ✅‖‖ | ❌ | ✅ | ✅ | ✅ | ❌ |
-| Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
+| Context-aware completion | ✅§§§ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ✅*** | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
 
@@ -205,6 +210,15 @@ every other rustyline editing feature), verified directly under a real
 pseudo-terminal rather than the piped-stdin pattern used elsewhere in
 this document.
 
+§§§ Bounded to a fixed set of the highest-value cases rather than a full
+completion-spec engine: variable names after a bare `$`/`${`, `cd`'s
+directory-only argument, variable names for `export`/`unset`/`local`/
+`declare`, existing alias names for `alias`/`unalias`, and (Unix only)
+`%n` job specs for `fg`/`bg`/`kill`/`wait`. Not done: flag completion for
+any builtin, per-external-command argument specs (`git <TAB>`
+subcommands, `ssh <TAB>` known hosts) — the rest of what a real fish/zsh
+completion *system* (as opposed to this fixed case list) provides.
+
 ---
 
 ## Summary counts
@@ -213,7 +227,7 @@ this document.
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
-- **Tier V — interactive UX:** 3 (2 done)
+- **Tier V — interactive UX:** 3 (3 done — complete)
 
 ---
 
@@ -1411,13 +1425,72 @@ unit tests exercising `RushHelper`'s `Hinter`/`Highlighter` impls directly
 against a `rustyline::history::DefaultHistory` and a `Context::new`
 (rustyline's own testing constructor for exactly this).
 
-### C34 — Argument- and context-aware completion
+### C34 — Argument- and context-aware completion ✅ done
 Native and rich in fish; rich in zsh via compsys; bash gets it only via the
-separate bash-completion project. Rush's completion is file/PATH/builtin-
-name only today — it has no notion that a command's second word should
-complete differently than its first. The single biggest interactive gap
-versus fish/zsh specifically (not versus dash, which doesn't attempt this
-either). **Effort: L.**
+separate bash-completion project. Rush's completion used to be file/PATH/
+builtin-name only — no notion that a command's second word should complete
+differently than its first.
+
+**Scope, deliberately bounded** rather than a full fish/zsh completion-spec
+engine (a per-command argument-spec system, `complete -F`-style
+programmable completion, etc. — out of scope, a documented gap): a fixed
+set of the highest-value cases where plain filename completion is rarely
+what's actually wanted.
+
+- **Variable names** — a bare, still-open `$name`/`${name}` (unquoted, at
+  the start of the word being completed) completes every shell variable
+  name plus every environment variable name, reconstructing `$name` or
+  `${name}` (auto-closing the brace) in the replacement. A new
+  `vars::names()` enumerates the shell-variable side (`vars.rs`'s own
+  `VARS` map had no existing "list all names" function — only
+  `exported()`, scoped to exported scalars for env-seeding).
+- **`cd`'s own argument** completes directories only, not files — reuses
+  rustyline's own `FilenameCompleter` for the actual path-matching/
+  escaping logic, then filters its candidates down to directories via a
+  plain filesystem check. (Confirmed directly against real bash's own
+  bare-readline defaults, no bash-completion loaded, that this isn't bash
+  behavior either — `cd` there lists plain files alongside directories
+  too; genuinely a fish/zsh-parity addition, not something plain bash
+  already does.)
+- **`export`/`unset`/`local`/`declare`'s arguments** complete variable
+  names (the same enumeration as `$`/`${` above) — except a word starting
+  with `-` (a flag), which is deliberately left uncompleted rather than
+  nonsensically offering variable names for it.
+- **`alias`/`unalias`'s arguments** complete existing alias names (`alias.rs`
+  already had a `pub fn all()` — no new code needed there) — but only
+  while still typing the bare name, before an `=` (which starts a new
+  alias's *value*, arbitrary text that isn't an alias name to complete
+  against).
+- **(Unix only) `fg`/`bg`/`kill`/`wait`'s arguments** complete `%n` job
+  specs from the live job table, in exactly the plain `%N` format those
+  builtins themselves already parse (confirmed by reading `wait_one`/
+  `kill_cmd`/`select_index`, all of which just `strip_prefix('%')` then
+  parse an integer — no `%+`/`%-`/`%string` forms are supported today, so
+  completion doesn't offer those either). A new `job::ids()` enumerates
+  the job table (previously nothing outside `job.rs` could list job ids).
+
+Explicitly out of scope, each an accepted, documented gap given this
+item's effort budget: flag completion for any builtin (`export -`, `set
+-`, `declare -`); variable completion when `$`/`${` isn't the *start* of
+the word being completed (`foo$bar`, concatenated text plus a reference);
+variable completion unwrapped out of an open double quote (`"$HO` is
+treated as a literal word starting with `"`, not specially unquoted first
+— the same not-lexer-accurate approach this module already had for
+command-position detection); any actual per-command argument specs for
+external commands (`git <TAB>` completing subcommands, `ssh <TAB>`
+completing known hosts, etc.) — real fish/zsh completion is ultimately a
+whole ecosystem of per-command completion scripts, not something a single
+shell's own core reasonably reimplements.
+
+Verified end-to-end against the compiled binary under a real
+pseudo-terminal (`pty.fork()`) across all five cases above — including
+that `cd`'s directory filtering actually excludes a real file sitting
+alongside a real directory, that `${VAR<TAB>` auto-closes the brace, and
+that a job spawned with `sleep 100 &` really does complete `fg %<TAB>` to
+`fg %1`. Also covered by 8 new unit tests exercising the pure completion
+functions directly (`current_command`, `complete_variable`,
+`complete_variable_name_arg`, `complete_alias_name`,
+`job_spec_candidates`, `is_directory`).
 
 ---
 

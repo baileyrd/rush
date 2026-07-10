@@ -894,6 +894,13 @@ pub fn exported() -> Vec<(String, String)> {
     })
 }
 
+/// Every shell variable name currently set (scalar, array, or associative
+/// array alike) — for completion (`$name`/`${name}`, and builtins that take
+/// a variable name argument), not scoped to exported-only like [`exported`].
+pub fn names() -> Vec<String> {
+    VARS.with(|v| v.borrow().keys().cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -559,8 +559,8 @@ fn case_patterns_match(patterns: &[crate::lexer::Word], subject: &str) -> Result
 /// for it and adopts its exit status as `$?`.
 #[cfg(unix)]
 fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
-    match unsafe { libc::fork() } {
-        -1 => Err(std::io::Error::last_os_error().to_string()),
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
             // Child: run the body, then exit with its status — firing its own
             // (forked, independent) copy of any EXIT trap. The `exit`
@@ -571,12 +571,12 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
         pid => {
             let mut status: libc::c_int = 0;
             loop {
-                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1 {
+                if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
                     return Ok(crate::job::exit_code(status));
                 }
                 // Interrupted by a signal (e.g. a background job's SIGCHLD); retry.
-                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                    return Err(std::io::Error::last_os_error().to_string());
+                if crate::sys::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return Err(crate::sys::last_os_error().to_string());
                 }
             }
         }
@@ -889,15 +889,15 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
     // the default dispositions in the parent before forking closes the
     // race; the parent reinstalls its own handlers immediately after.
     unsafe {
-        libc::signal(libc::SIGTERM, libc::SIG_DFL);
-        libc::signal(libc::SIGHUP, libc::SIG_DFL);
+        crate::sys::signal(libc::SIGTERM, libc::SIG_DFL);
+        crate::sys::signal(libc::SIGHUP, libc::SIG_DFL);
     }
-    match unsafe { libc::fork() } {
-        -1 => Err(std::io::Error::last_os_error().to_string()),
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
             unsafe {
-                libc::dup2(to_child_read.as_raw_fd(), 0);
-                libc::dup2(from_child_write.as_raw_fd(), 1);
+                crate::sys::dup2(to_child_read.as_raw_fd(), 0);
+                crate::sys::dup2(from_child_write.as_raw_fd(), 1);
             }
             drop(to_child_read);
             drop(to_child_write);
@@ -914,8 +914,8 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             let read_fd = from_child_read.into_raw_fd();
             let write_fd = to_child_write.into_raw_fd();
             unsafe {
-                libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                crate::sys::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                crate::sys::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
             }
             crate::vars::set_array(name, vec![read_fd.to_string(), write_fd.to_string()]);
             crate::vars::set(&format!("{name}_PID"), &pid.to_string());
@@ -1236,14 +1236,14 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
 
     let redirect_to = |guard: &mut StdioGuard, target: i32, source: File| -> Result<(), String> {
         if !guard.saved.iter().any(|(fd, _)| *fd == target) {
-            let saved = unsafe { libc::dup(target) };
+            let saved = unsafe { crate::sys::dup(target) };
             if saved == -1 {
-                return Err(std::io::Error::last_os_error().to_string());
+                return Err(crate::sys::last_os_error().to_string());
             }
             guard.saved.push((target, saved));
         }
-        if unsafe { libc::dup2(source.as_raw_fd(), target) } == -1 {
-            return Err(std::io::Error::last_os_error().to_string());
+        if unsafe { crate::sys::dup2(source.as_raw_fd(), target) } == -1 {
+            return Err(crate::sys::last_os_error().to_string());
         }
         // A freshly opened file's own fd is often *exactly* `target` (its
         // lowest-available-fd allocation landing on the very number we're
@@ -1288,14 +1288,14 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
                 let dst = *fd as i32;
                 let src = *target as i32;
                 if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
-                    let saved = unsafe { libc::dup(dst) };
+                    let saved = unsafe { crate::sys::dup(dst) };
                     if saved == -1 {
-                        return Err(std::io::Error::last_os_error().to_string());
+                        return Err(crate::sys::last_os_error().to_string());
                     }
                     guard.saved.push((dst, saved));
                 }
-                if unsafe { libc::dup2(src, dst) } == -1 {
-                    return Err(std::io::Error::last_os_error().to_string());
+                if unsafe { crate::sys::dup2(src, dst) } == -1 {
+                    return Err(crate::sys::last_os_error().to_string());
                 }
             }
         }
@@ -1337,9 +1337,9 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
 fn set_cloexec(f: &File) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
     let fd = f.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
-        return Err(std::io::Error::last_os_error().to_string());
+    let flags = unsafe { crate::sys::fcntl(fd, libc::F_GETFD, 0) };
+    if flags == -1 || unsafe { crate::sys::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
+        return Err(crate::sys::last_os_error().to_string());
     }
     Ok(())
 }
@@ -1361,7 +1361,7 @@ impl StdioGuard {
     fn disarm(&mut self) {
         for (_, saved) in self.saved.drain(..) {
             unsafe {
-                libc::close(saved);
+                crate::sys::close(saved);
             }
         }
     }
@@ -1372,8 +1372,8 @@ impl Drop for StdioGuard {
     fn drop(&mut self) {
         for (fd, saved) in self.saved.drain(..) {
             unsafe {
-                libc::dup2(saved, fd);
-                libc::close(saved);
+                crate::sys::dup2(saved, fd);
+                crate::sys::close(saved);
             }
         }
     }
@@ -1500,13 +1500,13 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
 
     let (redirects, heredoc) = crate::expand::expand_redirects(&rc.redirects)?;
     let (read, write) = make_pipe()?;
-    match unsafe { libc::fork() } {
-        -1 => Err(std::io::Error::last_os_error().to_string()),
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
             // Child: point fd 1 at the pipe's write end; neither original fd
             // is needed once that's done.
             unsafe {
-                libc::dup2(write.as_raw_fd(), 1);
+                crate::sys::dup2(write.as_raw_fd(), 1);
             }
             drop(write);
             drop(read);
@@ -1533,11 +1533,11 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
             read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
             loop {
                 let mut status: libc::c_int = 0;
-                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1 {
+                if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
                     return Ok((crate::job::exit_code(status), captured));
                 }
-                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                    return Err(std::io::Error::last_os_error().to_string());
+                if crate::sys::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return Err(crate::sys::last_os_error().to_string());
                 }
             }
         }
@@ -1565,11 +1565,11 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
     use std::os::unix::io::AsRawFd;
 
     let (read, write) = make_pipe()?;
-    match unsafe { libc::fork() } {
-        -1 => Err(std::io::Error::last_os_error().to_string()),
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
             unsafe {
-                libc::dup2(write.as_raw_fd(), 1);
+                crate::sys::dup2(write.as_raw_fd(), 1);
             }
             drop(write);
             drop(read);
@@ -1587,11 +1587,11 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
             read.read_to_string(&mut captured).map_err(|e| e.to_string())?;
             loop {
                 let mut status: libc::c_int = 0;
-                if unsafe { libc::waitpid(pid, &mut status, 0) } != -1 {
+                if unsafe { crate::sys::waitpid(pid, &mut status, 0) } != -1 {
                     return Ok((crate::job::exit_code(status), captured));
                 }
-                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                    return Err(std::io::Error::last_os_error().to_string());
+                if crate::sys::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return Err(crate::sys::last_os_error().to_string());
                 }
             }
         }
@@ -1623,8 +1623,8 @@ pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, 
 
     let list = crate::parser::parse(src).map_err(|e| e.to_string())?;
     let (read, write) = make_pipe()?;
-    match unsafe { libc::fork() } {
-        -1 => Err(std::io::Error::last_os_error().to_string()),
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
             // Rust's runtime sets `SIGPIPE` to `SIG_IGN` at startup, so a
             // write to a closed pipe surfaces as an ordinary `Err` instead
@@ -1639,14 +1639,14 @@ pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, 
             // child automatically; this child runs the parsed command
             // list in-process instead, so it needs the same reset by hand.
             unsafe {
-                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                crate::sys::signal(libc::SIGPIPE, libc::SIG_DFL);
             }
             // Child: `>(cmd)` reads from the pipe (its stdin); `<(cmd)`
             // writes to it (its stdout). Neither original fd is needed
             // once dup2'd onto the right one.
             let (use_end, target_fd) = if write_side { (&read, 0) } else { (&write, 1) };
             unsafe {
-                libc::dup2(use_end.as_raw_fd(), target_fd);
+                crate::sys::dup2(use_end.as_raw_fd(), target_fd);
             }
             drop(read);
             drop(write);
@@ -1706,7 +1706,7 @@ fn close_pending_proc_subs() {
         drop(file);
         let mut status: libc::c_int = 0;
         unsafe {
-            libc::waitpid(pid, &mut status, libc::WNOHANG);
+            crate::sys::waitpid(pid, &mut status, libc::WNOHANG);
         }
     }
 }
@@ -2000,8 +2000,8 @@ pub(crate) fn build_stage(
                         FdAction::Open(f, dest) => (f.as_raw_fd(), *dest),
                         FdAction::Dup { source, dest } => (*source as i32, *dest),
                     };
-                    if libc::dup2(source, dest as i32) == -1 {
-                        return Err(std::io::Error::last_os_error());
+                    if crate::sys::dup2(source, dest as i32) == -1 {
+                        return Err(crate::sys::last_os_error());
                     }
                 }
                 Ok(())
@@ -2108,8 +2108,8 @@ pub(crate) fn make_pipe() -> Result<(File, File), String> {
     use std::os::unix::io::FromRawFd;
 
     let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
+    if unsafe { crate::sys::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(crate::sys::last_os_error().to_string());
     }
     // SAFETY: `pipe(2)` just handed us two fresh, valid, owned descriptors.
     let read = unsafe { File::from_raw_fd(fds[0]) };

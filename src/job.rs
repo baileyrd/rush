@@ -75,17 +75,17 @@ const JOB_SIGNALS: [c_int; 5] = [
 /// Set up job control: only when stdin is a terminal. Idempotent enough to call
 /// once at startup.
 pub fn init() {
-    let interactive = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
-    let pid = unsafe { libc::getpid() };
+    let interactive = unsafe { crate::sys::isatty(libc::STDIN_FILENO) } == 1;
+    let pid = unsafe { crate::sys::getpid() };
 
     if interactive {
         unsafe {
             for &sig in &JOB_SIGNALS {
-                libc::signal(sig, libc::SIG_IGN);
+                crate::sys::signal(sig, libc::SIG_IGN);
             }
             // Become a process-group leader and take the terminal.
-            libc::setpgid(pid, pid);
-            libc::tcsetpgrp(libc::STDIN_FILENO, pid);
+            crate::sys::setpgid(pid, pid);
+            crate::sys::tcsetpgrp(libc::STDIN_FILENO, pid);
         }
     }
 
@@ -139,11 +139,11 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
 
                 unsafe {
                     command.pre_exec(move || {
-                        libc::setpgid(0, target_pgid);
+                        crate::sys::setpgid(0, target_pgid);
                         for &sig in &JOB_SIGNALS {
-                            libc::signal(sig, libc::SIG_DFL);
+                            crate::sys::signal(sig, libc::SIG_DFL);
                         }
-                        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+                        crate::sys::signal(libc::SIGCHLD, libc::SIG_DFL);
                         Ok(())
                     });
                 }
@@ -203,7 +203,7 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
             pgid = pid;
         }
         unsafe {
-            libc::setpgid(pid, pgid);
+            crate::sys::setpgid(pid, pgid);
         }
         pids.push(pid);
     }
@@ -230,24 +230,24 @@ fn spawn_compound_stage(
 ) -> Result<(pid_t, Option<File>), String> {
     let next_pipe = if is_last { None } else { Some(crate::exec::make_pipe()?) };
 
-    match unsafe { libc::fork() } {
-        -1 => Err(std::io::Error::last_os_error().to_string()),
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
             unsafe {
-                libc::setpgid(0, target_pgid);
+                crate::sys::setpgid(0, target_pgid);
                 for &sig in &JOB_SIGNALS {
-                    libc::signal(sig, libc::SIG_DFL);
+                    crate::sys::signal(sig, libc::SIG_DFL);
                 }
-                libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+                crate::sys::signal(libc::SIGCHLD, libc::SIG_DFL);
             }
             if let Some(stdin) = &stdin_src {
                 unsafe {
-                    libc::dup2(stdin.as_raw_fd(), 0);
+                    crate::sys::dup2(stdin.as_raw_fd(), 0);
                 }
             }
             if let Some((_, write)) = &next_pipe {
                 unsafe {
-                    libc::dup2(write.as_raw_fd(), 1);
+                    crate::sys::dup2(write.as_raw_fd(), 1);
                 }
             }
             drop(stdin_src);
@@ -336,7 +336,7 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
 
     while live > 0 {
         let mut status: c_int = 0;
-        let wpid = unsafe { libc::waitpid(-pgid, &mut status, libc::WUNTRACED) };
+        let wpid = unsafe { crate::sys::waitpid(-pgid, &mut status, libc::WUNTRACED) };
         if wpid == -1 {
             if retry_after_interrupt() {
                 continue;
@@ -347,7 +347,7 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
             break;
         }
         if wifstopped(status) {
-            return Wait::Stopped(128 + libc::WSTOPSIG(status) as i32);
+            return Wait::Stopped(128 + crate::sys::WSTOPSIG(status) as i32);
         }
         // Exited or killed by a signal.
         live -= 1;
@@ -371,7 +371,7 @@ fn wait_pgid(pgid: pid_t, pids: &[pid_t]) -> Wait {
 /// bash: if the trap doesn't itself exit, the wait simply resumes, exactly
 /// like this call site does.
 fn retry_after_interrupt() -> bool {
-    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+    if crate::sys::last_os_error().kind() != std::io::ErrorKind::Interrupted {
         return false;
     }
     crate::trap::check_pending();
@@ -388,7 +388,7 @@ pub fn reap_background() {
     loop {
         let mut status: c_int = 0;
         let flags = libc::WNOHANG | libc::WUNTRACED | libc::WCONTINUED;
-        let wpid = unsafe { libc::waitpid(-1, &mut status, flags) };
+        let wpid = unsafe { crate::sys::waitpid(-1, &mut status, flags) };
         if wpid <= 0 {
             break; // 0: no change; -1: no children
         }
@@ -449,7 +449,7 @@ fn wait_cmd(argv: &[String]) -> i32 {
 fn wait_next() -> i32 {
     loop {
         let mut status: c_int = 0;
-        let wpid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        let wpid = unsafe { crate::sys::waitpid(-1, &mut status, 0) };
         if wpid == -1 {
             if retry_after_interrupt() {
                 continue;
@@ -489,7 +489,7 @@ fn wait_all() {
 fn wait_job_pgid(pgid: pid_t) {
     loop {
         let mut status: c_int = 0;
-        let wpid = unsafe { libc::waitpid(-pgid, &mut status, 0) };
+        let wpid = unsafe { crate::sys::waitpid(-pgid, &mut status, 0) };
         if wpid == -1 {
             if retry_after_interrupt() {
                 continue;
@@ -527,7 +527,7 @@ fn wait_one(target: &str) -> i32 {
     }
     let mut status: c_int = 0;
     let wpid = loop {
-        let wpid = unsafe { libc::waitpid(pid, &mut status, 0) };
+        let wpid = unsafe { crate::sys::waitpid(pid, &mut status, 0) };
         if wpid == -1 && retry_after_interrupt() {
             continue;
         }
@@ -604,7 +604,7 @@ fn kill_cmd(argv: &[String]) -> i32 {
         if let Some(spec) = target.strip_prefix('%') {
             match spec.parse::<usize>().ok().and_then(job_pgid) {
                 Some(pgid) => unsafe {
-                    libc::killpg(pgid, sig);
+                    crate::sys::killpg(pgid, sig);
                 },
                 None => {
                     eprintln!("kill: %{spec}: no such job");
@@ -613,7 +613,7 @@ fn kill_cmd(argv: &[String]) -> i32 {
             }
         } else if let Ok(pid) = target.parse::<pid_t>() {
             unsafe {
-                libc::kill(pid, sig);
+                crate::sys::kill(pid, sig);
             }
         } else {
             eprintln!("kill: {target}: arguments must be job or process IDs");
@@ -722,7 +722,7 @@ fn fg_cmd(argv: &[String]) -> i32 {
     println!("{}", job.cmd);
     give_terminal(job.pgid);
     unsafe {
-        libc::killpg(job.pgid, libc::SIGCONT);
+        crate::sys::killpg(job.pgid, libc::SIGCONT);
     }
 
     let result = wait_pgid(job.pgid, &job.pids);
@@ -752,7 +752,7 @@ fn bg_cmd(argv: &[String]) -> i32 {
         let job = &mut s.jobs[idx];
         job.state = JobState::Running;
         unsafe {
-            libc::killpg(job.pgid, libc::SIGCONT);
+            crate::sys::killpg(job.pgid, libc::SIGCONT);
         }
         println!("[{}] {} &", job.id, job.cmd);
         0
@@ -847,7 +847,7 @@ fn give_terminal(pgid: pid_t) {
     if job_control_enabled() {
         unsafe {
             // SIGTTOU is ignored in the shell, so this never stops us.
-            libc::tcsetpgrp(libc::STDIN_FILENO, pgid);
+            crate::sys::tcsetpgrp(libc::STDIN_FILENO, pgid);
         }
     }
 }
@@ -871,9 +871,9 @@ fn state_label(state: JobState) -> &'static str {
 
 pub(crate) fn exit_code(status: c_int) -> i32 {
     if wifexited(status) {
-        libc::WEXITSTATUS(status)
+        crate::sys::WEXITSTATUS(status)
     } else if wifsignaled(status) {
-        128 + libc::WTERMSIG(status) as i32
+        128 + crate::sys::WTERMSIG(status) as i32
     } else {
         0
     }
@@ -882,16 +882,16 @@ pub(crate) fn exit_code(status: c_int) -> i32 {
 // libc exposes the wait-status macros as functions; thin wrappers keep the call
 // sites readable and centralise the `c_int` plumbing.
 fn wifexited(status: c_int) -> bool {
-    libc::WIFEXITED(status)
+    crate::sys::WIFEXITED(status)
 }
 fn wifsignaled(status: c_int) -> bool {
-    libc::WIFSIGNALED(status)
+    crate::sys::WIFSIGNALED(status)
 }
 fn wifstopped(status: c_int) -> bool {
-    libc::WIFSTOPPED(status)
+    crate::sys::WIFSTOPPED(status)
 }
 fn wifcontinued(status: c_int) -> bool {
-    libc::WIFCONTINUED(status)
+    crate::sys::WIFCONTINUED(status)
 }
 
 #[cfg(test)]
@@ -967,7 +967,7 @@ mod tests {
 
         let pid = STATE.with(|s| s.borrow().jobs.last().unwrap().pids[0]);
         let mut status: c_int = 0;
-        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        let waited = unsafe { crate::sys::waitpid(pid, &mut status, 0) };
         assert_eq!(waited, pid, "the background child should still be ours to reap");
         update_by_pid(pid, status);
         notify_and_prune();

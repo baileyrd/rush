@@ -1825,7 +1825,7 @@ fn source_cmd(argv: &[String]) -> i32 {
 
 /// `umask [-S] [mode]` — with no `mode`, report the process's current file
 /// creation mask (plain octal, or `u=rwx,g=rx,o=rx`-style with `-S`); with
-/// one, set it. A real `libc::umask()` call (Unix only), so it actually
+/// one, set it. A real `crate::sys::umask()` call (Unix only), so it actually
 /// affects every file/directory this process (or anything it execs/spawns)
 /// creates from here on — not just a shell-internal display value.
 #[cfg(unix)]
@@ -1837,8 +1837,8 @@ fn umask_cmd(argv: &[String]) -> i32 {
         // `umask()` only ever *sets* the mask, returning the previous value
         // — so reading it without changing it means setting it right back.
         let current = unsafe {
-            let m = libc::umask(0);
-            libc::umask(m);
+            let m = crate::sys::umask(0);
+            crate::sys::umask(m);
             m
         };
         if symbolic {
@@ -1852,7 +1852,7 @@ fn umask_cmd(argv: &[String]) -> i32 {
     match u32::from_str_radix(mode_str, 8) {
         Ok(mode) if mode <= 0o777 => {
             unsafe {
-                libc::umask(mode as libc::mode_t);
+                crate::sys::umask(mode as libc::mode_t);
             }
             0
         }
@@ -1969,7 +1969,7 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
     };
     let get = |res: &UlimitResource| -> Option<libc::rlimit> {
         let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-        (unsafe { libc::getrlimit(res.resource as _, &mut rl) } == 0).then_some(rl)
+        (unsafe { crate::sys::getrlimit(res.resource as _, &mut rl) } == 0).then_some(rl)
     };
 
     if all {
@@ -1987,7 +1987,7 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
         None => ULIMIT_RESOURCES.iter().find(|r| r.letter == 'f').unwrap(),
     };
     let Some(mut rl) = get(res) else {
-        eprintln!("ulimit: cannot read limit: {}", std::io::Error::last_os_error());
+        eprintln!("ulimit: cannot read limit: {}", crate::sys::last_os_error());
         return 1;
     };
 
@@ -2016,8 +2016,8 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
     if !soft_only {
         rl.rlim_max = new_raw;
     }
-    if unsafe { libc::setrlimit(res.resource as _, &rl) } != 0 {
-        eprintln!("ulimit: cannot modify limit: {}", std::io::Error::last_os_error());
+    if unsafe { crate::sys::setrlimit(res.resource as _, &rl) } != 0 {
+        eprintln!("ulimit: cannot modify limit: {}", crate::sys::last_os_error());
         return 1;
     }
     0

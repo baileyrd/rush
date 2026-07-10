@@ -262,14 +262,48 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
         }
         Compound::Case { word, items } => {
             let subject = crate::expand::expand_to_string(word)?;
-            for (patterns, body) in items {
-                for pat in patterns {
-                    if crate::glob::match_component(&crate::expand::expand_pattern(pat)?, &subject) {
-                        return exec_list(body);
-                    }
+            let mut idx = None;
+            for (i, (patterns, _, _)) in items.iter().enumerate() {
+                if case_patterns_match(patterns, &subject)? {
+                    idx = Some(i);
+                    break;
                 }
             }
-            Ok(0)
+            let Some(mut idx) = idx else { return Ok(0) };
+            let status = loop {
+                let (_, body, term) = &items[idx];
+                let status = exec_list(body)?;
+                idx = match term {
+                    crate::parser::CaseTerm::Break => break status,
+                    // Unconditionally run the next item's body too, no
+                    // pattern test — falls off the end of `items` the same
+                    // way `;;` would if there's no next item.
+                    crate::parser::CaseTerm::FallThrough => {
+                        if idx + 1 >= items.len() {
+                            break status;
+                        }
+                        idx + 1
+                    }
+                    // Resume pattern testing at the next item, same as if
+                    // the whole `case` restarted from there.
+                    crate::parser::CaseTerm::Continue => {
+                        let mut next = idx + 1;
+                        let mut found = None;
+                        while next < items.len() {
+                            if case_patterns_match(&items[next].0, &subject)? {
+                                found = Some(next);
+                                break;
+                            }
+                            next += 1;
+                        }
+                        match found {
+                            Some(n) => n,
+                            None => break status,
+                        }
+                    }
+                };
+            };
+            Ok(status)
         }
         Compound::Group(list) => exec_list(list),
         Compound::Subshell(list) => {
@@ -301,6 +335,18 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             Ok(0)
         }
     }
+}
+
+/// Whether any of a `case` item's patterns match `subject` — shared by the
+/// initial left-to-right scan and `;;&`'s own resumed scan starting partway
+/// through `items`.
+fn case_patterns_match(patterns: &[crate::lexer::Word], subject: &str) -> Result<bool, String> {
+    for pat in patterns {
+        if crate::glob::match_component(&crate::expand::expand_pattern(pat)?, subject) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Run a subshell's body in a forked child: real isolation for cwd,

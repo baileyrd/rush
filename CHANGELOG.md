@@ -730,3 +730,23 @@ This closes out **Tier I** (correctness/POSIX risk) — see
   the assignment-vs-argument-word distinction, and the `$`-expansion
   ordering — matching exactly except the one documented backslash corner
   above.
+
+### `case` fallthrough (C25)
+- **Lexer**: two new tokens, `Token::SemiAmp` (`;&`) and
+  `Token::DSemiAmp` (`;;&`), alongside the existing `Token::DSemi`
+  (`;;`).
+- **Parser**: a new `CaseTerm` enum (`Break`/`FallThrough`/`Continue`)
+  recorded per `Compound::Case` item, defaulting to `Break` when the last
+  item before `esac` omits a terminator, same as before.
+- **Execution** (`exec.rs`): `;;` (`Break`) stops. `;&` (`FallThrough`)
+  unconditionally runs the *next* item's body too, with no pattern test,
+  chaining through that item's own terminator in turn. `;;&`
+  (`Continue`) resumes *pattern* testing at the next item — not
+  unconditional — running the first one (if any) whose pattern matches,
+  same as if the whole `case` restarted from there. `$?` after the whole
+  `case` is always the last body that actually ran.
+- Verified directly against real bash across 10 scenarios: a single
+  `;&`, a chain of several, `;;&` finding a later match vs. finding none,
+  a trailing `;;&` on the last item (nothing left to resume into — stops,
+  same as `;;`), exit-status propagation through a fallthrough chain, and
+  the terminator-less last-item default — matching exactly.

@@ -1575,3 +1575,16 @@ indexed array (`MAPFILE` by default). `-t` strips newlines; without it
 each element keeps its own; unterminated final lines and empty input
 behave exactly like bash. Unsupported flags error clearly. Adds 1
 integration test.
+
+### New: nameref variables — `declare -n` / `local -n` (C62)
+`declare -n ref=x` used to assign the literal string "x". Now a
+`NAMEREFS` map with a depth-capped `resolve_name` chain-follower is
+hooked at the top of 26 read/write functions in `vars.rs` — reads,
+writes, array element ops, `export`, and `unset` (which unsets the
+*target*; the ref keeps referring) all follow the reference. Probed
+subtleties matched: a bare `declare -n ref` lets the next plain
+assignment name the target; `local -n out=$1` (the "return through a
+caller-named variable" mechanism) is frame-scoped, local frames now
+capturing prior nameref mappings; circular refs stop following instead
+of hanging. Scalars and whole arrays work in both directions. Adds 1
+integration test.

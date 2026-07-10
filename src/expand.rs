@@ -183,7 +183,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 [WordPart::Unquoted(s)]
                     if s.len() > 1
                         && s.starts_with('-')
-                        && s[1..].chars().all(|c| matches!(c, 'a' | 'A' | 'u' | 'l' | 'i' | 'r')) =>
+                        && s[1..].chars().all(|c| matches!(c, 'a' | 'A' | 'u' | 'l' | 'i' | 'r' | 'n')) =>
                 {
                     for c in s[1..].chars() {
                         match c {
@@ -193,6 +193,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                             'l' => attrs.lower = true,
                             'i' => attrs.integer = true,
                             'r' => attrs.readonly = true,
+                            'n' => attrs.nameref = true,
                             _ => unreachable!(),
                         }
                     }

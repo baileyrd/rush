@@ -321,13 +321,13 @@ syntax directly.
 - **Tier II — missing standard builtins:** 17 (17 done, 0 open — closed out again)
 - **Tier III — scripting-safety idioms:** 10 (10 done, 0 open — closed out again)
 - **Tier IV — bash/ksh/zsh language parity:** 23 (23 done, 0 open — closed out again)
-- **Tier V — interactive UX:** 9 (7 done, 2 open — C71 [dependency-blocked], C73)
+- **Tier V — interactive UX:** 9 (8 done, 1 open — C71, dependency-blocked)
 
 73 items tracked in total: the original C1–C40 (all done, see "Bottom
 line" above) plus 33 newly-discovered items (C41–C73) from a fresh live
-comparison pass against dash/bash/ksh93/zsh/fish — of which C41–C70 and C72 are
-now done (re-closing Tiers I through IV completely); C73 is open and
-C71 remains dependency-blocked on rustyline's architecture.
+comparison pass against dash/bash/ksh93/zsh/fish — of which all are now done
+except C71 (the right-side prompt), which remains dependency-blocked on
+rustyline's architecture — the fresh pass's one open item.
 
 ---
 
@@ -2745,8 +2745,12 @@ gets them on stdin/stdout and runs the command; the parent publishes
 records the pid as `$!`. One bug caught by testing rather than review:
 the forked child inherits the parent's TERM/HUP record-and-defer
 handlers and would swallow a plain `kill $COPROC_PID` while blocked —
-the child now resets both to `SIG_DFL`, and a killed coprocess `wait`s
-as 143 exactly like bash. Documented narrowings: the coprocess is a
+and the first fix (the child resetting them after fork) still lost an
+intermittent race when the kill landed before the reset, caught as a
+hanging test. The default dispositions are now set in the parent
+*before* the fork (race-free), reinstalled immediately after; a killed
+coprocess `wait`s as 143 exactly like bash, verified under an 8-run
+stress loop. Documented narrowings: the coprocess is a
 forked shell wrapping the command (bash execs a simple command
 directly), and it isn't listed in the interactive `jobs` table, though
 `wait $COPROC_PID` works through the ordinary pid path. Verified
@@ -2935,7 +2939,7 @@ both interactive/non-interactive correction paths; an integration test
 covers the stack (bash-identical output), `$CDPATH`, `cd -N`, and the
 empty-stack errors.
 
-### C73 — No runtime `set -o vi`/`set -o emacs` line-editing mode switch (tracked)
+### C73 — No runtime `set -o vi`/`set -o emacs` line-editing mode switch ✅ done
 POSIX-mandated (`set -o vi`), present in bash/ksh93/zsh (`emacs` is the
 default in all of them; dash and fish don't support the vi keybinding
 switch at all). Confirmed directly: rush's `set_cmd` (C52) has no `vi`/
@@ -2948,6 +2952,18 @@ command run after the fact. **Effort: M–L** — needs either rebuilding
 the `Editor` in place (losing in-memory history unless explicitly
 carried over) or a `rustyline` version/API that supports swapping
 `edit_mode` on a live `Editor`, whichever proves cleaner in practice.
+
+Implemented via the first of the write-up's two routes — rebuilding the
+`Editor` — with the history-loss caveat handled explicitly: `set -o
+vi`/`set -o emacs` (and their `+o` inverses) flip a tracked option, and
+the interactive loop, on noticing the change before the next prompt,
+constructs a fresh editor with the new `EditMode`, re-applies the
+helper and C70's abbreviation binding, and *carries the in-memory
+history across* entry by entry. The option rides C52's `-o` machinery
+(so it appears in `set -o`/`set +o` listings and gets C41's
+validate-then-apply rollback), and — matching bash — contributes no
+letter to `$-`. The toggle/listing half is integration-tested; the
+editor-rebuild half is interactive-only by nature.
 
 ---
 

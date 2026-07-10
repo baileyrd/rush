@@ -229,13 +229,18 @@ fn run_source(src: &str) -> i32 {
     }
 }
 
-fn interactive() -> rustyline::Result<()> {
-    vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
+/// Build the interactive editor for the current line-editing mode —
+/// called at startup and again whenever `set -o vi`/`set -o emacs`
+/// (C73) flips the mode mid-session.
+fn make_editor(vi: bool) -> rustyline::Result<Editor<completion::RushHelper, DefaultHistory>> {
     // `CompletionType::List` (C69): Tab shows the columned, paged list of
     // every candidate — bash's own Tab-Tab display — instead of the
     // default `Circular`, which cycles candidates in place one at a time
     // with nothing on screen listing the alternatives.
-    let config = rustyline::Config::builder().completion_type(rustyline::CompletionType::List).build();
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::CompletionType::List)
+        .edit_mode(if vi { rustyline::EditMode::Vi } else { rustyline::EditMode::Emacs })
+        .build();
     let mut rl: Editor<completion::RushHelper, DefaultHistory> = Editor::with_config(config)?;
     rl.set_helper(Some(completion::RushHelper::new()));
     // Abbreviations (C70): a space after a defined abbreviation in
@@ -244,6 +249,13 @@ fn interactive() -> rustyline::Result<()> {
         rustyline::KeyEvent::new(' ', rustyline::Modifiers::NONE),
         rustyline::EventHandler::Conditional(Box::new(completion::AbbrSpaceHandler)),
     );
+    Ok(rl)
+}
+
+fn interactive() -> rustyline::Result<()> {
+    vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
+    let mut edit_mode_vi = vars::edit_mode_vi();
+    let mut rl = make_editor(edit_mode_vi)?;
     let hist = history_path();
     if let Some(ref h) = hist {
         let _ = rl.load_history(h);
@@ -267,6 +279,18 @@ fn interactive() -> rustyline::Result<()> {
     let mut buffer = String::new();
 
     loop {
+        // `set -o vi`/`set -o emacs` ran since the last prompt (C73):
+        // rebuild the editor with the new keybindings, carrying the
+        // in-memory history across.
+        if vars::edit_mode_vi() != edit_mode_vi {
+            edit_mode_vi = vars::edit_mode_vi();
+            let entries: Vec<String> = rl.history().iter().cloned().collect();
+            let mut fresh = make_editor(edit_mode_vi)?;
+            for e in entries {
+                let _ = fresh.add_history_entry(e);
+            }
+            rl = fresh;
+        }
         // Report any background jobs that finished or stopped since last prompt.
         #[cfg(unix)]
         job::reap_background();

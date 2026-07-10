@@ -2187,6 +2187,7 @@ fn list_options(dash_spelling: bool) {
         ("noexec", crate::vars::noexec()),
         ("nounset", crate::vars::nounset()),
         ("pipefail", crate::vars::pipefail()),
+        ("vi", crate::vars::edit_mode_vi()),
         ("xtrace", crate::vars::xtrace()),
     ];
     for (name, on) in options {
@@ -2213,6 +2214,7 @@ fn set_cmd(argv: &[String]) -> i32 {
                 'u' => crate::vars::set_nounset(on),
                 'x' => crate::vars::set_xtrace(on),
                 'C' => crate::vars::set_noclobber(on),
+                'v' => crate::vars::set_edit_mode_vi(on),
                 // `set -n` is ignored by an interactive shell (matching
                 // bash — it would lock the session out otherwise).
                 'n' => {
@@ -2280,6 +2282,12 @@ fn set_cmd(argv: &[String]) -> i32 {
                             Some("noclobber") => pending.push(('C', on)),
                             Some("noexec") => pending.push(('n', on)),
                             Some("pipefail") => pending.push(('p', on)),
+                            // `set -o vi` / `set -o emacs` (C73): flip the
+                            // line-editing mode; the interactive loop
+                            // rebuilds its editor before the next prompt.
+                            // (`set +o vi` = emacs, and vice versa.)
+                            Some("vi") => pending.push(('v', on)),
+                            Some("emacs") => pending.push(('v', !on)),
                             Some(name) => {
                                 eprintln!("set: {name}: invalid option name");
                                 return 1;

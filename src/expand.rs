@@ -99,9 +99,30 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
             Some((name, RawAssign::Whole(append, raw_value))) => {
                 let value = match raw_value {
                     RawAssignValue::Scalar(word) => AssignValue::Scalar(expand_word(&word)?),
-                    // Each element word can itself expand to several fields
-                    // (a glob, or an unquoted `$(...)`/`$var` splitting on
-                    // `$IFS`) — same rule as ordinary argv words.
+                    // If `name` is *already* an associative array (from an
+                    // earlier `declare -A`), a literal's elements are
+                    // `[key]=value` pairs — same rule `declare -A`/
+                    // `local -A`'s own literal uses, just triggered by
+                    // `name`'s existing type here instead of a `-A` flag in
+                    // this same statement (verified directly: `arr+=([c]=3
+                    // [a]=99)` on an already-`-A` `arr` merges by key, not
+                    // by position). Otherwise, each element word can itself
+                    // expand to several fields (a glob, or an unquoted
+                    // `$(...)`/`$var` splitting on `$IFS`) — same rule as
+                    // ordinary argv words. (An *explicit*-index literal on
+                    // a plain indexed array, `arr=([5]=x [2]=y z)`, is a
+                    // separate, undocumented-here bash feature this doesn't
+                    // support — its elements are just treated as plain
+                    // words instead.)
+                    RawAssignValue::Array(elements) if crate::vars::is_assoc(&name) => {
+                        let mut pairs = Vec::new();
+                        for el in &elements {
+                            if let Some((key, value_word)) = parse_assoc_literal_element(el) {
+                                pairs.push((resolve_subscript_text(&key)?, expand_word(&value_word)?));
+                            }
+                        }
+                        AssignValue::Assoc(pairs)
+                    }
                     RawAssignValue::Array(elements) => {
                         let mut values = Vec::new();
                         for el in &elements {
@@ -114,33 +135,66 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 idx += 1;
             }
             Some((name, RawAssign::Index(subscript, append, value_word))) => {
-                // An index that can't be resolved (a parse error, or the
-                // documented negative-subscript gap — see `eval_subscript`)
-                // drops the assignment entirely rather than guessing.
-                if let Some(index) = eval_subscript(&subscript)? {
-                    let value = expand_word(&value_word)?;
-                    let op = if append { AssignOp::AppendIndex(index, value) } else { AssignOp::SetIndex(index, value) };
-                    assignments.push((name, op));
-                }
+                // Only `$`-expand the subscript here — whether it's then
+                // treated as an arithmetic index or a literal associative
+                // key can only be decided once `name`'s actual type is
+                // known, which `vars::key_set`/`key_append` (via `assign`)
+                // check at the point the assignment is actually applied,
+                // not here at parse time (see `AssignOp::SetKey`'s own doc
+                // comment).
+                let subscript = resolve_subscript_text(&subscript)?;
+                let value = expand_word(&value_word)?;
+                let op = if append { AssignOp::AppendKey(subscript, value) } else { AssignOp::SetKey(subscript, value) };
+                assignments.push((name, op));
                 idx += 1;
             }
             None => break,
         }
     }
 
-    // `local` is the one command whose own arguments can carry an array
-    // literal (`local arr=(a b c)`) — a plain `Vec<String>` argv can't
-    // represent that, so its declarations are parsed here (reusing
+    // `local`/`declare` are the two commands whose own arguments can carry
+    // an array or associative-array literal (`local arr=(a b c)`,
+    // `declare -A arr=([k]=v ...)`) — a plain `Vec<String>` argv can't
+    // represent either, so declarations are parsed here (reusing
     // `assignment_split`, same as a leading prefix) into `local_decls`
     // instead of going through the ordinary `expand_argv_word` path below.
-    let first_word = idx < rc.argv.len() && expand_argv_word(&rc.argv[idx])?.first().map(String::as_str) == Some("local");
-    let (argv, local_decls) = if first_word {
+    // (`declare` always applies to the current/global scope in rush,
+    // unlike bash's own quirk of `declare` acting like `local` when used
+    // inside a function — an accepted, documented simplification; use
+    // `local` explicitly for function-scoped declarations.)
+    let decl_word = if idx < rc.argv.len() { expand_argv_word(&rc.argv[idx])?.into_iter().next() } else { None };
+    let (argv, local_decls) = if matches!(decl_word.as_deref(), Some("local") | Some("declare")) {
+        let cmd_name = decl_word.unwrap();
+        let mut rest = &rc.argv[idx + 1..];
+        // `-A` (associative)/`-a` (indexed) apply to every name that
+        // follows in this same invocation — bash allows mixing plain names
+        // in with `-A`/`-a` too, but this scope only needs the common case.
+        let mut assoc = false;
+        let mut array = false;
+        while let Some(word) = rest.first() {
+            match word.as_slice() {
+                [WordPart::Unquoted(s)] if s == "-A" => assoc = true,
+                [WordPart::Unquoted(s)] if s == "-a" => array = true,
+                _ => break,
+            }
+            rest = &rest[1..];
+        }
+
         let mut decls = Vec::new();
-        for word in &rc.argv[idx + 1..] {
+        for word in rest {
             match assignment_split(word) {
                 Some((name, RawAssign::Whole(append, raw_value))) => {
                     let value = match raw_value {
                         RawAssignValue::Scalar(w) => AssignValue::Scalar(expand_word(&w)?),
+                        RawAssignValue::Array(elements) if assoc => {
+                            let mut pairs = Vec::new();
+                            for el in &elements {
+                                if let Some((key, value_word)) = parse_assoc_literal_element(el) {
+                                    pairs.push((resolve_subscript_text(&key)?, expand_word(&value_word)?));
+                                }
+                            }
+                            AssignValue::Assoc(pairs)
+                        }
                         RawAssignValue::Array(elements) => {
                             let mut values = Vec::new();
                             for el in &elements {
@@ -156,12 +210,24 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 // treated as a bare name, an accepted, documented gap.
                 Some((_, RawAssign::Index(..))) | None => {
                     for name in expand_argv_word(word)? {
-                        decls.push((name, None));
+                        // A bare `local -A arr`/`declare -A arr` (no
+                        // initializer) still needs to become an *empty*
+                        // associative/indexed array right away — that's
+                        // what lets a later `arr[k]=v` see it as one at
+                        // all (see `vars::is_assoc`).
+                        let init = if assoc {
+                            Some(AssignOp::Set(AssignValue::Assoc(Vec::new())))
+                        } else if array {
+                            Some(AssignOp::Set(AssignValue::Array(Vec::new())))
+                        } else {
+                            None
+                        };
+                        decls.push((name, init));
                     }
                 }
             }
         }
-        (vec!["local".to_string()], decls)
+        (vec![cmd_name], decls)
     } else {
         let mut argv = Vec::new();
         for word in &rc.argv[idx..] {
@@ -290,6 +356,28 @@ fn assignment_split(word: &Word) -> Option<(String, RawAssign)> {
     Some((name.to_string(), RawAssign::Whole(append, RawAssignValue::Scalar(value))))
 }
 
+/// Parse one associative-array-literal element (`[key]=value`, no leading
+/// name — unlike `assignment_split`'s indexed-assignment form, a literal's
+/// own elements never have one) into its raw key subscript text (still
+/// needing `resolve_subscript_text`, same as any other subscript — a
+/// literal key can itself be `$`-expanded, e.g. `[$k]=v`) and a value
+/// `Word`. Only ever consulted when `declare -A`/`local -A` says an
+/// enclosing array literal's elements should be read this way instead of
+/// as plain words — see `expand_simple`'s "local"/"declare" handling.
+fn parse_assoc_literal_element(word: &Word) -> Option<(String, Word)> {
+    let WordPart::Unquoted(text) = word.first()? else {
+        return None;
+    };
+    let key_src = text.strip_prefix('[')?;
+    let close = key_src.find(']')?;
+    let key = key_src[..close].to_string();
+    let after_bracket = &key_src[close + 1..];
+    let after_eq = after_bracket.strip_prefix('=')?;
+    let mut value: Word = vec![WordPart::Unquoted(after_eq.to_string())];
+    value.extend(word[1..].iter().cloned());
+    Some((key, value))
+}
+
 /// Expand a word destined for `argv`, possibly into several arguments.
 ///
 /// Whitespace inside an *unquoted* expansion splits the word into fields
@@ -309,14 +397,24 @@ fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
         if s == "$@" {
             return Ok(crate::vars::args());
         }
-        // Likewise `"${arr[@]}"`: one argument per array element, spaces and
-        // all — the array analogue of `"$@"`, verified directly against
-        // real bash. `"${arr[*]}"` is *not* the same case: it's always one
-        // joined string regardless of quoting, which the ordinary
-        // `Quoted` handling below (unsplit, but still one field) already
-        // produces correctly via `expand_braced`'s own `[*]` handling.
-        if let Some(name) = parse_whole_array_at(s) {
-            return Ok(crate::vars::array_values(name));
+        // Likewise `"${arr[@]}"` and `"${!arr[@]}"`: one argument per
+        // element/key, spaces and all — the array analogue of `"$@"`,
+        // verified directly against real bash (`for k in "${!arr[@]}"` is
+        // the standard way to iterate an associative array by key, and
+        // needs this exactly as much as `"${arr[@]}"` does — a key can
+        // itself contain spaces). `"${arr[*]}"`/`"${!arr[*]}"` are *not*
+        // the same case: always one joined string regardless of quoting,
+        // which the ordinary `Quoted` handling below (unsplit, but still
+        // one field) already produces correctly via `expand_braced`'s own
+        // `[*]` handling.
+        if let Some(kind) = parse_whole_array_at(s) {
+            return Ok(match kind {
+                WholeArrayAt::Values(name) => crate::vars::array_values(&name),
+                WholeArrayAt::Keys(name) if crate::vars::is_assoc(&name) => crate::vars::assoc_keys(&name),
+                WholeArrayAt::Keys(name) => {
+                    crate::vars::array_indices(&name).iter().map(usize::to_string).collect()
+                }
+            });
         }
     }
 
@@ -575,8 +673,21 @@ fn expand_word(word: &Word) -> Result<String, String> {
 /// recognize `"${arr[@]}"` as the array analogue of `"$@"`: one field per
 /// element, not the single joined string every other quoted expansion
 /// produces.
-fn parse_whole_array_at(s: &str) -> Option<&str> {
-    s.strip_prefix("${")?.strip_suffix("[@]}").filter(|name| is_valid_name(name))
+/// Which whole-array form `parse_whole_array_at` matched: `${arr[@]}`
+/// (values) or `${!arr[@]}` (keys/indices) — see that function and its one
+/// call site in `expand_argv_word`.
+enum WholeArrayAt {
+    Values(String),
+    Keys(String),
+}
+
+fn parse_whole_array_at(s: &str) -> Option<WholeArrayAt> {
+    let inner = s.strip_prefix("${")?.strip_suffix("[@]}")?;
+    if let Some(name) = inner.strip_prefix('!') {
+        is_valid_name(name).then(|| WholeArrayAt::Keys(name.to_string()))
+    } else {
+        is_valid_name(inner).then(|| WholeArrayAt::Values(inner.to_string()))
+    }
 }
 
 /// `~` or `~/...` at the start of a string becomes `$HOME`. `~user` is not
@@ -841,32 +952,66 @@ fn parse_subscript(inner: &str) -> Option<(&str, Subscript<'_>)> {
     ))
 }
 
-/// Evaluate a subscript's raw text as an arithmetic expression — same
-/// two-step pipeline `$((...))` itself already uses (`expand_dollars` first,
-/// so a `$`-prefixed reference like `${arr[$i]}` resolves; `arith::eval`
-/// then also resolves a *bare* name directly, so `${arr[i+1]}` needs no `$`
-/// either, both verified directly against real bash). `None` for a
-/// negative result, since negative ("from the end") indices are a
-/// documented, out-of-scope gap here (unlike positive out-of-range, which
-/// is `None` too but for the ordinary, POSIX-unremarkable reason: nothing's
-/// there).
-fn eval_subscript(expr: &str) -> Result<Option<usize>, String> {
-    let expr = expand_dollars(expr)?;
-    Ok(usize::try_from(crate::arith::eval(&expr)?).ok())
+/// `$`-expand a subscript's raw text — the one step that always applies,
+/// *regardless* of whether the subscript ends up treated as an arithmetic
+/// index or a literal associative-array key (verified directly:
+/// `${arr[$i]}`/`arr[$i]=x` resolve `$i` either way — only what happens to
+/// the result afterward differs by `name`'s current type).
+fn resolve_subscript_text(expr: &str) -> Result<String, String> {
+    expand_dollars(expr)
 }
 
-/// `unset 'arr[i]'`: split `text` into a name and its resolved index, if
-/// it's shaped like a single-element subscript (`arr[i]`, not `arr[@]`/
-/// `arr[*]`) — the subscript is evaluated the same way a read (`${arr[i]}`)
-/// is, including resolving a `$`-reference itself (verified directly
-/// against real bash: `unset 'arr[$i]'` resolves `$i` even though the
-/// single quotes mean the shell itself never touched it — `unset`'s own
-/// subscript is evaluated independently of ordinary shell quoting/expansion).
-pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<(String, usize)>, String> {
-    match parse_subscript(text) {
-        Some((name, Subscript::Index(expr))) => Ok(eval_subscript(expr)?.map(|i| (name.to_string(), i))),
-        _ => Ok(None),
-    }
+/// Evaluate an already-`$`-expanded subscript as an arithmetic expression
+/// — `arith::eval` resolves a *bare* name directly too, so `${arr[i+1]}`
+/// needs no `$` either, verified directly against real bash. `None` for a
+/// negative result (negative, "from the end" indices are a documented,
+/// out-of-scope gap) or a genuine arithmetic error — both collapse to the
+/// same "nothing there" outcome an ordinary out-of-range index already has.
+pub(crate) fn eval_subscript(expr: &str) -> Option<usize> {
+    usize::try_from(crate::arith::eval(expr).ok()?).ok()
+}
+
+/// Resolve a single-element subscript's value for a read (`${arr[N]}`) —
+/// dispatches on whether `name` is *currently* declared associative
+/// (`crate::vars::is_assoc`): if so, the resolved text is a literal string
+/// key; otherwise it's evaluated as an arithmetic index. Same rule
+/// `key_set`/`key_append` use for writes — see their own doc comments for
+/// why this can only be decided at the point `name`'s type is actually
+/// known, not baked into the subscript's own parsed shape.
+fn read_subscript(name: &str, expr: &str) -> Result<Option<String>, String> {
+    let resolved = resolve_subscript_text(expr)?;
+    Ok(if crate::vars::is_assoc(name) {
+        crate::vars::assoc_get(name, &resolved)
+    } else {
+        eval_subscript(&resolved).and_then(|i| crate::vars::array_get(name, i))
+    })
+}
+
+/// What `unset 'arr[subscript]'` targets, once `subscript` is resolved
+/// against `arr`'s actual current type.
+pub(crate) enum UnsetTarget {
+    Index(String, usize),
+    Key(String, String),
+}
+
+/// `unset 'arr[i]'`/`unset 'arr[key]'`: split `text` into a name and its
+/// resolved target, if it's shaped like a single-element subscript
+/// (`arr[i]`, not `arr[@]`/`arr[*]`) — resolved the same way a read
+/// (`${arr[i]}`) is, including a `$`-reference (verified directly against
+/// real bash: `unset 'arr[$i]'` resolves `$i` even though the single quotes
+/// mean the shell itself never touched it — `unset`'s own subscript is
+/// evaluated independently of ordinary shell quoting/expansion) and the
+/// same associative-vs-indexed type check as everywhere else.
+pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<UnsetTarget>, String> {
+    let Some((name, Subscript::Index(expr))) = parse_subscript(text) else {
+        return Ok(None);
+    };
+    let resolved = resolve_subscript_text(expr)?;
+    Ok(if crate::vars::is_assoc(name) {
+        Some(UnsetTarget::Key(name.to_string(), resolved))
+    } else {
+        eval_subscript(&resolved).map(|i| UnsetTarget::Index(name.to_string(), i))
+    })
 }
 
 /// Expand the inside of a `${...}`: a plain name, `${#name}` (length), one of
@@ -880,15 +1025,20 @@ pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<(String, usiz
 /// operator (`${arr[0]#pat}`, `${arr[@]:-x}`), a documented, accepted scope
 /// limit (bash supports these; this codebase doesn't yet).
 fn expand_braced(inner: &str) -> Result<String, String> {
-    // `${!arr[@]}` / `${!arr[*]}` — the array's own set indices, not the
-    // values (skips gaps in a sparse array entirely, same as `${arr[@]}`).
+    // `${!arr[@]}` / `${!arr[*]}` — the array's own set indices/keys, not
+    // the values (skips gaps in a sparse indexed array entirely, same as
+    // `${arr[@]}`).
     if let Some(rest) = inner.strip_prefix('!')
         && let Some((name, sub)) = parse_subscript(rest)
     {
-        let indices: Vec<String> = crate::vars::array_indices(name).iter().map(usize::to_string).collect();
+        let keys: Vec<String> = if crate::vars::is_assoc(name) {
+            crate::vars::assoc_keys(name)
+        } else {
+            crate::vars::array_indices(name).iter().map(usize::to_string).collect()
+        };
         return Ok(match sub {
-            Subscript::Star => indices.join(&Ifs::current().star_sep),
-            _ => indices.join(" "),
+            Subscript::Star => keys.join(&Ifs::current().star_sep),
+            _ => keys.join(" "),
         });
     }
 
@@ -910,10 +1060,9 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         if let Some((name, sub)) = parse_subscript(name_and_sub) {
             return Ok(match sub {
                 Subscript::At | Subscript::Star => crate::vars::array_len(name).to_string(),
-                Subscript::Index(expr) => match eval_subscript(expr)? {
-                    Some(i) => crate::vars::array_get(name, i).map_or(0, |v| v.chars().count()).to_string(),
-                    None => "0".to_string(),
-                },
+                Subscript::Index(expr) => {
+                    read_subscript(name, expr)?.map_or(0, |v| v.chars().count()).to_string()
+                }
             });
         }
         if !is_valid_name(name_and_sub) {
@@ -928,8 +1077,8 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         return match sub {
             Subscript::At => Ok(crate::vars::array_values(name).join(" ")),
             Subscript::Star => Ok(crate::vars::array_values(name).join(&Ifs::current().star_sep)),
-            Subscript::Index(expr) => match eval_subscript(expr)? {
-                Some(i) => Ok(crate::vars::array_get(name, i).unwrap_or_default()),
+            Subscript::Index(expr) => match read_subscript(name, expr)? {
+                Some(v) => Ok(v),
                 None => Ok(String::new()),
             },
         };

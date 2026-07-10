@@ -560,11 +560,13 @@ fn trace_quote(word: &str) -> String {
 }
 
 /// Render one `set -x`-traced assignment: `name=value`, `name+=value`,
-/// `name=(a b c)`, or `name+=(a b c)` — matching real bash's own format for
-/// each (verified directly), modulo one small, accepted difference: bash
-/// re-quotes an array element containing whitespace with *double* quotes
-/// there specifically, where this reuses `trace_quote`'s single-quote
-/// convention (the same one already used for a plain command's own argv).
+/// `name=(a b c)`, `name+=(a b c)`, `name=([k]=v ...)`, or `name[k]=v` —
+/// matching real bash's own format for each (verified directly), modulo
+/// one small, accepted difference: bash re-quotes an array/assoc element
+/// containing whitespace with *double* quotes there specifically (and
+/// inconsistently quotes an associative-array *key* too, only in some of
+/// these forms), where this reuses `trace_quote`'s single-quote convention
+/// (the same one already used for a plain command's own argv) uniformly.
 fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
     use crate::vars::{AssignOp, AssignValue};
     match op {
@@ -576,9 +578,19 @@ fn trace_assignment(name: &str, op: &crate::vars::AssignOp) -> String {
         AssignOp::Append(AssignValue::Array(vs)) => {
             format!("{name}+=({})", vs.iter().map(|v| trace_quote(v)).collect::<Vec<_>>().join(" "))
         }
-        AssignOp::SetIndex(i, v) => format!("{name}[{i}]={v}"),
-        AssignOp::AppendIndex(i, v) => format!("{name}[{i}]+={v}"),
+        AssignOp::Set(AssignValue::Assoc(pairs)) => {
+            format!("{name}=({})", trace_assoc_pairs(pairs))
+        }
+        AssignOp::Append(AssignValue::Assoc(pairs)) => {
+            format!("{name}+=({})", trace_assoc_pairs(pairs))
+        }
+        AssignOp::SetKey(k, v) => format!("{name}[{k}]={v}"),
+        AssignOp::AppendKey(k, v) => format!("{name}[{k}]+={v}"),
     }
+}
+
+fn trace_assoc_pairs(pairs: &[(String, String)]) -> String {
+    pairs.iter().map(|(k, v)| format!("[{k}]={}", trace_quote(v))).collect::<Vec<_>>().join(" ")
 }
 
 /// A single command that is only `NAME=value` assignments (no program word):
@@ -699,16 +711,18 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     }
 }
 
-/// Run a builtin from its expanded `Command` — every builtin but `local`
-/// just runs on `cmd.argv` (plain strings) as always; `local` is the one
-/// exception, since `local arr=(a b c)`'s array literal can't survive being
+/// Run a builtin from its expanded `Command` — every builtin but `local`/
+/// `declare` just runs on `cmd.argv` (plain strings) as always; those two
+/// are the exception, since an array or associative-array literal
+/// (`local arr=(a b c)`, `declare -A arr=([k]=v ...)`) can't survive being
 /// flattened into `Vec<String>` argv at all (see `Command::local_decls`'s
 /// own doc comment and `expand::expand_simple`, which builds it).
 fn dispatch_builtin(cmd: &Command) -> i32 {
-    if cmd.argv.first().map(String::as_str) == Some("local") {
-        return builtins::local_from_decls(&cmd.local_decls);
+    match cmd.argv.first().map(String::as_str) {
+        Some("local") => builtins::local_from_decls(&cmd.local_decls),
+        Some("declare") => builtins::declare_from_decls(&cmd.local_decls),
+        _ => builtins::try_run(&cmd.argv).unwrap_or(1),
     }
-    builtins::try_run(&cmd.argv).unwrap_or(1)
 }
 
 /// Temporarily redirect the shell's own fd 0/1/2 to match `redirects` (plus
@@ -1102,12 +1116,13 @@ fn prefix_env_value(name: &str, op: &crate::vars::AssignOp) -> Option<String> {
         AssignOp::Append(AssignValue::Scalar(v)) => {
             Some(format!("{}{v}", crate::vars::get(name).unwrap_or_default()))
         }
-        // An array (whole or one element) isn't representable in a child's
-        // environment — same reasoning as `exported()`'s own array skip.
-        AssignOp::Set(AssignValue::Array(_))
-        | AssignOp::Append(AssignValue::Array(_))
-        | AssignOp::SetIndex(..)
-        | AssignOp::AppendIndex(..) => None,
+        // An array or assoc array (whole or one element) isn't
+        // representable in a child's environment — same reasoning as
+        // `exported()`'s own array skip.
+        AssignOp::Set(AssignValue::Array(_) | AssignValue::Assoc(_))
+        | AssignOp::Append(AssignValue::Array(_) | AssignValue::Assoc(_))
+        | AssignOp::SetKey(..)
+        | AssignOp::AppendKey(..) => None,
     }
 }
 

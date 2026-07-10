@@ -1022,3 +1022,29 @@ fish/zsh completion-spec engine.
   directory and that a job spawned with `sleep 100 &` completes `fg %`
   to `fg %1`. Adds 8 new unit tests exercising the pure completion
   functions directly; full suite and clippy stay clean.
+
+### Fix: `\$` inside double quotes wasn't staying literal (C35)
+POSIX-mandated, present in dash/bash/ksh/zsh: inside `"..."`, `\$` must
+produce a literal `$` (suppressing expansion of whatever follows), the
+same as `\"`/`\\` already do. `echo "\$?"` used to print the exit status
+instead of the literal text `$?`; `echo "\$FOO"` printed `$FOO`'s value
+instead of the literal text `$FOO`.
+
+- **Root cause**: the lexer stripped the backslash and pushed the bare
+  `$` straight into the double-quoted text, which becomes a
+  `WordPart::Quoted` string re-scanned for `$`/`$(...)` later — by then, a
+  bare `$` left behind this way is indistinguishable from a real,
+  unescaped one.
+- **Fix (`lexer.rs`)**: `\$` now flushes whatever quoted text came before
+  it and emits a separate `WordPart::Literal("$")` instead — never
+  re-expanded, by definition, the same guarantee `'...'` already gives —
+  then keeps lexing the rest of the double-quoted span as before. No new
+  escape-recognition logic needed in `expand.rs` itself.
+- Verified directly against real bash, including composing an escaped
+  `\$` with a real, still-expanding `$FOO` in the same string
+  (`"pre\$mid$FOO"` → `pre$midbar`), and that the easy-to-conflate `\\$FOO`
+  (a literal backslash, followed by an ordinary, unescaped, still-
+  expanding `$FOO`) keeps expanding correctly. Adds 3 new lexer unit tests
+  plus 2 integration tests; full suite and clippy stay clean (down to 9
+  pre-existing warnings from 10 — an incidental improvement from
+  restructuring the affected code, not a new fix).

@@ -470,7 +470,28 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                     // Inside double quotes, backslash escapes ", \, and $.
                     if qc == '\\' {
                         if let Some(&next) = chars.peek() {
-                            if matches!(next, '"' | '\\' | '$') {
+                            // `\$` must produce a literal `$` (POSIX-mandated,
+                            // same as bash/ksh/zsh) — one that stays literal
+                            // through expansion, not just a backslash-free `$`
+                            // indistinguishable from a real, unescaped one
+                            // (which is all that pushing it into `s` here
+                            // would produce, since `s` becomes a
+                            // `WordPart::Quoted` string later re-scanned for
+                            // `$`/`$(...)`). Flushing `s` so far and emitting a
+                            // separate `WordPart::Literal("$")` — never
+                            // re-expanded, by definition — keeps that promise
+                            // without needing new escape-recognition logic in
+                            // `expand.rs` itself.
+                            if next == '$' {
+                                chars.next();
+                                if !s.is_empty() {
+                                    push_quoted(&mut parts, &s);
+                                    s = String::new();
+                                }
+                                push_literal(&mut parts, "$");
+                                continue;
+                            }
+                            if matches!(next, '"' | '\\') {
                                 s.push(chars.next().unwrap());
                                 continue;
                             }
@@ -492,7 +513,13 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                 if !closed {
                     return Err(LexError::Incomplete);
                 }
-                push_quoted(&mut parts, &s);
+                // Skip an empty trailing `Quoted` part after an escaped `\$`
+                // flush left nothing more to add — unless the whole quoted
+                // span really was just `""`, which still needs its own
+                // (empty) part to represent an explicit empty argument.
+                if !s.is_empty() || parts.is_empty() {
+                    push_quoted(&mut parts, &s);
+                }
             }
             Some(&'\\') => {
                 chars.next();
@@ -720,6 +747,47 @@ mod tests {
         assert_eq!(
             lex("echo \"hello world\"").unwrap(),
             vec![bare("echo"), Token::Word(vec![WordPart::Quoted("hello world".into())])]
+        );
+    }
+
+    #[test]
+    fn escaped_dollar_in_double_quotes_is_a_separate_literal_part() {
+        // `\$` must produce a literal `$` — not just a backslash-free `$`
+        // indistinguishable from a real, unescaped one (which is all that
+        // pushing it straight into the `Quoted` string would produce, since
+        // that string gets re-scanned for `$`/`$(...)` later). A trailing
+        // `Literal("$")` part, never re-expanded by definition, keeps that
+        // promise: `"\$?"` becomes the literal text `$?`, not the exit
+        // status.
+        assert_eq!(
+            lex("echo \"\\$?\"").unwrap(),
+            vec![
+                bare("echo"),
+                Token::Word(vec![WordPart::Literal("$".into()), WordPart::Quoted("?".into())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn escaped_dollar_alone_in_double_quotes_has_no_spurious_trailing_part() {
+        assert_eq!(
+            lex("echo \"\\$\"").unwrap(),
+            vec![bare("echo"), Token::Word(vec![WordPart::Literal("$".into())])]
+        );
+    }
+
+    #[test]
+    fn unescaped_backslash_before_an_expansion_stays_literal() {
+        // `"\\$FOO"` is a literal backslash (from the `\\` escape) followed
+        // by an ordinary, still-expanding `$FOO` reference — not to be
+        // confused with `\$FOO`, which is one escaped, non-expanding
+        // reference. Both end up in the same `Quoted` part (only `\$`
+        // triggers the flush-into-a-separate-`Literal`-part treatment), so
+        // this exercises that the `\\`-then-`$` sequence isn't misread as
+        // the `\$` case by whatever comes after it.
+        assert_eq!(
+            lex("echo \"\\\\$FOO\"").unwrap(),
+            vec![bare("echo"), Token::Word(vec![WordPart::Quoted("\\$FOO".into())])]
         );
     }
 

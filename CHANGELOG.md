@@ -1566,3 +1566,12 @@ chars); `@E` unescapes; `@a` reads C43/C45's attribute flags plus array
 kinds; `@A` reconstructs an assignment/`declare`. Noted for the record:
 `$'...'` ANSI-C quoting itself is an untracked, unimplemented gap.
 Adds 2 integration tests.
+
+### New: `mapfile` / `readarray` (C61)
+The modern replacement for a `while read` loop over a whole file.
+Loops `read`'s byte-at-a-time logical-line primitive in raw mode (never
+over-consumes fd 0; works with redirects), assigning the lines as one
+indexed array (`MAPFILE` by default). `-t` strips newlines; without it
+each element keeps its own; unterminated final lines and empty input
+behave exactly like bash. Unsupported flags error clearly. Adds 1
+integration test.

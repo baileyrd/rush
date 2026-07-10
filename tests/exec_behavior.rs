@@ -2655,3 +2655,33 @@ fn at_transformations() {
     let (out, _) = rush(r#"x="hi there"; echo "${x@A}"; declare -r r=5; echo "${r@A}""#);
     assert_eq!(out, "x='hi there'\ndeclare -r r='5'\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn mapfile_reads_lines_into_an_array() {
+    // C61: mapfile/readarray were command-not-found. All verified
+    // against bash.
+    let f = std::env::temp_dir().join(format!("rush_c61_{}", std::process::id()));
+    std::fs::write(&f, "l1\nl2\nl3\n").unwrap();
+    let path = f.display();
+
+    let (out, _) = rush(&format!("mapfile -t lines < {path}; echo \"${{lines[@]}} n=${{#lines[@]}}\"; echo \"${{lines[1]}}\""));
+    assert_eq!(out, "l1 l2 l3 n=3\nl2\n");
+
+    // Without -t each element keeps its newline; readarray is a synonym;
+    // no name → MAPFILE; empty input → empty array; a trailing
+    // unterminated line still becomes an element.
+    let (out, _) = rush(&format!("mapfile raw < {path}; printf '[%s]' \"${{raw[0]}}\"; echo"));
+    assert_eq!(out, "[l1\n]\n");
+    let (out, _) = rush(&format!("readarray -t y < {path}; echo \"${{y[2]}}\""));
+    assert_eq!(out, "l3\n");
+    let (out, _) = rush(&format!("mapfile < {path}; echo \"${{#MAPFILE[@]}}\""));
+    assert_eq!(out, "3\n");
+    let (out, _) = rush("mapfile -t x </dev/null; echo n=${#x[@]}");
+    assert_eq!(out, "n=0\n");
+    std::fs::write(&f, "a\nb").unwrap();
+    let (out, _) = rush(&format!("mapfile -t x < {path}; echo \"${{x[1]}} n=${{#x[@]}}\""));
+    assert_eq!(out, "b n=2\n");
+
+    let _ = std::fs::remove_file(&f);
+}

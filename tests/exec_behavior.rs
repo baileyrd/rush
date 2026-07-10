@@ -1421,3 +1421,84 @@ fn brace_expansion_runs_before_dollar_expansion_and_skips_assignments() {
     // they *do* brace-expand.
     assert_eq!(rush(r#"arr=({a,b} c); echo "${arr[@]}" "${#arr[@]}""#).0, "a b c 3\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_read_side_feeds_a_readable_path() {
+    assert_eq!(rush("cat <(echo hi)").0, "hi\n");
+    // Each `<(...)` on one command line gets its own, independently
+    // readable path.
+    let (out, status) = rush("diff <(echo a) <(echo b)");
+    assert!(out.contains('a') && out.contains('b'));
+    assert_eq!(status, 1); // `diff`'s own convention: differing input
+}
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_write_side_feeds_the_substituted_commands_stdin() {
+    // `cmd`'s own stdout (inherited from the shell) is where the
+    // substituted command's re-printed output shows up, same as real bash.
+    assert_eq!(rush("echo hi > >(cat)").0, "hi\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_concatenates_with_adjacent_text() {
+    // Not required to be its own separate word — verified directly against
+    // real bash, which glues `<(cmd)`'s expansion onto adjacent text just
+    // like `$(cmd)`'s.
+    let (out, _) = rush("echo pre<(echo hi)post");
+    assert!(out.starts_with("pre/dev/fd/"));
+    assert!(out.trim_end().ends_with("post"));
+}
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_is_suppressed_by_quoting() {
+    // Unlike `$(...)`, which *does* still expand inside double quotes,
+    // `<(...)`/`>(...)` are left as literal text when quoted at all —
+    // verified directly against real bash.
+    assert_eq!(rush(r#"echo "<(echo hi)""#).0, "<(echo hi)\n");
+    assert_eq!(rush("echo '<(echo hi)'").0, "<(echo hi)\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_nests_and_composes_with_pipelines() {
+    assert_eq!(rush("cat <(cat <(echo nested-inner))").0, "nested-inner\n");
+    assert_eq!(rush("cat <(echo a | tr a-z A-Z)").0, "A\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_works_in_assignment_rhs_and_redirect_targets() {
+    // Assignment RHS *does* get process substitution — a real, deliberate
+    // asymmetry with brace expansion (which doesn't), verified directly.
+    assert_eq!(rush(r#"x=$(cat <(echo inner)); echo "x=$x""#).0, "x=inner\n");
+    assert_eq!(rush(r#"read -r line < <(echo hello-read); echo "line=[$line]""#).0, "line=[hello-read]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_substitution_does_not_wait_and_does_not_affect_main_status() {
+    // The main command's own exit status is unaffected by the substituted
+    // command's — verified directly against real bash. (Deliberately the
+    // read side, not `>(exit 7)`: a write-side substitution whose reader
+    // exits without ever reading is a genuine, inherent write-vs-exit race
+    // over the underlying pipe — confirmed to reproduce in real bash too,
+    // equally, under concurrent load, not a rush-specific bug — so it's
+    // not something to assert on deterministically here.)
+    assert_eq!(rush("true <(exit 7); echo $?").0, "0\n");
+    // `$!` reflects the substitution's own pid — real, current bash
+    // behavior, verified directly.
+    let (out, _) = rush(": <(echo hi); echo \"pid=[$!]\"");
+    assert!(out.starts_with("pid=["));
+    assert!(!out.starts_with("pid=[]"));
+}
+
+#[cfg(not(unix))]
+#[test]
+fn process_substitution_errors_cleanly_off_unix() {
+    let (_, status) = rush("cat <(echo hi)");
+    assert_ne!(status, 0);
+}

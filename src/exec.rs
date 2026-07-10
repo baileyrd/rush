@@ -145,6 +145,8 @@ fn run_job(job: &Job) -> Result<(i32, bool), String> {
         }
         let pipeline = crate::expand::expand(&job.list.first)?;
         run_background(&pipeline)?;
+        #[cfg(unix)]
+        close_pending_proc_subs();
         crate::vars::set_last_status(0);
         Ok((0, true))
     } else {
@@ -798,6 +800,18 @@ fn command_bypass(cmd: &Command) -> Option<Command> {
 
 /// Expand and run a single pipeline in the foreground.
 fn run_foreground(raw: &RawPipeline) -> Result<i32, String> {
+    let result = run_foreground_dispatch(raw);
+    #[cfg(unix)]
+    close_pending_proc_subs();
+    result
+}
+
+/// The actual dispatch `run_foreground` wraps — pulled out so every one of
+/// its several return points (builtin, function call, `command` bypass,
+/// job-control/plain-runner fallback) is covered by a *single*
+/// `close_pending_proc_subs` call in the wrapper above, rather than one
+/// per branch.
+fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
     crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
     trace_pipeline(&pipeline);
@@ -1091,6 +1105,15 @@ fn capture_pipeline(raw: &RawPipeline, out: &mut String) -> Result<i32, String> 
         return Ok(status);
     }
 
+    let result = capture_pipeline_expanded(raw, out);
+    #[cfg(unix)]
+    close_pending_proc_subs();
+    result
+}
+
+/// The expanded-pipeline half of `capture_pipeline`, wrapped by it so its
+/// two return points both get a single `close_pending_proc_subs` call.
+fn capture_pipeline_expanded(raw: &RawPipeline, out: &mut String) -> Result<i32, String> {
     crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
     trace_pipeline(&pipeline);
@@ -1177,6 +1200,119 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
 #[cfg(not(unix))]
 fn capture_compound(_rc: &RawCompound) -> Result<(i32, String), String> {
     Err("compound commands cannot be captured on this platform".into())
+}
+
+/// Process substitution — `<(cmd)` (read side) or `>(cmd)` (write side).
+/// Forks `cmd` hooked up to one end of a real pipe and returns a
+/// `/dev/fd/<n>` path for the *other* end, which the shell process itself
+/// keeps open (verified directly: this is exactly how real bash implements
+/// it on Linux — a genuine pipe plus `/dev/fd`'s magic-symlink-to-an-open-fd
+/// trick, not a named FIFO, which bash only falls back to on platforms
+/// without `/dev/fd` at all — not a concern here).
+///
+/// Unlike `$(...)`, this never blocks waiting for `cmd` to finish (verified
+/// directly: `diff <(sleep 1; echo a) <(sleep 1; echo b)` takes ~1s total,
+/// not ~2s serialized, and a slow substitution's output can legitimately
+/// arrive *after* the main command has already finished). The kept-open fd
+/// must survive, unclosed, until *after* the caller has finished spawning
+/// whatever command this substitution's path was expanded into — only then
+/// does the spawned child actually inherit it (fork+exec inherits open,
+/// non-`CLOEXEC` fds unchanged, and `make_pipe`'s raw `libc::pipe` already
+/// doesn't set `CLOEXEC`, so no extra bookkeeping is needed there) — so the
+/// `File` is stashed in `PENDING_PROC_SUBS` rather than dropped here, for
+/// `close_pending_proc_subs` to close once that's safe to do.
+#[cfg(unix)]
+pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, String> {
+    use std::os::unix::io::AsRawFd;
+
+    let list = crate::parser::parse(src).map_err(|e| e.to_string())?;
+    let (read, write) = make_pipe()?;
+    match unsafe { libc::fork() } {
+        -1 => Err(std::io::Error::last_os_error().to_string()),
+        0 => {
+            // Rust's runtime sets `SIGPIPE` to `SIG_IGN` at startup, so a
+            // write to a closed pipe surfaces as an ordinary `Err` instead
+            // of the signal killing the process outright — which
+            // `println!`/`print!` then *panic* on, dumping a backtrace
+            // rather than exiting quietly. A real, unread `<(cmd)` is an
+            // entirely normal thing to write (verified directly: real
+            // bash's own substituted commands just get `SIGPIPE`d and
+            // silently disappear the same way `yes | head -1` disappears
+            // once `head` stops reading — no error, nothing printed).
+            // `std::process::Command` resets this for a real spawned
+            // child automatically; this child runs the parsed command
+            // list in-process instead, so it needs the same reset by hand.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+            // Child: `>(cmd)` reads from the pipe (its stdin); `<(cmd)`
+            // writes to it (its stdout). Neither original fd is needed
+            // once dup2'd onto the right one.
+            let (use_end, target_fd) = if write_side { (&read, 0) } else { (&write, 1) };
+            unsafe {
+                libc::dup2(use_end.as_raw_fd(), target_fd);
+            }
+            drop(read);
+            drop(write);
+            let status = run_list(&list).unwrap_or(1);
+            crate::trap::exit_shell(status);
+        }
+        pid => {
+            // Parent: drop the end `cmd`'s own copy uses, keep the other —
+            // its fd number becomes the exposed `/dev/fd/<n>` path. `$!`
+            // reflects this pid, matching real bash exactly (verified
+            // directly: `: <(echo hi); echo $!` prints a real, distinct
+            // pid each time) — it's deliberately *not* added to the job
+            // table, though: real bash's own `jobs -l` doesn't list a
+            // process substitution either, even though `$!`/`wait $!` can
+            // still reach it directly by pid.
+            let (keep, other) = if write_side { (write, read) } else { (read, write) };
+            drop(other);
+            let fd = keep.as_raw_fd();
+            crate::vars::set_last_bg_pid(pid);
+            PENDING_PROC_SUBS.with(|p| p.borrow_mut().push((keep, pid)));
+            Ok(format!("/dev/fd/{fd}"))
+        }
+    }
+}
+
+/// No `fork` on this platform.
+#[cfg(not(unix))]
+pub(crate) fn process_substitute(_src: &str, _write_side: bool) -> Result<String, String> {
+    Err("process substitution is not supported on this platform".into())
+}
+
+#[cfg(unix)]
+thread_local! {
+    /// Process-substitution pipe fds opened while expanding the pipeline
+    /// that's currently being (or was just) spawned, each paired with its
+    /// child's pid. Kept alive here — not dropped at the point of creation
+    /// — specifically so a spawned child inherits the fd; see
+    /// `process_substitute`'s own doc comment.
+    static PENDING_PROC_SUBS: std::cell::RefCell<Vec<(File, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Close every process-substitution fd opened while expanding the pipeline
+/// that was just spawned, and best-effort (non-blocking) reap its child so
+/// it doesn't linger as a zombie — called once spawning is done, at each of
+/// the handful of places a whole pipeline gets run (`run_foreground`,
+/// backgrounding, and `$(...)` capture), covering every path a process
+/// substitution's word could have been expanded into (a builtin, a
+/// function call, or a real spawned child) without needing to duplicate
+/// this at each of *those* individually. A non-blocking reap only —
+/// matching real bash, which doesn't wait for these either; anything not
+/// yet exited just gets reaped later (the ordinary background-job sweep,
+/// or by `init` once rush itself exits) rather than blocking here.
+#[cfg(unix)]
+fn close_pending_proc_subs() {
+    let pending = PENDING_PROC_SUBS.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for (file, pid) in pending {
+        drop(file);
+        let mut status: libc::c_int = 0;
+        unsafe {
+            libc::waitpid(pid, &mut status, libc::WNOHANG);
+        }
+    }
 }
 
 /// Plain spawn-and-wait runner: used for capture, and as the foreground runner

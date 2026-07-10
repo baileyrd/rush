@@ -123,6 +123,22 @@ fn prompt_char() -> char {
 }
 
 fn main() -> rustyline::Result<()> {
+    // Rust's runtime sets `SIGPIPE` to `SIG_IGN` at startup, so a builtin's
+    // `print!`/`println!` surfaces a closed pipe as an `Err` that those
+    // macros then *panic* on — a real, general bug found while verifying
+    // process substitution (C31), but not specific to it at all: any
+    // builtin writing into a pipe whose reader has already gone (`rush -c
+    // 'while true; do echo x; done' | head` is the plainest reproduction)
+    // panics instead of the process just quietly dying the way a normal
+    // Unix command does. Reset it to the default disposition, matching
+    // real bash's own C-program behavior (verified directly: bash's own
+    // builtin `echo` exhibits the exact same race against a `>(...)`
+    // whose reader exits without reading — bash just dies silently there,
+    // rather than panicking).
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     // `TERM`/`HUP` traps (C21) need to work in every mode, not just
     // interactively — the target use case (a container's PID 1 catching
     // `TERM` to shut down gracefully) has no terminal at all.

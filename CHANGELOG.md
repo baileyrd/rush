@@ -912,3 +912,46 @@ parser/`arith.rs` work — and the item that closes it out completely.
   piping inside a substitution, assignment RHS, redirect targets, `$!`,
   concurrent timing, and status independence. Adds 7 new integration
   tests; full suite and clippy stay clean.
+
+### History expansion `!!` / `!n` / `!$` / `!*` / `!:n` (C32)
+The first item in Tier V (interactive UX) — bash/ksh/zsh's csh-style
+bang-history recall, layered on top of the persistent history `rustyline`
+already provided.
+
+- **New `history_expand` module** — `expand(line, history) -> Result<Option<String>, String>`,
+  a plain textual preprocessing pass run in `main.rs`'s `interactive()`
+  loop before the line reaches `parser::parse` or `rl.add_history_entry`,
+  matching where real bash's own readline/history layer does this.
+  `Ok(None)`: nothing to expand, pass the line through unchanged (the
+  common case). `Ok(Some(expanded))`: something changed — echoed to
+  stdout before running, matching real bash. `Err(message)`: an
+  unresolvable reference — printed to stderr, and the line runs nothing
+  at all, matching real bash's own "a failed reference blocks execution"
+  behavior.
+- **Interactive-only**, matching real bash's own `histexpand` default (on
+  interactively, off in scripts) — `rush -c`/`rush file` never runs this
+  pass.
+- **Whole-event recall**: `!!` (last command), `!n`/`!-n` (absolute/
+  relative event number, matching `history`'s own 1-based numbering),
+  `!string`/`!?string?` (backward prefix/substring search).
+- **Word designators**, on the previous command only: `!$` (last word),
+  `!^` (first argument), `!*` (all arguments), `!:n` (word `n`, 0-based,
+  `n=0` the command name itself).
+- **Quoting/escaping**, verified directly against real bash: single
+  quotes suppress expansion; double quotes do *not*; `\!` de-escapes to a
+  literal `!` with no echo (bash's own history file stores the still-
+  backslashed raw line here — passing the untouched line through
+  unexpanded and relying on rush's own lexer's already-generic `\X` →
+  literal `X` handling produces the identical result, so no duplicate
+  logic needed). A bare `!` before whitespace, end of line, or `=` (so
+  `test`'s `!=` is never misread) is left untouched, no error.
+- Explicitly out of scope: combining an explicit event specifier with a
+  word designator in one reference (`!2:1`, `!echo:$`) — the two forms
+  above cover the overwhelming majority of real usage (`sudo !!`, reusing
+  `!$`) on their own; quote-aware word splitting for the designators
+  (real bash treats a quoted phrase as one word for `!:n`, rush uses a
+  plain `split_whitespace`).
+- Verified directly against real bash (`bash -i`, isolated `HISTFILE`s)
+  across more than a dozen scenarios. Adds 10 unit tests plus 9
+  integration tests exercising the compiled binary in piped/interactive
+  mode; full suite and clippy stay clean.

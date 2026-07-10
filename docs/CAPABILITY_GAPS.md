@@ -67,7 +67,13 @@ fixed by resetting `SIGPIPE` to its default disposition at startup,
 matching real bash's own C-program behavior exactly. Tier IV — bash/ksh/
 zsh language parity, the least POSIX-y and largest tier — is now the
 first fully-closed tier in this document, the biggest dent yet in what's
-otherwise still a dash-shaped core.
+otherwise still a dash-shaped core. Tier V — interactive UX — is now
+underway too: bang-history recall (C32) — `!!`, `!n`/`!-n`,
+`!string`/`!?string?`, and the previous command's own `!$`/`!^`/`!*`/
+`!:n` word designators, interactive-only exactly like real bash's own
+`histexpand` default — reuses the persistent history `rustyline` already
+provided, needing only a new textual preprocessing pass ahead of the
+parser.
 
 ---
 
@@ -100,6 +106,7 @@ applicable to that shell's own model.
 | Process substitution `<(cmd)` / `>(cmd)` | ✅¶¶ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Compound as one pipeline stage | 🟡* | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Traps beyond EXIT/INT firing | 🟡‖ | ✅ | ✅ | ✅ | ✅ | — |
+| Bang-history recall (`!!`/`!n`/`!$`/etc.) | ✅‖‖ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Context-aware completion | ❌ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ❌ | — | ❌ | ❌ | 🟡 | ✅ |
 | Native Windows job control | ❌ | — | — | — | — | 🟡 |
@@ -174,6 +181,16 @@ number. Combining an explicit non-standard redirect-target fd with a
 substitution inherits the pre-existing C38 gap (fd 3+ redirects), not a
 new limitation.
 
+‖‖ Whole-event recall (`!!`, `!n`, `!-n`, `!string`, `!?string?`) and the
+previous command's own word designators (`!$`, `!^`, `!*`, `!:n`) are all
+done, interactive-only (matching real bash's own `histexpand` default —
+off in scripts), including single-quote suppression, double-quote
+non-suppression, and `\!` escaping. Not supported: combining an explicit
+event specifier with a word designator (`!2:1`, `!echo:$`); quote-aware
+word splitting for the designators (`echo "a b" c` then `!:1` gives
+rush's plain-`split_whitespace` `"a` rather than real bash's quote-aware
+`"a b"`).
+
 ---
 
 ## Summary counts
@@ -182,7 +199,7 @@ new limitation.
 - **Tier II — missing standard builtins:** 12 (11 done)
 - **Tier III — scripting-safety idioms:** 5 (4 done)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
-- **Tier V — interactive UX:** 3
+- **Tier V — interactive UX:** 3 (1 done)
 
 ---
 
@@ -1299,10 +1316,55 @@ Where zsh and especially fish differentiate from bash/dash/ksh — and where
 rush, having already written its own `rustyline` completion `Helper`, has a
 real head start.
 
-### C32 — History expansion: `!!`, `!$`, `!n`
-Present in bash/zsh/ksh (csh-style recall). Rush already has persistent
-history storage via `rustyline`; it has no bang-history recall syntax on
-top of it yet. **Effort: S–M.**
+### C32 — History expansion: `!!`, `!$`, `!n` ✅ done
+Present in bash/zsh/ksh (csh-style recall). Rush already had persistent
+history storage via `rustyline`; it now has bang-history recall syntax on
+top of it too.
+
+**Mechanism**: a new `history_expand::expand(line, history)` — a plain
+textual preprocessing pass over the raw input line, run in `main.rs`'s
+`interactive()` loop *before* the line reaches `parser::parse` or
+`rl.add_history_entry`, exactly matching where real bash's own
+readline/history layer does this (so it applies regardless of what the
+line eventually parses as, and a failed reference blocks execution
+entirely rather than surfacing as a shell syntax error — verified
+directly). Interactive-only, matching real bash's own `histexpand`
+default (on interactively, off in scripts) — a script run via `rush -c`/
+`rush file` never sees this pass at all.
+
+**Scope, verified directly against real bash at every point**: whole-event
+recall — `!!` (last command), `!n`/`!-n` (absolute/relative event number,
+matching `history`'s own 1-based numbering), `!string`/`!?string?`
+(backward prefix/substring search) — and the previous command's own word
+designators — `!$` (last word), `!^` (first argument), `!*` (all
+arguments), `!:n` (word `n`, 0-based, `n=0` the command name itself).
+Quoting/escaping mirrors real bash exactly: single quotes suppress
+expansion, double quotes do *not*, and `\!` de-escapes to a literal `!`
+with no echo (verified directly that bash's own history file stores the
+still-backslashed raw line here, not a de-escaped one — so passing the
+untouched raw line through unexpanded, letting rush's own lexer's
+already-generic `\X` → literal `X` handling do the stripping, produces
+the identical end result). A bare `!` followed by whitespace, end of
+line, or `=` (so `test`'s `!=` is never misread as a history reference)
+is left completely untouched, no error — also verified directly. An
+event that can't be resolved reports "event not found"/"bad word
+specifier" and runs nothing, matching real bash's own "a failed
+reference blocks execution" behavior (not its exact wording).
+
+Explicitly out of scope, each a documented, accepted gap given this
+item's S–M effort budget: combining an explicit event specifier with a
+word designator in one reference (`!2:1`, `!echo:$`) — real bash supports
+this, but the two forms above (`!!`/`!n`/etc. alone, and the previous
+command's own `$`/`^`/`*`/`:n` alone) cover the overwhelming majority of
+real usage (`sudo !!`, reusing `!$`) on their own; and quote-aware word
+splitting for the designators — real bash's own splitter treats a quoted
+phrase as one word (`echo "a b" c` then `!:1` → `"a b"`), rush's uses a
+plain `split_whitespace` (`!:1` → `"a`) instead.
+
+Verified directly against real bash (via `bash -i`, isolated `HISTFILE`s)
+across more than a dozen scenarios, and covered by integration tests
+running the actual compiled binary in piped/interactive mode. **Effort:
+S–M.**
 
 ### C33 — History-based autosuggestions
 Native in fish; common via plugin in zsh. Shows a greyed-out completion of

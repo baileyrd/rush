@@ -84,6 +84,40 @@ fn rush_stdin_stderr(src: &str, input: &str) -> (String, i32) {
     (String::from_utf8_lossy(&output.stderr).into_owned(), output.status.code().unwrap_or(-1))
 }
 
+/// Runs the compiled `rush` binary with **no** `-c`/file argument — its
+/// interactive REPL — feeding `input` on stdin and returning `(stdout,
+/// stderr)`. Confirmed directly that rush enters `interactive()` regardless
+/// of whether stdin is a real TTY, so a plain piped-in script exercises it
+/// the same way a human typing at a terminal would (prompts go to neither
+/// stream, confirmed directly, so they don't pollute the assertions below).
+/// Each call gets its own `$HOME` (so `~/.rush_history`/`~/.rushrc` can't
+/// leak between tests or pick up a real one) — the counter keeps concurrent
+/// `cargo test` runs of this from colliding on the same directory.
+fn rush_interactive(input: &str) -> (String, String) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let home = std::env::temp_dir().join(format!("rush_interactive_test_{}_{n}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("create temp HOME");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rush");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait rush");
+    let _ = std::fs::remove_dir_all(&home);
+    (String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
 #[test]
 fn pipeline_wires_stdout_to_stdin_across_two_real_processes() {
     let (out, status) = rush("echo hi | tr a-z A-Z");
@@ -1501,4 +1535,72 @@ fn process_substitution_does_not_wait_and_does_not_affect_main_status() {
 fn process_substitution_errors_cleanly_off_unix() {
     let (_, status) = rush("cat <(echo hi)");
     assert_ne!(status, 0);
+}
+
+#[test]
+fn bang_bang_repeats_and_echoes_the_last_command() {
+    let (out, err) = rush_interactive("echo one\n!!\n");
+    assert_eq!(out, "one\necho one\none\n");
+    assert_eq!(err, "");
+}
+
+#[test]
+fn bang_n_and_bang_minus_n_recall_by_event_number() {
+    // `!1` (event 1, "echo one") runs and is itself appended to history, so
+    // by the time `!-2` (2nd-from-the-end) runs, that end is
+    // [..., "echo two", "echo three", "echo one"] — `!-2` lands on
+    // "echo three", not "echo two". Verified directly against real bash.
+    let (out, _) = rush_interactive("echo one\necho two\necho three\n!1\n!-2\n");
+    assert_eq!(out, "one\ntwo\nthree\necho one\none\necho three\nthree\n");
+}
+
+#[test]
+fn bang_string_searches_history_backward_for_a_prefix() {
+    let (out, _) = rush_interactive("echo foo\nls /tmp/does-not-exist-xyz\n!echo\n");
+    assert!(out.starts_with("foo\n"));
+    assert!(out.contains("echo foo\nfoo\n"));
+}
+
+#[test]
+fn word_designators_reuse_pieces_of_the_previous_command() {
+    // Re-typing `echo a b c` between each designator resets what "the
+    // previous command" means — since (verified directly, matching real
+    // bash exactly) it's the most recently *executed* line, i.e. already
+    // post-expansion, not the original line as first typed.
+    let (out, _) = rush_interactive(
+        "echo a b c\necho !^\necho a b c\necho !$\necho a b c\necho !*\n",
+    );
+    assert_eq!(out, "a b c\necho a\na\na b c\necho c\nc\na b c\necho a b c\na b c\n");
+}
+
+#[test]
+fn sudo_bang_bang_concatenates_mid_word() {
+    let (out, _) = rush_interactive("echo hi\ntrue !!\n");
+    assert_eq!(out, "hi\ntrue echo hi\n");
+}
+
+#[test]
+fn single_quotes_suppress_bang_history_expansion() {
+    let (out, _) = rush_interactive("echo hi\necho '!!'\n");
+    assert_eq!(out, "hi\n!!\n");
+}
+
+#[test]
+fn double_quotes_do_not_suppress_bang_history_expansion() {
+    let (out, _) = rush_interactive("echo hi\necho \"!!\"\n");
+    assert_eq!(out, "hi\necho \"echo hi\"\necho hi\n");
+}
+
+#[test]
+fn unresolvable_event_reference_errors_and_runs_nothing() {
+    let (out, err) = rush_interactive("!123\n");
+    assert_eq!(out, "");
+    assert!(err.contains("event not found"));
+}
+
+#[test]
+fn bang_history_is_a_no_op_in_script_mode() {
+    let (out, status) = rush("echo hi; echo !!");
+    assert_eq!(status, 0);
+    assert_eq!(out, "hi\n!!\n");
 }

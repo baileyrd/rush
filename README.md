@@ -37,6 +37,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | REPL with line editing | ✅ | via [`rustyline`](https://crates.io/crates/rustyline) |
 | Tab completion | ✅ | builtins and `$PATH` executables in command position; files elsewhere |
 | Persistent history | ✅ | stored in `~/.rush_history` |
+| History expansion (`!!`, `!n`, `!$`, `!*`, `!:n`) | ✅ | bash-style bang-history recall; interactive only, quoting/escaping matches bash |
 | Startup file | ✅ | sources `~/.rushrc` (if present) at interactive startup |
 | Prompt customization | ✅ | `PS1` (var or env), with `\w`/`\W`/`\u`/`\h`/`\$`/`\?`/`\n`/`\\`; falls back to `cwd $ ` |
 | Quoting | ✅ | single quotes, double quotes, backslash escapes |

@@ -2724,7 +2724,7 @@ fn printf_percent_q() {
     // C63: %q was "invalid conversion specification". Output verified
     // byte-identical to bash for every case.
     let (out, _) = rush(r#"printf '%q\n' "it's" "a b" "" "plain" "a\$b" "semi;colon""#);
-    assert_eq!(out, "it\\'s\na\\ b\n''\nplain\na\\$b\nsemi\;colon\n");
+    assert_eq!(out, "it\\'s\na\\ b\n''\nplain\na\\$b\nsemi\\;colon\n");
 
     // Control characters force the $'...' form; round-trips through eval.
     let (out, _) = rush(r#"v=$(printf "x\ny"); q=$(printf '%q' "$v"); eval "w=$q"; [ "$w" = "$v" ] && echo roundtrip"#);

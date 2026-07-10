@@ -2545,10 +2545,11 @@ the `'\''` dance, or `$'...'` when control characters are present).
 `@E` interprets the `$'...'` escape set. Documented narrowings: `@A`'s
 array form uses the modern element-list format (this container's older
 bash prints a strange scalarized form), and the `@`-transforms apply to
-scalars (not `${arr[@]@Q}` element-wise). One adjacent observation for
-the record: `$'...'` ANSI-C quoting itself is *not implemented and not
-tracked by any item* — `w=$'a\nb'` assigns the literal text — noted
-here rather than silently skipped. Two integration tests cover the
+scalars (not `${arr[@]@Q}` element-wise). One adjacent observation
+recorded here at the time: `$'...'` ANSI-C quoting itself was not
+implemented and not tracked by any item — subsequently implemented
+while landing C63, whose `%q` output (like `@Q`'s) uses that form for
+control characters and rush couldn't re-read its own quoting. Two integration tests cover the
 matrix.
 
 ### C61 — `mapfile` / `readarray` ✅ done
@@ -2627,7 +2628,12 @@ shell-special characters escaped, `''` for an empty argument, and the
 `$'...'` form when control characters are present. Output verified
 byte-identical to bash across the probe set (quotes, spaces, `$`, `;`,
 empty, control characters), and the control-character form round-trips
-through `eval`. One integration test.
+through `eval` — which required actually implementing **`$'...'`
+ANSI-C quoting** in the lexer (the untracked gap C60's write-up had
+just recorded): rush's own `%q`/`@Q` output uses that form and rush
+couldn't re-read it. `$'...'` now lexes as a literal with the `@E`
+escape set interpreted at lex time, verified against bash. One
+integration test.
 
 ### C64 — Job-control niceties: `jobs -l`/`-p`, `kill -l` + a fuller signal table, `wait -n`, `disown` (tracked)
 A cluster of small, independently shippable job-control completeness

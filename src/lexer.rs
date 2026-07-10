@@ -767,6 +767,36 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
             }
             Some(&'$') => {
                 chars.next();
+                // `$'...'` — ANSI-C quoting (bash/ksh/zsh): the content is
+                // a literal with backslash escapes interpreted now, at lex
+                // time (no further expansion), sharing `${v@E}`'s escape
+                // set. Found while landing C63: rush's own `%q`/`${v@Q}`
+                // output uses this form for control characters, and rush
+                // couldn't re-read it.
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    let mut raw = String::new();
+                    let mut closed = false;
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            raw.push(c);
+                            if let Some(n) = chars.next() {
+                                raw.push(n);
+                            }
+                            continue;
+                        }
+                        if c == '\'' {
+                            closed = true;
+                            break;
+                        }
+                        raw.push(c);
+                    }
+                    if !closed {
+                        return Err(LexError::Incomplete);
+                    }
+                    push_literal(&mut parts, &crate::expand::ansi_unescape(&raw));
+                    continue;
+                }
                 let mut s = String::from("$");
                 // `$(...)` and `${...}` may contain spaces and operators; swallow
                 // them whole so word-splitting doesn't tear them apart. A plain

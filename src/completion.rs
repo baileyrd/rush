@@ -279,7 +279,9 @@ fn job_spec_candidates(ids: Vec<usize>, prefix: &str) -> Vec<Pair> {
 /// for a linear directory scan to matter.
 fn path_executables() -> Vec<String> {
     let mut out = Vec::new();
-    let Some(path) = crate::vars::get("PATH").or_else(|| std::env::var("PATH").ok()) else {
+    // `vars::get` alone — no `std::env` fallback (C36/C40): falling back
+    // would keep completing from `PATH`'s original value after `unset`.
+    let Some(path) = crate::vars::get("PATH") else {
         return out;
     };
     for dir in std::env::split_paths(&path) {

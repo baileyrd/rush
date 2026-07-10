@@ -327,7 +327,8 @@ pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
             if values.is_empty() {
                 return Ok(0);
             }
-            let ps3 = match crate::vars::get("PS3").or_else(|| std::env::var("PS3").ok()) {
+            // `vars::get` alone — no `std::env` fallback (C36/C40).
+            let ps3 = match crate::vars::get("PS3") {
                 Some(ps3) => crate::expand::expand_dollars(&ps3)?,
                 None => "#? ".to_string(),
             };
@@ -570,7 +571,8 @@ fn resolve_source_path(name: &str) -> Option<std::path::PathBuf> {
         let p = std::path::Path::new(name);
         return p.is_file().then(|| p.to_path_buf());
     }
-    let path = crate::vars::get("PATH").or_else(|| std::env::var("PATH").ok())?;
+    // `vars::get` alone — no `std::env` fallback (C36/C40).
+    let path = crate::vars::get("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(name)).find(|c| c.is_file())
 }
 
@@ -621,8 +623,21 @@ pub fn exec_cmd(argv: &[String]) -> i32 {
         return 0;
     };
 
-    let mut command = std::process::Command::new(program);
+    let mut command = std::process::Command::new(resolve_program(program));
     command.args(&argv[2..]);
+    // `env_clear` first: `Command` otherwise inherits the *real* OS
+    // environment by default regardless of what's fed to `.envs()`, which
+    // only adds/overrides — never removes — entries on top of it. Since
+    // `main.rs` seeds `vars`'s own table from that same inherited
+    // environment at startup (C36), `vars::exported()` is a complete,
+    // accurate picture of what this process's environment should be, so
+    // rebuilding it from scratch here (rather than layering onto the
+    // default inheritance) is exactly what's needed for `unset` of an
+    // inherited/exported name to actually take effect in the replaced
+    // process (C40) — `exec_cmd` replaces the whole process image, so
+    // there's nothing else in it that could depend on the untouched
+    // default inheritance.
+    command.env_clear();
     command.envs(crate::vars::exported());
 
     let err = command.exec();
@@ -706,7 +721,8 @@ fn trace_pipeline(pipeline: &Pipeline) {
 /// of `$(...)` command substitution currently being expanded — matching
 /// real bash's own nesting-depth indicator, verified directly.
 fn trace_prefix() -> String {
-    let ps4 = crate::vars::get("PS4").or_else(|| std::env::var("PS4").ok()).unwrap_or_else(|| "+ ".to_string());
+    // `vars::get` alone — no `std::env` fallback (C36/C40).
+    let ps4 = crate::vars::get("PS4").unwrap_or_else(|| "+ ".to_string());
     let mut chars = ps4.chars();
     match chars.next() {
         Some(c) => {
@@ -1424,6 +1440,33 @@ pub(crate) fn pipeline_status(stage_statuses: &[i32]) -> i32 {
     }
 }
 
+/// Resolve `program` to what should actually be `exec`'d — deliberately
+/// *not* just handing the bare name to `Command::new` and letting its own
+/// built-in search find it, which always consults the real OS environment
+/// variable directly, bypassing rush's own (possibly `unset`-modified)
+/// `$PATH` entirely (C40 — the same root cause C36 fixed for `command -v`/
+/// `type`/`hash`'s own lookups, but for actually spawning a command
+/// instead). A direct path (containing `/`) is used as-is — its own
+/// `spawn()` error, if any, is classified by `spawn_failure_status` (C37)
+/// exactly as before, unaffected by this. A bare name that resolves via
+/// `builtins::resolve_in_path` (rush's own `$PATH`) is spawned by that
+/// resolved, absolute path, so `Command`'s own search never runs at all.
+/// A bare name that *doesn't* resolve there gets a trailing `/` appended —
+/// containing a `/`, so `Command` treats it as a direct path too (skipping
+/// its own search), and guaranteed to fail with `NotFound` (verified
+/// directly) — routing it through the exact same not-found handling a
+/// missing command already gets, without a second error path to keep
+/// consistent with it.
+fn resolve_program(program: &str) -> String {
+    if program.contains('/') {
+        return program.to_string();
+    }
+    match crate::builtins::resolve_in_path(program) {
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => format!("{program}/"),
+    }
+}
+
 /// Build the `std::process::Command` for one pipeline stage: program, args, and
 /// stdio. An explicit `<`/`>`/`>>` redirect wins over pipe wiring; otherwise a
 /// non-final stage (or any stage when capturing) gets a piped stdout. Shared by
@@ -1465,7 +1508,7 @@ pub(crate) fn build_stage(
         .argv
         .first()
         .ok_or_else(|| "empty command".to_string())?;
-    let mut command = OsCommand::new(program);
+    let mut command = OsCommand::new(resolve_program(program));
     command.args(&cmd.argv[1..]);
 
     // Seed the environment: exported shell variables first, then this command's
@@ -1473,6 +1516,17 @@ pub(crate) fn build_stage(
     // (`arr=(a b c) cmd`) is silently skipped — there's no portable
     // representation for an array as an environment variable, same as
     // `exported()` already skips one held in the shell's own table.
+    //
+    // `env_clear` first (C40): `Command` otherwise inherits the real OS
+    // environment by default, and `.envs()` only adds/overrides on top of
+    // that — never removes — so `unset`-ing an inherited/exported name
+    // would leave a spawned child still seeing its original value. Since
+    // `main.rs` seeds `vars`'s own table from that same inherited
+    // environment at startup (C36), `vars::exported()` is already a
+    // complete, accurate picture of what a child's environment should
+    // be — rebuilding it from scratch here, rather than layering onto the
+    // default inheritance, is what makes `unset` actually take effect.
+    command.env_clear();
     command.envs(crate::vars::exported());
     for (name, op) in &cmd.assignments {
         if let Some(value) = prefix_env_value(name, op) {

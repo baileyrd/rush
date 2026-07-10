@@ -527,9 +527,11 @@ fn bool_int(b: bool) -> i64 {
 
 /// A variable's value as an integer: unset/empty → 0, non-numeric → error.
 fn var_value(name: &str) -> Result<i64, String> {
-    let raw = crate::vars::get(name)
-        .or_else(|| std::env::var(name).ok())
-        .unwrap_or_default();
+    // `vars::get` alone is a complete answer since `main.rs` seeds every
+    // inherited environment variable into it at startup (C36) — see
+    // `expand.rs`'s `var_raw`, which drops this same now-redundant (and,
+    // post-`unset`, actively wrong — C40) fallback for the identical reason.
+    let raw = crate::vars::get(name).unwrap_or_default();
     let s = raw.trim();
     if s.is_empty() {
         return Ok(0);

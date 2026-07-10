@@ -16,10 +16,15 @@ Items marked **(tracked)** are already named somewhere in this repo's own
 docs (`ARCHITECTURE.md`, `CHANGELOG.md`, doc comments) — re-surfaced here with
 the cross-shell context that shows why they matter, not newly discovered.
 
-**Bottom line:** rush's actual scope today is closest to **dash** — a solid,
-mostly-POSIX execution core (real pipes, real job control, real forked
-subshells) with almost none of the bash/ksh/zsh-family conveniences layered
-on top. Tier I's original 6 items are done, and so now are C35 (`\$` inside
+**Bottom line:** rush started out closest to **dash** — a solid, mostly-POSIX
+execution core (real pipes, real job control, real forked subshells) with
+almost none of the bash/ksh/zsh-family conveniences layered on top. Every
+item tracked in this document (C1–C40, all five tiers) is now done, closing
+that gap almost entirely — what follows is the history of how, tier by
+tier, plus the narrower, individually-documented edge cases each item's own
+write-up calls out as still out of scope (a fd-numbering cosmetic
+difference here, a multi-stage-pipeline corner there — none of them the
+kind of gap this document originally tracked). Tier I's original 6 items are done, and so now are C35 (`\$` inside
 double quotes wasn't staying literal — fixed by giving the lexer a
 separate, never-re-expanded `WordPart::Literal("$")` for it instead of
 just stripping the backslash and leaving a bare `$` indistinguishable
@@ -44,9 +49,16 @@ seeded its own variable table from the inherited environment at startup,
 so a *bare* `PATH=$PATH:dir` silently failed to reach a spawned child's
 own environment even though internal lookups saw it) turned up while
 closing out `source`; C37 while closing out `eval`; C38 while closing out
-`exec`. Chasing C36 down turned up one further, narrower item of its own
-— `unset` of an inherited/exported variable doesn't stop a spawned child
-from still seeing it, tracked as C40, still open. `set -euo
+`exec`. Chasing C36 down turned up one further item — `unset` of an
+inherited/exported variable didn't stop a spawned child from still
+seeing it (C40), which turned out to need more than the environment fix
+its own write-up anticipated: rush's own resolution of *which* program to
+run consulted the real OS environment directly too, bypassing the fixed
+child environment entirely, and half a dozen other "read this variable"
+call sites across the codebase had the identical now-obsolete
+fallback-to-`std::env` pattern once C36 started seeding `vars`
+comprehensively at startup. Fixing all of it makes Tier I fully closed
+out — 10 of 10, complete. `set -euo
 pipefail` — the header nearly every production shell script opens with —
 now works in full: `-e`, `-u` (C18), and `-o pipefail` (C19) all landed,
 and `-x` (C20, xtrace) alongside them. `TERM`/`HUP` traps (C21) now fire
@@ -105,7 +117,17 @@ names after `$`/`${`, directories-only for `cd`, variable names for
 `export`/`unset`/`local`/`declare`, alias names for `alias`/`unalias`,
 and `%n` job specs for `fg`/`bg`/`kill`/`wait` — closes out Tier V
 completely, 3 of 3, bounded deliberately to this fixed case list rather
-than a full fish/zsh-style completion-spec engine.
+than a full fish/zsh-style completion-spec engine. Tiers I through III
+closed out too, each while chasing down a tracked bug found mid-adjacent-
+item (a `\$` quoting bug, C35; an unknown command aborting the whole
+script, C37; redirects to fd 3+ collapsing onto fd 1, C38;
+`set --` not reassigning positional parameters, C39) — the last of
+which, C40, turned up while fixing C36 and needed more than its own
+write-up anticipated: the shell's own resolution of *which* program to
+run, and half a dozen other "read this variable" call sites across the
+codebase, all still consulted the real OS environment directly rather
+than `vars`'s own (correctly `unset`-aware) table. With that, every tier
+in this document is fully closed.
 
 ---
 
@@ -245,7 +267,7 @@ completion *system* (as opposed to this fixed case list) provides.
 
 ## Summary counts
 
-- **Tier I — correctness/POSIX risk:** 10 (9 done)
+- **Tier I — correctness/POSIX risk:** 10 (10 done — complete)
 - **Tier II — missing standard builtins:** 12 (12 done — complete)
 - **Tier III — scripting-safety idioms:** 5 (5 done — complete)
 - **Tier IV — bash/ksh/zsh language parity:** 10 (10 done — complete)
@@ -513,26 +535,93 @@ clean (Windows cross-compile checked too, since `build_stage` itself
 runs on every platform even though the new `pre_exec` logic is
 `#[cfg(unix)]`). **Effort: M**, as estimated.
 
-### C40 — `unset` of an inherited/exported variable doesn't stop a spawned child from still seeing it (tracked)
+### C40 — `unset` of an inherited/exported variable doesn't stop a spawned child from still seeing it (tracked) ✅ done
 Found while fixing C36: `exec::build_stage`/`run_foreground`'s
-`command.envs(vars::exported())` only *adds/overrides* entries on top of
+`command.envs(vars::exported())` only *added/overrode* entries on top of
 whatever `std::process::Command` already inherits from rush's own real OS
-environment by default (no `env_clear()` anywhere) — it never *removes*
+environment by default (no `env_clear()` anywhere) — it never *removed*
 a key. So `unset`-ing a variable that came from the inherited process
-environment (`PATH`, or anything else genuinely exported) only deletes
-rush's own internal record of it; the child process still inherits the
-original OS-level value regardless, since nothing ever actually calls
-`std::env::remove_var` or blocks it from the default inheritance.
-Reproduces for any exported name: `unset PATH; some_command_only_on_the_
-now-supposedly-unset-PATH` still finds and runs it — real bash instead
+environment (`PATH`, or anything else genuinely exported) only deleted
+rush's own internal record of it; the child process still inherited the
+original OS-level value regardless. `unset PATH; some_command_only_on_the_
+now-supposedly-unset-PATH` still found and ran it — real bash instead
 fails with "command not found" (status 127), since its child truly no
-longer has `PATH` at all. Silent wrongness, not an error, so it fits this
-tier. **Effort: M** — needs either `.env_remove(name)` calls threaded
-through both spawn paths for anything unset since the shell started, or
-switching to `.env_clear()` plus rebuilding the full child environment
-from `vars::exported()` (now that it's seeded with the inherited
-environment at startup, C36) on every spawn instead of relying on
-default inheritance at all.
+longer has `PATH` at all.
+
+**Fix, child environment**: `command.env_clear()` before
+`command.envs(vars::exported())`, at both spawn sites
+(`build_stage`, real spawned children, and `exec_cmd`'s process-
+replacement form). Since `main.rs` already seeds every inherited
+environment variable into `vars` at startup (C36), `vars::exported()` is
+now a complete, accurate picture of what a child's environment should
+be — rebuilding it from scratch, rather than layering onto
+`Command`'s default full-environment inheritance, is what makes `unset`
+actually take effect.
+
+**A deeper piece the environment fix alone didn't cover, found while
+verifying the headline `unset PATH; some_command` reproduction still
+didn't work after the environment fix**: `std::process::Command::new(name)`
+resolves a bare (no `/`) program name to an executable using the *real*
+process environment's own `PATH` at spawn time — a lookup that happens in
+the parent, before `fork`, entirely independent of whatever's configured
+for the child via `.envs()`/`env_clear()`. So even with the child's own
+environment now correctly excluding `PATH`, rush's *own* attempt to
+*locate* the command still silently succeeded via the untouched real OS
+environment. Fixed with a new `exec::resolve_program`: a bare name is
+resolved via `builtins::resolve_in_path` (rush's own, `vars`-aware `$PATH`
+search, already used for `command -v`/`type`/`hash`/`source`) to its
+absolute path, so `Command`'s own built-in search never runs at all; a
+name that doesn't resolve there gets a trailing `/` appended
+(guaranteed, verified directly, to fail with `NotFound` — and, having a
+`/`, also skips `Command`'s own search), routing it through the exact
+same not-found handling C37 already gives a missing command, rather than
+a second error path. A direct path (already containing `/`) is left
+completely alone, preserving C37's existing 126-vs-127 distinction for
+that case unchanged.
+
+**A related, broader architectural issue surfaced by this same
+investigation, fixed alongside it**: several other "read this variable"
+call sites (`expand.rs`'s central `var_raw`, `arith.rs`'s arithmetic
+variable lookup, `PS1`/`PS3`/`PS4`'s own prompt lookups, `IFS`'s
+field-splitting lookup, and a bare `cd`'s `$HOME` fallback, which
+previously didn't consult `vars` *at all*) all had the identical
+`vars::get(name).or_else(|| std::env::var(name).ok())` pattern — a
+fallback that made sense *before* C36 (when `vars` might genuinely not
+know about an inherited variable yet), but became actively wrong once
+C36 started seeding `vars` from the full environment at startup: it
+silently resurrected an inherited variable's original value after
+`unset`, for every one of these reads, not just spawning. All of them
+now use `vars::get` alone. `~` (tilde expansion) is a deliberate,
+verified-directly exception: real bash's own `~` *does* follow a plain,
+unexported `HOME=/custom` reassignment, but *keeps resolving* even after
+`unset HOME` (falling back to its own OS-level notion of the user's home)
+rather than breaking — `expand.rs`'s `home_dir` keeps a `std::env`
+fallback specifically for that reason, checking `vars::get("HOME")`
+first so an assignment is honored (previously it wasn't, either).
+
+Explicitly out of scope, a narrow, deliberate scope-narrowing found along
+the way: `unset PS4` (a shell-internal special variable bash itself
+pre-populates with `"+ "` at startup, not one inherited from the OS
+environment) still traces with rush's own hardcoded `+ ` default,
+whereas real bash's own trace prefix genuinely goes empty — verified
+directly. This is a different root cause than the rest of this item
+(a *shell-internal* default that bash treats as real, mutable state
+rather than a read-time fallback) and doesn't affect anything
+environment/`PATH`-related; fixing it would mean seeding `PS1`/`PS4`'s
+own bash-matching defaults into `vars` at startup the same way C36 seeds
+the real environment, a small enough change to be its own follow-up
+rather than folded into this one.
+
+Verified directly against real bash across: `unset PATH` breaking a bare
+command name while a direct path keeps working, `PATH` reassignment
+still resolving new commands correctly, `unset IFS` reverting to default
+whitespace splitting, a bare `cd` following a plain `HOME=` reassignment
+and erroring after `unset HOME` (matching bash's own message
+functionally, wording aside), and `~` continuing to resolve after
+`unset HOME` while still following an assignment. **Effort: M**, as
+estimated — ended up needing the parent-side resolution fix and the
+broader fallback cleanup alongside the originally-scoped environment fix
+to fully close the gap the reproduction actually described.
 
 ---
 

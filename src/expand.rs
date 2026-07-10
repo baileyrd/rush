@@ -1221,10 +1221,16 @@ fn command_substitute(src: &str) -> Result<String, String> {
     crate::vars::with_deeper_trace(|| crate::exec::capture_list(&list))
 }
 
-/// A variable's value, or `None` if unset — shell variables shadow the
-/// environment.
+/// A variable's value, or `None` if unset. `vars::get` alone is a complete
+/// answer — `main.rs` seeds every inherited environment variable into
+/// `vars`'s own table at startup (C36), so there's nothing left in the real
+/// OS environment `vars::get` wouldn't already know about. Falling back to
+/// `std::env::var` here too (as this used to) would silently resurrect an
+/// inherited variable's original value after `unset` (C40) — `vars::get`
+/// correctly returns `None` for both "never set" and "explicitly unset",
+/// same as real bash doesn't distinguish them either.
 fn var_raw(name: &str) -> Option<String> {
-    crate::vars::get(name).or_else(|| std::env::var(name).ok())
+    crate::vars::get(name)
 }
 
 /// As [`var_raw`], but honors `set -u` (nounset): an unset variable is an
@@ -1538,9 +1544,20 @@ fn strip_suffix_pattern(value: &str, pattern: &str, greedy: bool) -> String {
     value.to_string()
 }
 
+/// `~`'s expansion target. Checks `vars::get("HOME")` first — verified
+/// directly that real bash's own `~` *does* follow a plain (even
+/// unexported) `HOME=/custom` reassignment — falling back to the real
+/// environment variable(s) only when `HOME` isn't set in `vars` at all.
+/// That fallback is a deliberate exception to the "no `std::env` fallback"
+/// rule `var_raw` and everything else in this file now follows (C36/C40):
+/// verified directly that unlike an ordinary variable, real bash's `~`
+/// keeps resolving even after `unset HOME` (falling back to its own
+/// OS-level notion of the user's home directory) rather than breaking —
+/// this fallback approximates that with the value from process startup,
+/// not a fresh OS lookup, an accepted simplification.
 fn home_dir() -> Option<String> {
-    std::env::var("HOME")
-        .ok()
+    crate::vars::get("HOME")
+        .or_else(|| std::env::var("HOME").ok())
         .or_else(|| std::env::var("USERPROFILE").ok())
 }
 
@@ -1561,16 +1578,16 @@ mod tests {
         }
     }
 
-    // All env-mutating cases live in one test: `set_var` is process-global and
-    // unsafe under edition 2024, so we keep the mutations off the shared
-    // parallel test threads' way by confining them here.
     #[test]
     fn variable_tilde_and_quoting() {
-        unsafe {
-            std::env::set_var("RUSH_X", "hello world");
-            std::env::set_var("HOME", "/home/rush");
-            std::env::remove_var("RUSH_UNSET");
-        }
+        // `vars::set`, not `std::env::set_var`: `var_raw`/`home_dir` read
+        // through `vars` only now (C36/C40 — real env vars are seeded into
+        // it once at startup, not consulted directly on every read), and
+        // `vars`'s own thread-local storage means this needs no `unsafe`
+        // process-global mutation confined to a single test either.
+        crate::vars::set("RUSH_X", "hello world");
+        crate::vars::set("HOME", "/home/rush");
+        crate::vars::unset("RUSH_UNSET");
 
         // Unquoted $VAR / ${VAR} word-split on whitespace; quotes suppress that.
         assert_eq!(one("echo $RUSH_X"), vec!["echo", "hello", "world"]);

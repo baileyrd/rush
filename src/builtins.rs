@@ -423,9 +423,14 @@ fn cd(argv: &[String]) -> i32 {
             }
         },
         Some(dir) => dir.clone(),
-        None => match std::env::var("HOME") {
-            Ok(h) => h,
-            Err(_) => {
+        // `vars::get` alone: seeded from the inherited environment at
+        // startup (C36), so this already sees a real, unexported `HOME`
+        // too (verified directly against real bash: `HOME=/tmp; cd` does
+        // change directory) — and correctly stops seeing it after `unset`
+        // (C40), instead of a `std::env` fallback resurrecting it.
+        None => match crate::vars::get("HOME") {
+            Some(h) => h,
+            None => {
                 eprintln!("cd: HOME not set");
                 return 1;
             }
@@ -601,7 +606,11 @@ struct ReadIfs {
 
 impl ReadIfs {
     fn current() -> Self {
-        match crate::vars::get("IFS").or_else(|| std::env::var("IFS").ok()) {
+        // `vars::get` alone (no `std::env` fallback, see `expand.rs`'s
+        // `var_raw` for why — C36/C40) — `IFS` is essentially never a real
+        // environment variable anyway, so this was always closer to
+        // vestigial than load-bearing.
+        match crate::vars::get("IFS") {
             None => ReadIfs {
                 whitespace: vec![b' ', b'\t', b'\n'],
                 other: Vec::new(),
@@ -1154,12 +1163,14 @@ fn classify(name: &str, keywords: bool) -> Option<Kind> {
 /// Search `$PATH` for an executable file named `name`. A `name` containing
 /// `/` is treated as an explicit path (checked directly, not searched for)
 /// rather than a `$PATH` lookup.
-fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
     if name.contains('/') {
         let p = Path::new(name);
         return is_executable_file(p).then(|| p.to_path_buf());
     }
-    let path = crate::vars::get("PATH").or_else(|| std::env::var("PATH").ok())?;
+    // `vars::get` alone — no `std::env` fallback (C36/C40): falling back
+    // would resurrect `PATH`'s original, inherited value after `unset`.
+    let path = crate::vars::get("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))

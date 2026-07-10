@@ -780,6 +780,17 @@ mod tests {
     use crate::exec::Command;
 
     fn cmd(argv: &[&str]) -> Stage {
+        // Seed `vars`'s own `PATH` from the real one: production code never
+        // needs this (`main.rs` seeds every inherited environment variable
+        // at startup, C36), but these tests spawn real processes directly,
+        // bypassing `main()` entirely — and `exec::resolve_program` (C40)
+        // now resolves a bare command name via `vars::get("PATH")` only, no
+        // `std::env` fallback, so a real spawn here needs this done by hand.
+        if crate::vars::get("PATH").is_none()
+            && let Ok(path) = std::env::var("PATH")
+        {
+            crate::vars::set_exported("PATH", &path);
+        }
         Stage::Simple(Command {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             redirects: vec![],

@@ -1005,11 +1005,11 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                 // is an evaluation error (status 2, script continues).
                 "=~" => {
                     let pattern = crate::expand::expand_cond_regex(rhs)?;
-                    let re = regex::Regex::new(&pattern).map_err(|e| format!("invalid regex: {e}"))?;
+                    let re = rusty_regx::Regex::new(&pattern).map_err(|e| format!("invalid regex: {e}"))?;
                     match re.captures(&l) {
                         Some(caps) => {
                             let groups: Vec<String> = (0..caps.len())
-                                .map(|i| caps.get(i).map(|m| m.as_str().to_string()).unwrap_or_default())
+                                .map(|i| caps.get(i).unwrap_or_default().to_string())
                                 .collect();
                             crate::vars::set_array("BASH_REMATCH", groups);
                             Ok(true)

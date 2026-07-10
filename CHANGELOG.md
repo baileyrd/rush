@@ -1759,3 +1759,20 @@ scenarios pass as before). `completion::Candidate` is now a re-export
 of the crate's type; `unicode-width` moved with the editor. The
 editor's 17 unit tests live in the crate; rush keeps the pty harness,
 which exercises the integration.
+
+### Changed: `=~` regex engine replaced — `regex` crate → `rusty_regx`
+The `[[ $s =~ pattern ]]` conditional (C56) now runs on
+<https://github.com/baileyrd/rusty_regx>, a purpose-built POSIX-ERE
+engine (hand-written parser + Pike VM, zero dependencies, no `unsafe`),
+pulled in as a git dependency. It keeps the two properties that
+mattered about the `regex` crate: guaranteed linear-time matching (a
+user-supplied `(a+)+b` cannot hang the shell) and leftmost-first match
+semantics, validated by an 8,000-case differential harness against the
+crate plus a 2,000-case bash oracle in the engine's repo. The swap
+touches only the two use sites (`exec.rs` `=~` arm, `expand.rs`
+`expand_cond_regex`) and drops five crates from the lock file
+(`regex`, `regex-automata`, `regex-syntax`, `aho-corasick`, `memchr`);
+all C56 tests pass unchanged. Known residual divergence from real
+bash (leftmost-first vs. POSIX leftmost-longest submatching on
+patterns like `a|ab`) is unchanged from the `regex` crate and is the
+engine's planned v2 mode.

@@ -7,9 +7,10 @@ description = "A small, bash-compatible shell written in Rust"
 repository = "https://github.com/baileyrd/rush"
 
 [dependencies]
-# `[[ $s =~ regex ]]` (C56). The practical ERE engine; its syntax isn't a
-# byte-for-byte POSIX ERE match, but agrees on everything the tests cover.
-regex = "1"
+# `[[ $s =~ regex ]]` (C56). A minimal POSIX-ERE engine (parser + Pike VM,
+# linear-time, zero deps) built to replace the `regex` crate here; v1 keeps
+# the crate's leftmost-first semantics, differentially tested against it.
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", branch = "main" }
 # The line editor (formerly src/editor.rs, extracted to its own crate):
 # raw-mode terminal, emacs + vi keymaps, kill ring, undo, history search,
 # bracketed paste, $RPS1 right prompt. rush drives it through its `Hooks`

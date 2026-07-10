@@ -1023,8 +1023,8 @@ pub(crate) fn expand_cond_regex(word: &Word) -> Result<String, String> {
     let mut pattern = String::new();
     for (i, part) in word.iter().enumerate() {
         match part {
-            WordPart::Literal(s) => pattern.push_str(&regex::escape(s)),
-            WordPart::Quoted(s) => pattern.push_str(&regex::escape(&expand_dollars(s)?)),
+            WordPart::Literal(s) => pattern.push_str(&rusty_regx::escape(s)),
+            WordPart::Quoted(s) => pattern.push_str(&rusty_regx::escape(&expand_dollars(s)?)),
             WordPart::Unquoted(s) => {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
                 pattern.push_str(&expand_unquoted(&text)?);

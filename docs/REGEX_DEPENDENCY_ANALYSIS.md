@@ -1,7 +1,9 @@
 # Regex dependency analysis: what `regex = "1"` buys us, and what replacing it takes
 
-Status: analysis / assessment (no decision made). Companion design doc lives in
-the `rusty_regx` repo (`DESIGN.md`).
+Status: **done** — the replacement described here was built and swapped in
+(`rusty_regx`, a git dependency; see the CHANGELOG entry). The analysis below
+is kept as-written for the record. Companion design doc lives in the
+`rusty_regx` repo (`DESIGN.md`).
 
 ## 1. Where the dependency is used
 

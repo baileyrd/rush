@@ -1404,6 +1404,28 @@ fn expand_dollars_chunks(text: &str, allow_process_sub: bool) -> Result<Vec<(Str
                     out.exp(output.trim_end_matches(['\n', '\r']));
                 }
             }
+            // `$[ expr ]` — bash's deprecated arithmetic expansion (C131),
+            // equivalent to `$(( expr ))`.
+            Some('[') => {
+                chars.next();
+                let mut expr = String::new();
+                let mut depth = 1;
+                for c in chars.by_ref() {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    expr.push(c);
+                }
+                let expr = expand_dollars(&expr)?;
+                out.exp(&crate::arith::eval(&expr)?.to_string());
+            }
             // `$?` — the last pipeline's exit status.
             Some('?') => {
                 chars.next();
@@ -1897,6 +1919,24 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
     }
 
     // Array-wide transformations (C59): `${arr[@]/pat/repl}`,
+    // A *single* array element combined with an operator (C131):
+    // `${arr[i]:-def}`, `${arr[i]#pat}`, `${arr[i]/a/b}`, `${arr[i]^^}`,
+    // `${arr[i]@Q}` — resolve the element, then apply the operator exactly
+    // as the scalar path below does. (The `@`/`*` whole-array forms are
+    // handled separately, just after.)
+    if let Some(open) = inner.find('[')
+        && is_valid_name(&inner[..open])
+        && let Some(close) = inner[open..].find(']').map(|i| open + i)
+        && !matches!(&inner[open + 1..close], "@" | "*")
+        && close + 1 < inner.len()
+    {
+        let name = &inner[..open];
+        let subscript = &inner[open + 1..close];
+        let rest = &inner[close + 1..];
+        let value = read_subscript(name, subscript)?;
+        return apply_scalar_op(value.as_deref(), rest, inner);
+    }
+
     // `${arr[@]^^}`, `${arr[@]:1:2}`… — the scalar operator applied to
     // every element, results joined like `${arr[@]}`/`${arr[*]}` would
     // join. (`#`/`%` prefix/suffix strips ride along too.)
@@ -2074,6 +2114,57 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
                 Err(msg)
             } else {
                 Ok(value.unwrap())
+            }
+        }
+        _ => Err(format!("${{{inner}}}: bad substitution")),
+    }
+}
+
+/// Apply a `${...OP}` operator to an already-resolved value (C131) — the
+/// shared logic for a single array element `${arr[i]OP}`, which resolves
+/// to a value the same way a scalar does. `value` is `None` for an unset
+/// element (so the default/alternate family fires). Covers pattern
+/// removal, string transforms, value-based `@`-transforms, and the
+/// default/alternate family; `:=` write-back to an element isn't
+/// supported (a documented narrowing — rare).
+fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str) -> Result<String, String> {
+    let present = value.unwrap_or("");
+    // Pattern removal (`##`/`%%` before the single forms).
+    if let Some(word_src) = rest.strip_prefix("##") {
+        return Ok(strip_prefix_pattern(present, &expand_dollars(word_src)?, true));
+    }
+    if let Some(word_src) = rest.strip_prefix('#') {
+        return Ok(strip_prefix_pattern(present, &expand_dollars(word_src)?, false));
+    }
+    if let Some(word_src) = rest.strip_prefix("%%") {
+        return Ok(strip_suffix_pattern(present, &expand_dollars(word_src)?, true));
+    }
+    if let Some(word_src) = rest.strip_prefix('%') {
+        return Ok(strip_suffix_pattern(present, &expand_dollars(word_src)?, false));
+    }
+    if let Some(op) = rest.strip_prefix('@') {
+        return at_transform(present, op).ok_or_else(|| format!("${{{inner}}}: bad substitution"));
+    }
+    if is_transform_op(rest) {
+        return string_transform(present, rest);
+    }
+    // Default/alternate family.
+    let colon = rest.starts_with(':');
+    let ops = if colon { &rest[1..] } else { rest };
+    let op = ops.chars().next();
+    let word = expand_braced_word(&ops[op.map_or(0, char::len_utf8)..], false)?;
+    let use_word = match value {
+        None => true,
+        Some(v) => colon && v.is_empty(),
+    };
+    match op {
+        Some('-') | Some('=') => Ok(if use_word { word } else { present.to_string() }),
+        Some('+') => Ok(if use_word { String::new() } else { word }),
+        Some('?') => {
+            if use_word {
+                Err(if word.is_empty() { format!("{inner}: parameter null or not set") } else { word })
+            } else {
+                Ok(present.to_string())
             }
         }
         _ => Err(format!("${{{inner}}}: bad substitution")),

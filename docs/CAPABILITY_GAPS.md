@@ -3620,3 +3620,34 @@ break`) — no "Use `exit` to leave" guard; `TMOUT` idle auto-logout
   bash-completion files and `read -p/-s/-t` idioms are everywhere.
 - **C104 (invocation flags) is the login-shell gate** — until `-l`/`-i`
   parse, rush can't be anyone's chsh target.
+
+---
+
+# 2026-07-11 spot-probe — untracked gaps found while answering "any more?" (C131)
+
+A quick differential probe after the C1–C130 backlog closed turned up a
+handful of untracked gaps — grouped here as **C131** and fixed in one
+batch (PR forthcoming):
+
+- **`printf` floating-point conversions** (`%f %F %e %E %g %G %a %A`) were
+  unsupported; added, with C's default-6 precision, exponent formatting,
+  `%g` significant-digit trimming, and the `+`/space sign flags. Hex-int
+  arguments (`printf %f 0x10`) and a float argument to `%d` (truncated,
+  with bash's warning) work too.
+- **`printf` argument-driven width/precision** (`%*d`, `%.*f`) — the width/
+  precision is now consumed from a preceding argument; a negative `*`
+  width left-justifies.
+- **`${arr[i]OP}`** — a single array element combined with an operator
+  (`${a[0]:-def}`, `${a[i]#pat}`, `${a[i]/x/y}`, `${a[i]^^}`, `${a[i]@Q}`)
+  was previously a "bad substitution" (a documented scope limit); now
+  resolves the element and applies the operator like a scalar. (`:=`
+  write-back to an element remains unsupported — rare.)
+- **`$[ expr ]`** — bash's deprecated arithmetic expansion, now equivalent
+  to `$(( expr ))`; the lexer swallows it whole so embedded spaces don't
+  split it.
+
+Left for the next review pass (cosmetic / low-value): `$-`'s exact
+`h`/`B`/`c` letters (the load-bearing `i` is already reported), the
+arithmetic comma operator inside `let` (`let "a=1, b=2"`), and
+`${!BASH*}`-style prefix listing of bash-only variable names (rush uses
+`RUSH_*`).

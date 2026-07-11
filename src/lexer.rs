@@ -824,6 +824,7 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                         match chars.peek() {
                             Some(&'(') => consume_balanced_paren(chars, &mut s)?,
                             Some(&'{') => consume_balanced_brace(chars, &mut s)?,
+                            Some(&'[') => consume_balanced_bracket(chars, &mut s)?,
                             _ => {}
                         }
                         continue;
@@ -901,6 +902,7 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                 match chars.peek() {
                     Some(&'(') => consume_balanced_paren(chars, &mut s)?,
                     Some(&'{') => consume_balanced_brace(chars, &mut s)?,
+                    Some(&'[') => consume_balanced_bracket(chars, &mut s)?,
                     _ => {}
                 }
                 push_unquoted(&mut parts, &s);
@@ -1045,6 +1047,28 @@ fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Resu
 
 /// Append a balanced `{...}` region (including the braces) to `out`, starting at
 /// the opening `{` under the cursor — used to keep `${...}` whole.
+/// Swallow `$[ ... ]` (bash's deprecated arithmetic expansion) whole, so
+/// embedded spaces don't tear it into separate words (C131).
+fn consume_balanced_bracket(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), LexError> {
+    chars.next(); // opening '['
+    out.push('[');
+    let mut depth = 1usize;
+    for c in chars.by_ref() {
+        out.push(c);
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(LexError::Incomplete)
+}
+
 fn consume_balanced_brace(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), LexError> {
     chars.next(); // opening '{'
     out.push('{');

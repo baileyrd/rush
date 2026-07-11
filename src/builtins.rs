@@ -947,8 +947,24 @@ fn export(argv: &[String]) -> i32 {
             return 0;
         }
         Some("-f") => {
-            eprintln!("export: -f: function export is not supported yet");
-            return 1;
+            // Function export (C98): store the body in the environment as
+            // `BASH_FUNC_name%%=() { ... }` — bash's own encoding, so an
+            // exported function crosses into child rush *and* bash shells
+            // alike (and `import_functions` reads it back at startup).
+            let mut status = 0;
+            for name in &argv[2..] {
+                match crate::func::get(name) {
+                    Some(body) => crate::vars::set_exported(
+                        &format!("BASH_FUNC_{name}%%"),
+                        &crate::unparse::function_export_value(&body),
+                    ),
+                    None => {
+                        eprintln!("export: {name}: not a function");
+                        status = 1;
+                    }
+                }
+            }
+            return status;
         }
         _ => {}
     }
@@ -1886,18 +1902,25 @@ pub(crate) fn declare_print(argv: &[String]) -> i32 {
             // `-F` and `-f` share the status rules; only output differs.
             if names.is_empty() {
                 for name in crate::func::names() {
-                    println!("declare -f {name}");
+                    if mode == "-F" {
+                        println!("declare -f {name}");
+                    } else if let Some(body) = crate::func::get(&name) {
+                        print!("{}", crate::unparse::function_source(&name, &body));
+                    }
                 }
                 return 0;
             }
             let mut status = 0;
             for name in names {
-                if crate::func::exists(name) {
-                    if mode == "-F" {
-                        println!("{name}");
+                match crate::func::get(name) {
+                    Some(body) => {
+                        if mode == "-F" {
+                            println!("{name}");
+                        } else {
+                            print!("{}", crate::unparse::function_source(name, &body));
+                        }
                     }
-                } else {
-                    status = 1;
+                    None => status = 1,
                 }
             }
             status
@@ -2405,6 +2428,28 @@ pub fn history_entries() -> Vec<String> {
 /// Take (and clear) the "editor must rebuild its history" flag.
 pub fn history_reset_pending() -> bool {
     HISTORY_RESET.with(|f| f.replace(false))
+}
+
+/// Define functions exported by a parent shell (C98): every environment
+/// entry named `BASH_FUNC_name%%` whose value looks like `() { ... }` —
+/// the encoding both bash and rush's own `export -f` emit — becomes a
+/// defined (and re-exported) function. Malformed values are skipped.
+pub fn import_functions() {
+    for name in crate::vars::names() {
+        let Some(func_name) = name.strip_prefix("BASH_FUNC_").and_then(|n| n.strip_suffix("%%"))
+        else {
+            continue;
+        };
+        let Some(value) = crate::vars::get(&name) else { continue };
+        let Some(body_src) = value.trim_start().strip_prefix("()") else { continue };
+        if let Ok(list) = crate::parser::parse(&format!("{func_name} () {}", body_src.trim_start()))
+            && let Some(crate::parser::RawCommand::Compound(rc)) =
+                list.jobs.first().map(|j| &j.list.first.commands[0])
+            && let crate::parser::Compound::FuncDef { name: parsed, body } = rc.compound.as_ref()
+        {
+            crate::func::define(parsed, body.clone());
+        }
+    }
 }
 
 /// `history` (C103): list numbered entries; `-c` clear, `-d N` delete,

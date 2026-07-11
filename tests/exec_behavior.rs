@@ -3584,3 +3584,43 @@ fn history_builtin_and_hist_variables() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[cfg(unix)]
+#[test]
+fn declare_f_prints_and_roundtrips_function_source() {
+    // C96 remainder: `declare -f` used to print nothing. The unparser's
+    // contract is round-trip fidelity through rush's own parser.
+    let (out, code) = rush("f(){ echo one; }; declare -f f");
+    assert_eq!(out, "f ()\n{\n    echo one\n}\n");
+    assert_eq!(code, 0);
+
+    let (out, _) = rush(r#"f(){ echo hi; [[ x == x ]] && echo cond-ok; for i in a b; do echo $i; done; }; src=$(declare -f f); unset -f f; eval "$src"; f"#);
+    assert_eq!(out, "hi\ncond-ok\na\nb\n");
+
+    // Here-docs and case bodies survive the round trip too.
+    let (out, _) = rush("g(){ cat <<EOF\nhd\nEOF\ncase $1 in a|b) echo ab;; *) echo other;; esac; }; src=$(declare -f g); unset -f g; eval \"$src\"; g a");
+    assert_eq!(out, "hd\nab\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn export_f_crosses_into_children() {
+    // C98 remainder: export -f used to warn-and-fail. The BASH_FUNC
+    // encoding crosses into child rush AND child bash shells.
+    let (out, _) = rush(&format!(
+        "f(){{ echo exported-fn $1; }}; export -f f; {} -c 'f world'",
+        env!("CARGO_BIN_EXE_rush")
+    ));
+    assert_eq!(out, "exported-fn world\n");
+
+    let (out, _) = rush("f(){ echo cross-shell; }; export -f f; bash -c f");
+    assert_eq!(out, "cross-shell\n");
+
+    // And bash-exported functions are imported at rush startup.
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(format!("f(){{ echo bash-to-rush; }}; export -f f; {} -c f", env!("CARGO_BIN_EXE_rush")))
+        .output()
+        .expect("spawn bash");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bash-to-rush\n");
+}

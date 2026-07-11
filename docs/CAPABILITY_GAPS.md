@@ -3388,7 +3388,7 @@ No `fc -l` (numbered listing), `fc -s old=new` (quick re-run), or
 `fc [-e editor] range` (edit-and-execute past commands). The editor's
 Ctrl-X Ctrl-E only covers the *current* line. **Effort: M**
 
-### C103 — `history` builtin missing
+### C103 — `history` builtin missing ✅ done (HISTTIMEFORMAT and fc remain open)
 `history | grep foo` — among the most common interactive idioms — fails
 with 127. No `-c` clear, `-d N` delete, `-a`/`-r`/`-w`/`-n` file sync,
 `-s`, `-p`. rusty_lines already exposes `history()`,
@@ -3514,7 +3514,7 @@ clients). **Effort: M**
 
 ## Tier V — Interactive UX (C122–C130)
 
-### C122 — History configuration variables all ignored
+### C122 — History configuration variables all ignored ✅ done (HISTTIMEFORMAT open)
 `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`,
 `HISTTIMEFORMAT`: zero hits in `src/`. Path is hardcoded
 `~/.rush_history`, history is unbounded, and — a real privacy
@@ -3523,14 +3523,14 @@ leading-space ` secret-cmd` is recorded. The editor already has
 `set_max_history_len` and `set_history_dedup` knobs, unwired.
 **Effort: S–M** (HISTTIMEFORMAT needs a file-format decision)
 
-### C123 — History persists only on clean exit; concurrent sessions clobber each other
+### C123 — History persists only on clean exit; concurrent sessions clobber each other ✅ done
 `save_history` (a whole-file overwrite) runs once at REPL exit — a
 killed session/SSH drop loses everything, and the last of two concurrent
 sessions to exit wins. rusty_lines *already ships* `append_history`
 (documented as bash's `histappend` semantics); call it per accepted
 line. **Effort: S**
 
-### C124 — Multi-line compound commands recorded as history fragments (no `cmdhist`)
+### C124 — Multi-line compound commands recorded as history fragments (no `cmdhist`) ✅ done
 Each physical line of a `for`/`if` typed interactively becomes its own
 (syntactically invalid) history entry. rusty_lines'
 `add_history_entry` already joins embedded newlines with `; ` — rush

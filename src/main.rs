@@ -67,10 +67,45 @@ impl Hooks for ShellHooks {
     }
 }
 
+/// `$HISTFILE` (C122), defaulting to `~/.rush_history`.
 fn history_path() -> Option<PathBuf> {
+    if let Some(f) = vars::get("HISTFILE").filter(|f| !f.is_empty()) {
+        return Some(PathBuf::from(f));
+    }
     let mut p = PathBuf::from(std::env::var_os("HOME")?);
     p.push(".rush_history");
     Some(p)
+}
+
+/// Whether a just-accepted command should be recorded, per
+/// `$HISTCONTROL` (`ignorespace`/`ignoredups`/`ignoreboth`) and
+/// `$HISTIGNORE` (colon-separated glob patterns) — C122.
+fn history_should_record(cmd: &str, last: Option<&str>) -> bool {
+    let control = vars::get("HISTCONTROL").unwrap_or_default();
+    let has = |name: &str| control.split(':').any(|c| c == name || c == "ignoreboth");
+    if has("ignorespace") && cmd.starts_with(' ') {
+        return false;
+    }
+    if has("ignoredups") && last == Some(cmd) {
+        return false;
+    }
+    if let Some(patterns) = vars::get("HISTIGNORE") {
+        for pat in patterns.split(':').filter(|p| !p.is_empty()) {
+            if glob::match_component(pat, cmd) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Apply the `$HISTSIZE`/`erasedups` knobs to the editor (C122).
+fn apply_history_knobs(rl: &mut Editor) {
+    if let Some(n) = vars::get("HISTSIZE").and_then(|v| v.parse::<usize>().ok()) {
+        rl.set_max_history_len(n);
+    }
+    let control = vars::get("HISTCONTROL").unwrap_or_default();
+    rl.set_history_dedup(control.split(':').any(|c| c == "erasedups"));
 }
 
 fn rc_path() -> Option<PathBuf> {
@@ -334,6 +369,12 @@ fn interactive() -> std::io::Result<()> {
     if let Some(ref h) = hist {
         let _ = rl.load_history(h);
     }
+    // Seed the `history` builtin's mirror with what the file held, and
+    // apply $HISTSIZE/$HISTCONTROL (C122).
+    for entry in rl.history() {
+        builtins::history_record(entry);
+    }
+    apply_history_knobs(&mut rl);
 
     // Claim the terminal and set up signal handling for job control.
     #[cfg(unix)]
@@ -383,14 +424,30 @@ fn interactive() -> std::io::Result<()> {
                         continue;
                     }
                 };
-                rl.add_history_entry(&line);
                 if !buffer.is_empty() {
                     buffer.push('\n');
                 }
                 buffer.push_str(&line);
 
+                // One history entry per complete *command* (`cmdhist`,
+                // C124) — the editor joins embedded newlines with `; `,
+                // so a multi-line `for` recalls as one runnable line —
+                // recorded only when $HISTCONTROL/$HISTIGNORE allow
+                // (C122), and appended to $HISTFILE right away so a
+                // crashed session loses nothing and concurrent sessions
+                // interleave instead of clobbering (C123).
+                let mut record = |rl: &mut Editor, buffer: &str| {
+                    if history_should_record(buffer, rl.history().last().map(String::as_str)) {
+                        rl.add_history_entry(buffer);
+                        builtins::history_record(&buffer.replace('\n', "; "));
+                        if let Some(ref h) = history_path() {
+                            let _ = rl.append_history(h);
+                        }
+                    }
+                };
                 match parser::parse(&buffer) {
                     Ok(list) => {
+                        record(&mut rl, &buffer);
                         if let Err(e) = exec::run_list(&list) {
                             eprintln!("rush: {e}");
                         }
@@ -399,10 +456,21 @@ fn interactive() -> std::io::Result<()> {
                     // A valid prefix: keep reading more lines.
                     Err(parser::ParseError::Incomplete) => {}
                     Err(parser::ParseError::Syntax(e)) => {
+                        record(&mut rl, &buffer);
                         eprintln!("rush: {e}");
                         buffer.clear();
                     }
                 }
+                // `history -c`/`-d`/`-r`/`-s` mutated the mirror: rebuild
+                // the editor's own list to match (C103).
+                if builtins::history_reset_pending() {
+                    let mut fresh = Editor::new();
+                    for entry in builtins::history_entries() {
+                        fresh.add_history_entry(&entry);
+                    }
+                    rl = fresh;
+                }
+                apply_history_knobs(&mut rl);
             }
             // Ctrl-C at an idle prompt (not a running foreground job — that's
             // a child process under job control, and never reaches here).
@@ -416,9 +484,8 @@ fn interactive() -> std::io::Result<()> {
         }
     }
 
-    if let Some(ref h) = hist {
-        let _ = rl.save_history(h);
-    }
+    // History is appended incrementally after each command (C123) — no
+    // whole-file overwrite at exit, so concurrent sessions interleave.
     trap::fire("EXIT");
     Ok(())
 }

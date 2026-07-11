@@ -759,6 +759,9 @@ fn interactive() -> std::io::Result<()> {
                 }
                 break;
             }
+            // `$TMOUT` idle timeout — wired in via read_line_timeout in
+            // Batch G2; the plain read_line never returns this.
+            ReadResult::TimedOut => break,
         }
     }
 

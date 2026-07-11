@@ -1203,8 +1203,15 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                 // is an evaluation error (status 2, script continues).
                 "=~" => {
                     let pattern = crate::expand::expand_cond_regex(rhs)?;
-                    let re = rusty_regx::Regex::new_posix(&pattern)
-                        .map_err(|e| format!("invalid regex: {e}"))?;
+                    // `nocasematch` (C120) folds `=~` too — via the engine's
+                    // own REG_ICASE mode, which keeps `[[:upper:]]`/ranges
+                    // and `$BASH_REMATCH`'s original-case capture correct.
+                    let re = if crate::vars::shopt("nocasematch") {
+                        rusty_regx::Regex::new_posix_ci(&pattern)
+                    } else {
+                        rusty_regx::Regex::new_posix(&pattern)
+                    }
+                    .map_err(|e| format!("invalid regex: {e}"))?;
                     match re.captures(&l) {
                         Some(caps) => {
                             let groups: Vec<String> = (0..caps.len())

@@ -3829,3 +3829,30 @@ fn programmable_completion() {
     let (_, code) = rush(r#"compgen -W "a b c" zzz"#);
     assert_eq!(code, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn nocasematch_regex_matching() {
+    // C120 remainder: `=~` folds under nocasematch via the engine's
+    // REG_ICASE mode. Verified against bash 5.2, including the corners.
+    let (out, _) = rush("shopt -s nocasematch; [[ ABC =~ ^abc$ ]] && echo yes || echo no");
+    assert_eq!(out, "yes\n");
+
+    // $BASH_REMATCH keeps the ORIGINAL case (folding is comparison-only).
+    let (out, _) = rush(r#"shopt -s nocasematch; [[ ABC =~ ^(a)(b) ]]; echo "${BASH_REMATCH[1]}${BASH_REMATCH[2]}""#);
+    assert_eq!(out, "AB\n");
+
+    // Named classes keep their literal meaning; ranges fold (REG_ICASE).
+    let (out, _) = rush("shopt -s nocasematch; [[ ABC =~ [[:lower:]]bc ]] && echo yes || echo no");
+    assert_eq!(out, "yes\n");
+    // Ranges fold both cases (REG_ICASE): `xbc` matches `[X-Z]bc`, but
+    // `abc` does not (`a` is in neither `X-Z` nor `x-z`) — matches bash.
+    let (out, _) = rush("shopt -s nocasematch; [[ Xbc =~ [X-Z]bc ]] && echo yes || echo no");
+    assert_eq!(out, "yes\n");
+    let (out, _) = rush("shopt -s nocasematch; [[ abc =~ [X-Z]bc ]] && echo yes || echo no");
+    assert_eq!(out, "no\n");
+
+    // Folding is opt-in.
+    let (out, _) = rush("[[ ABC =~ ^abc$ ]] && echo yes || echo no");
+    assert_eq!(out, "no\n");
+}

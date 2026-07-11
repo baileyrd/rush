@@ -3890,3 +3890,40 @@ fn bind_builtin_registers_without_error() {
     let (_, code) = rush(r#"bind "\C-t: no-such-readline-function""#);
     assert_eq!(code, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn printf_floating_point_and_star() {
+    // Untracked gap: %f/%e/%g float conversions and %*/%.* args.
+    let (out, _) = rush(r#"printf "%f|%.2f|%8.3f|%-8.2f|\n" 3.14159 3.14159 2.5 1.5"#);
+    assert_eq!(out, "3.141590|3.14|   2.500|1.50    |\n");
+    let (out, _) = rush(r#"printf "%e|%E|%g|%G\n" 12345.678 0.00012 0.0001 1234567"#);
+    assert_eq!(out, "1.234568e+04|1.200000E-04|0.0001|1.23457E+06\n");
+    // Hex-int argument to a float conversion, and precision rounding.
+    let (out, _) = rush(r#"printf "%f %.0f\n" 0x10 2.7"#);
+    assert_eq!(out, "16.000000 3\n");
+    // Sign flags on floats; * width/precision from args (negative = left).
+    let (out, _) = rush(r#"printf "%+.2f|% .2f|%*d|%-*d|%.*f\n" 3.1 4.2 5 42 5 42 3 3.14159"#);
+    assert_eq!(out, "+3.10| 4.20|   42|42   |3.142\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn array_element_with_operator() {
+    // Untracked gap: `${arr[i]OP}` (default/pattern/transform on one
+    // element) used to be "bad substitution".
+    let (out, _) = rush(r#"a=(x y); echo "${a[0]:-none}|${a[5]:-def}|${a[0]#x}|${a[1]/y/Y}|${a[0]^^}""#);
+    assert_eq!(out, "x|def||Y|X\n");
+    let (out, _) = rush(r#"declare -A m=([k]=v); echo "${m[k]:-none}|${m[x]:-def}|${m[k]@Q}""#);
+    assert_eq!(out, "v|def|'v'\n");
+    let (out, _) = rush(r#"a=(abc); echo "${a[0]%c}|${a[0]:1}""#);
+    assert_eq!(out, "ab|bc\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn deprecated_bracket_arithmetic() {
+    // Untracked gap: `$[ expr ]`, bash's deprecated arithmetic expansion.
+    let (out, _) = rush("echo $[ 3 + 4 ] $[2*5]; x=10; echo $[x/2]; echo \"$[ 2**8 ]\"");
+    assert_eq!(out, "7 10\n5\n256\n");
+}

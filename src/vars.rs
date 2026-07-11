@@ -589,6 +589,17 @@ pub fn option_flags() -> String {
     flags
 }
 
+thread_local! {
+    static INVOKED_WITH_C: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Recorded for completeness (`rush -c`) — `$-`'s exact `h`/`B`/`c`
+/// letters are a cosmetic gap left for a later pass; the load-bearing
+/// `i` flag is already reported.
+pub fn set_invoked_with_c() {
+    INVOKED_WITH_C.with(|c| c.set(true));
+}
+
 pub fn trace_depth() -> u32 {
     TRACE_DEPTH.with(|d| *d.borrow())
 }

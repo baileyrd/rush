@@ -503,6 +503,7 @@ fn main() -> std::io::Result<()> {
                 for c in flags[1..].chars() {
                     match c {
                         'c' => {
+                            vars::set_invoked_with_c(); // `$-` includes `c` (C131)
                             idx += 1;
                             match args.get(idx) {
                                 Some(cmd) => command = Some(cmd.clone()),

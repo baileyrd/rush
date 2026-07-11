@@ -243,11 +243,28 @@ fn printf_cmd(argv: &[String]) -> i32 {
             match piece {
                 printf::Piece::Literal(s) => out.push_str(s),
                 printf::Piece::Conv(conv) => {
+                    // `%*d` / `%.*f` (C131): width/precision come from
+                    // arguments consumed *before* the value.
+                    let width_arg = if conv.wants_width_star() {
+                        let a = args.get(idx).and_then(|a| a.trim().parse::<i64>().ok());
+                        if args.get(idx).is_some() { idx += 1; }
+                        a
+                    } else {
+                        None
+                    };
+                    let prec_arg = if conv.wants_precision_star() {
+                        let a = args.get(idx).and_then(|a| a.trim().parse::<i64>().ok());
+                        if args.get(idx).is_some() { idx += 1; }
+                        a
+                    } else {
+                        None
+                    };
+                    let resolved = conv.with_stars(width_arg, prec_arg);
                     let arg = args.get(idx);
                     if arg.is_some() {
                         idx += 1;
                     }
-                    let (text, err) = printf::format_conv(conv, arg.map(String::as_str).unwrap_or(""));
+                    let (text, err) = printf::format_conv(&resolved, arg.map(String::as_str).unwrap_or(""));
                     out.push_str(&text);
                     if let Some(e) = err {
                         eprintln!("printf: {e}");
@@ -285,7 +302,7 @@ mod printf {
         Conv(Conv),
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct Conv {
         minus: bool,
         zero: bool,
@@ -293,9 +310,34 @@ mod printf {
         space: bool,
         width: Option<usize>,
         precision: Option<usize>,
+        /// `%*d` / `%.*f`: width/precision taken from an argument (C131).
+        width_star: bool,
+        precision_star: bool,
         spec: char,
         /// `%(fmt)T`'s strftime-style format (C99).
         time_fmt: Option<String>,
+    }
+
+    impl Conv {
+        pub fn wants_width_star(&self) -> bool {
+            self.width_star
+        }
+        pub fn wants_precision_star(&self) -> bool {
+            self.precision_star
+        }
+        /// Bake `%*`/`%.*` argument values into a fixed-width/precision
+        /// copy (C131). A negative star width left-justifies.
+        pub fn with_stars(&self, width: Option<i64>, precision: Option<i64>) -> Conv {
+            let mut c = self.clone();
+            if let Some(w) = width {
+                c.minus = self.minus || w < 0;
+                c.width = Some(w.unsigned_abs() as usize);
+            }
+            if let Some(p) = precision {
+                c.precision = (p >= 0).then_some(p as usize);
+            }
+            c
+        }
     }
 
     /// Parse a format string into literal chunks (with `\`-escapes already
@@ -398,10 +440,20 @@ mod printf {
             chars.next();
         }
 
-        conv.width = take_digits(chars);
+        if chars.peek() == Some(&'*') {
+            chars.next();
+            conv.width_star = true;
+        } else {
+            conv.width = take_digits(chars);
+        }
         if chars.peek() == Some(&'.') {
             chars.next();
-            conv.precision = Some(take_digits(chars).unwrap_or(0));
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                conv.precision_star = true;
+            } else {
+                conv.precision = Some(take_digits(chars).unwrap_or(0));
+            }
         }
 
         // `%(fmt)T` (C99): a strftime-style date conversion whose format
@@ -424,7 +476,7 @@ mod printf {
             return Ok(conv);
         }
         conv.spec = chars.next().ok_or("missing conversion specifier")?;
-        if !"diouxXcsbq".contains(conv.spec) {
+        if !"diouxXcsbqfFeEgGaA".contains(conv.spec) {
             return Err(format!("`%{}': invalid conversion specification", conv.spec));
         }
         Ok(conv)
@@ -565,11 +617,45 @@ mod printf {
             s if s.starts_with('\'') || s.starts_with('"') => {
                 s.chars().nth(1).map(|c| c as i64).unwrap_or(0)
             }
-            s => s.parse().unwrap_or_else(|_| {
-                error = Some(format!("{raw}: invalid number"));
-                0
+            // `0x`/`0` prefixed integers, then a float fallback (bash
+            // truncates `printf %d 3.9` to 3, still warning) (C131).
+            s => parse_int_literal(s).unwrap_or_else(|| {
+                if let Ok(f) = s.parse::<f64>() {
+                    error = Some(format!("{raw}: invalid number"));
+                    f as i64
+                } else {
+                    error = Some(format!("{raw}: invalid number"));
+                    0
+                }
             }),
         };
+        // Floating-point argument for the float conversions (C131).
+        let mut float_error = None;
+        let mut parse_float = |raw: &str| -> f64 {
+            match raw.trim() {
+                "" => 0.0,
+                s if s.starts_with('\'') || s.starts_with('"') => {
+                    s.chars().nth(1).map(|c| c as u32 as f64).unwrap_or(0.0)
+                }
+                s => parse_float_literal(s).unwrap_or_else(|| {
+                    float_error = Some(format!("{raw}: invalid number"));
+                    0.0
+                }),
+            }
+        };
+        if "fFeEgGaA".contains(conv.spec) {
+            let v = parse_float(raw);
+            let mut body = format_float(conv.spec, v, conv.precision);
+            // The `+`/space sign flags apply to a non-negative float too.
+            if v.is_sign_positive() || v == 0.0 {
+                if conv.plus {
+                    body.insert(0, '+');
+                } else if conv.space {
+                    body.insert(0, ' ');
+                }
+            }
+            return (pad(body, conv, true), float_error);
+        }
 
         let (body, is_numeric) = match conv.spec {
             's' => (truncate(raw, conv.precision), false),
@@ -617,6 +703,130 @@ mod printf {
         };
 
         (pad(body, conv, is_numeric), error)
+    }
+
+    /// Parse an integer literal the way `printf` does: `0x`/`0X` hex,
+    /// leading-`0` octal, else decimal. `None` if it isn't a pure integer.
+    fn parse_int_literal(s: &str) -> Option<i64> {
+        let (neg, body) = match s.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, s.strip_prefix('+').unwrap_or(s)),
+        };
+        let mag = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+            i64::from_str_radix(hex, 16).ok()?
+        } else if body.len() > 1 && body.starts_with('0') && body.bytes().all(|b| b.is_ascii_digit()) {
+            i64::from_str_radix(body, 8).ok()?
+        } else {
+            body.parse().ok()?
+        };
+        Some(if neg { -mag } else { mag })
+    }
+
+    /// Parse a float literal, accepting `0x` hex integers too (bash does:
+    /// `printf %f 0x10` → 16.0).
+    fn parse_float_literal(s: &str) -> Option<f64> {
+        if let Some(i) = parse_int_literal(s) {
+            return Some(i as f64);
+        }
+        s.parse::<f64>().ok()
+    }
+
+    /// Render a floating-point conversion (`f/F/e/E/g/G/a/A`, C131) with
+    /// the given precision (default 6, C's rule).
+    fn format_float(spec: char, v: f64, precision: Option<usize>) -> String {
+        let p = precision.unwrap_or(6);
+        match spec {
+            'f' => format!("{v:.p$}"),
+            'F' => format!("{v:.p$}").to_uppercase(),
+            'e' => format_exp(v, p, 'e'),
+            'E' => format_exp(v, p, 'E'),
+            'g' | 'G' => {
+                let s = format_general(v, if precision == Some(0) { 1 } else { p.max(1) });
+                if spec == 'G' { s.to_uppercase() } else { s }
+            }
+            'a' | 'A' => {
+                // Hex float — approximate via Rust's LowerExp on the bits
+                // isn't exact; use a simple mantissa/exponent form good
+                // enough for the common `%a` uses (documented narrowing).
+                let s = format_hex_float(v);
+                if spec == 'A' { s.to_uppercase() } else { s }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// C's `%e`: one digit before the point, `e±NN` (at least two exponent
+    /// digits).
+    fn format_exp(v: f64, precision: usize, e: char) -> String {
+        if v == 0.0 {
+            return format!("{:.*}{e}+00", precision, 0.0);
+        }
+        let neg = v < 0.0;
+        let mut mant = v.abs();
+        let mut exp = 0i32;
+        while mant >= 10.0 {
+            mant /= 10.0;
+            exp += 1;
+        }
+        while mant < 1.0 {
+            mant *= 10.0;
+            exp -= 1;
+        }
+        // Rounding the mantissa can carry into the next power of ten.
+        let rounded = format!("{mant:.precision$}");
+        let (mant_str, exp) = if rounded.starts_with("10") {
+            (format!("{:.precision$}", mant / 10.0), exp + 1)
+        } else {
+            (rounded, exp)
+        };
+        format!("{}{mant_str}{e}{}{:02}", if neg { "-" } else { "" },
+            if exp < 0 { '-' } else { '+' }, exp.abs())
+    }
+
+    /// C's `%g`: `%e` or `%f`, whichever is shorter, trailing zeros
+    /// stripped; `precision` is the number of significant digits.
+    fn format_general(v: f64, sig: usize) -> String {
+        if v == 0.0 {
+            return "0".to_string();
+        }
+        let exp = v.abs().log10().floor() as i32;
+        let s = if exp < -4 || exp >= sig as i32 {
+            let e = format_exp(v, sig - 1, 'e');
+            // Strip trailing zeros in the mantissa.
+            strip_g_zeros(&e)
+        } else {
+            let prec = (sig as i32 - 1 - exp).max(0) as usize;
+            strip_g_zeros(&format!("{v:.prec$}"))
+        };
+        s
+    }
+
+    fn strip_g_zeros(s: &str) -> String {
+        if let Some((mant, exp)) = s.split_once(['e', 'E']) {
+            let m = mant.trim_end_matches('0').trim_end_matches('.');
+            let e = if s.contains('E') { 'E' } else { 'e' };
+            format!("{m}{e}{exp}")
+        } else if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn format_hex_float(v: f64) -> String {
+        if v == 0.0 {
+            return "0x0p+0".to_string();
+        }
+        let bits = v.to_bits();
+        let sign = if bits >> 63 == 1 { "-" } else { "" };
+        let exp = ((bits >> 52) & 0x7ff) as i64 - 1023;
+        let mantissa = bits & 0xfffffffffffff;
+        if mantissa == 0 {
+            format!("{sign}0x1p{}{}", if exp < 0 { '-' } else { '+' }, exp.abs())
+        } else {
+            let hex = format!("{mantissa:013x}").trim_end_matches('0').to_string();
+            format!("{sign}0x1.{hex}p{}{}", if exp < 0 { '-' } else { '+' }, exp.abs())
+        }
     }
 
     fn truncate(s: &str, precision: Option<usize>) -> String {

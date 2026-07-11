@@ -342,9 +342,31 @@ pub fn set_shopt(name: &str, on: bool) -> bool {
 /// `SECONDS` counts from shell start or the last assignment;
 /// `EPOCHSECONDS`/`EPOCHREALTIME` come straight from the system clock;
 /// `LINENO` is the executing pipeline's source line.
+thread_local! {
+    // `$$` is the *original* shell's pid — it must NOT change inside a
+    // forked subshell (C132), unlike `$BASHPID`. Captured at startup.
+    static SHELL_PID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub fn set_shell_pid() {
+    SHELL_PID.with(|p| p.set(std::process::id()));
+}
+
+/// `$$` — the original shell pid, captured at startup so a forked
+/// subshell still reports the parent's (C132). Falls back to the live
+/// pid if never seeded (e.g. a unit test).
+pub fn shell_pid() -> u32 {
+    let cached = SHELL_PID.with(std::cell::Cell::get);
+    if cached == 0 { std::process::id() } else { cached }
+}
+
 fn dynamic_var(name: &str) -> Option<String> {
     match name {
         "RANDOM" => Some(next_random().to_string()),
+        // `$BASHPID` (C132): the *current* process pid — unlike `$$` it
+        // changes inside a forked subshell (rush forks for `( )`).
+        #[cfg(unix)]
+        "BASHPID" => Some(unsafe { crate::sys::getpid() }.to_string()),
         // Live option reflection (C106's remainder): the currently-on
         // `set -o` names and `shopt` names, colon-joined and sorted.
         "SHELLOPTS" => {

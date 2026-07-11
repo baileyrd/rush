@@ -3927,3 +3927,52 @@ fn deprecated_bracket_arithmetic() {
     let (out, _) = rush("echo $[ 3 + 4 ] $[2*5]; x=10; echo $[x/2]; echo \"$[ 2**8 ]\"");
     assert_eq!(out, "7 10\n5\n256\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn arithmetic_overflow_wraps_not_panics() {
+    // C132 (severe): overflow used to panic and crash the shell (rc 101).
+    // Now wraps 2's-complement like bash/C.
+    let (out, code) = rush("echo $((9223372036854775807+1)) $((9223372036854775807*2)) $((1<<64))");
+    assert_eq!(out, "-9223372036854775808 -2 1\n");
+    assert_eq!(code, 0);
+
+    // Division/modulo by zero: bash's message wording, still an error.
+    let (err, code) = rush_stderr("echo $((5%0))");
+    assert!(err.contains("5%0: division by 0"), "got: {err:?}");
+    assert_eq!(code, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn arithmetic_comma_operator() {
+    // C132: the comma operator was unsupported everywhere ($(( )), let,
+    // for-headers).
+    let (out, _) = rush("echo $((3,4,5)); echo $((x=5, x+=3, x)); let \"a=1, b=2\"; echo $a $b");
+    assert_eq!(out, "5\n8\n1 2\n");
+    let (out, _) = rush("for ((i=0,j=10; i<3; i++,j--)); do echo \"$i $j\"; done");
+    assert_eq!(out, "0 10\n1 9\n2 8\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn bashpid_and_dollar_stability() {
+    // C132: $BASHPID was unset; $$ wrongly changed inside a subshell.
+    // $$ stays the parent's pid, $BASHPID is the live (forked) pid.
+    let (out, _) = rush(r#"echo "$(( BASHPID > 0 ))"; ( echo "$(( $$ == PARENT ))" ) 2>/dev/null; outer=$$; ( [ "$$" = "$outer" ] && echo same; [ "$BASHPID" != "$outer" ] && echo differs )"#);
+    assert!(out.contains("same\n") && out.contains("differs\n"), "got: {out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn declare_redeclare_preserves_and_setu_arrays() {
+    // C132: bare re-declare wiped an existing array; set -u ignored array
+    // element access.
+    let (out, _) = rush("declare -a x=(a b); declare -a x; echo \"[${x[@]}]\"; declare -A m=([k]=v); declare -A m; echo \"[${m[k]}]\"");
+    assert_eq!(out, "[a b]\n[v]\n");
+
+    let (_, code) = rush("set -u; a=(x y); echo \"${a[9]}\"; echo reached");
+    assert_eq!(code, 1);
+    let (out, _) = rush("set -u; declare -A m=([k]=v); echo \"${m[k]}\"; echo ok");
+    assert_eq!(out, "v\nok\n");
+}

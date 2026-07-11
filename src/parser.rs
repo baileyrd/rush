@@ -98,6 +98,8 @@ pub enum RawRedirect {
     Both { file: Word, append: bool },
     /// `fd>&target` — `fd` duplicates `target` (e.g. `2>&1`).
     Dup { fd: u32, target: u32 },
+    /// `fd>&n-` — dup then close n (C111).
+    Move { fd: u32, target: u32 },
     /// `fd>&$word` / `fd<&"${arr[N]}"` — the target fd number comes from
     /// a word, resolved at expansion time (C66).
     DupWord { fd: u32, word: Word },
@@ -576,6 +578,7 @@ impl Parser {
             RedirOp::Both => RawRedirect::Both { file: self.expect_word("&>")?, append: false },
             RedirOp::BothAppend => RawRedirect::Both { file: self.expect_word("&>>")?, append: true },
             RedirOp::Dup(target) => RawRedirect::Dup { fd: r.fd, target },
+            RedirOp::Move(target) => RawRedirect::Move { fd: r.fd, target },
             RedirOp::DupWord => RawRedirect::DupWord { fd: r.fd, word: self.expect_word(">&")? },
             RedirOp::Heredoc { body, expand } => RawRedirect::Heredoc { body, expand },
             RedirOp::HereString => RawRedirect::HereString(self.expect_word("<<<")?),

@@ -309,15 +309,28 @@ pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Op
             RawRedirect::Dup { fd, target } => {
                 redirects.push(Redirect::Dup { fd: *fd, target: *target })
             }
+            RawRedirect::Move { fd, target } => {
+                redirects.push(Redirect::Move { fd: *fd, target: *target })
+            }
             // `fd>&$word` (C66): the word must expand to an fd number —
             // the coproc idiom `<&"${COPROC[0]}"`.
             RawRedirect::DupWord { fd, word } => {
                 let text = expand_word(word)?;
-                let target = text
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|_| format!("{text}: bad file descriptor"))?;
-                redirects.push(Redirect::Dup { fd: *fd, target });
+                let text = text.trim();
+                // `fd>&-` closes; `fd>&N-` moves (dup + close source) —
+                // C111. A plain number is the ordinary dup.
+                if text == "-" {
+                    redirects.push(Redirect::Close { fd: *fd });
+                } else if let Some(num) = text.strip_suffix('-')
+                    && let Ok(target) = num.parse::<u32>()
+                {
+                    redirects.push(Redirect::Move { fd: *fd, target });
+                } else {
+                    let target = text
+                        .parse::<u32>()
+                        .map_err(|_| format!("{text}: bad file descriptor"))?;
+                    redirects.push(Redirect::Dup { fd: *fd, target });
+                }
             }
             // Its `$`-expansions run unless the delimiter was quoted.
             RawRedirect::Heredoc { body, expand } => {
@@ -1449,21 +1462,13 @@ fn resolve_subscript_text(expr: &str) -> Result<String, String> {
 }
 
 /// Evaluate an already-`$`-expanded subscript as an arithmetic expression
-/// — `arith::eval` resolves a *bare* name directly too, so `${arr[i+1]}`
-/// needs no `$` either, verified directly against real bash. `None` for a
-/// negative result or a genuine arithmetic error — both collapse to the
-/// same "nothing there" outcome an ordinary out-of-range index already has.
-/// Callers that know which array the subscript belongs to should use
-/// [`eval_index`] instead, which resolves negative indices bash-style.
-pub(crate) fn eval_subscript(expr: &str) -> Option<usize> {
-    usize::try_from(crate::arith::eval(expr).ok()?).ok()
-}
-
-/// As [`eval_subscript`], but resolves a negative result against `name`'s
-/// own indices, bash-style (C85): counting back from the maximum assigned
-/// index plus one, so `${a[-1]}` is the last element of `a=(x y z)` and
-/// `a[-1]=Q` overwrites it. Still-negative after that (out of range) is
-/// `None`, same as any other "nothing there".
+/// against `name`'s own indices — `arith::eval` resolves a *bare* name
+/// directly too, so `${arr[i+1]}` needs no `$` either, verified directly
+/// against real bash. A negative result resolves bash-style (C85):
+/// counting back from the maximum assigned index plus one, so `${a[-1]}`
+/// is the last element of `a=(x y z)` and `a[-1]=Q` overwrites it.
+/// Still-negative after that (out of range) is `None`, the same "nothing
+/// there" outcome an ordinary out-of-range index already has.
 pub(crate) fn eval_index(name: &str, expr: &str) -> Option<usize> {
     let v = crate::arith::eval(expr).ok()?;
     if v >= 0 {

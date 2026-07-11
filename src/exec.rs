@@ -54,6 +54,10 @@ pub enum Redirect {
     Both { file: String, append: bool },
     /// `fd>&target` (e.g. `2>&1`).
     Dup { fd: u32, target: u32 },
+    /// `fd>&-` / `fd<&-` — close the fd (C111).
+    Close { fd: u32 },
+    /// `fd>&target-` — dup then close `target` ("move", C111).
+    Move { fd: u32, target: u32 },
 }
 
 pub use crate::parser::RedirMode;
@@ -1295,6 +1299,16 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
 /// (`local arr=(a b c)`, `declare -A arr=([k]=v ...)`) can't survive being
 /// flattened into `Vec<String>` argv at all (see `Command::local_decls`'s
 /// own doc comment and `expand::expand_simple`, which builds it).
+/// Run a builtin or function from a forked pipeline-stage child (C82):
+/// functions shadow builtins, same precedence as the foreground path.
+/// The caller has already wired fds and applied redirects.
+pub(crate) fn run_stage_command_in_child(cmd: &Command) -> i32 {
+    if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
+        return call_function(&cmd.argv).unwrap_or(1);
+    }
+    dispatch_builtin(cmd)
+}
+
 fn dispatch_builtin(cmd: &Command) -> i32 {
     match cmd.argv.first().map(String::as_str) {
         Some("local") => builtins::local_from_decls(&cmd.local_decls, cmd.decl_attrs),
@@ -1328,10 +1342,10 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
 
     let redirect_to = |guard: &mut StdioGuard, target: i32, source: File| -> Result<(), String> {
         if !guard.saved.iter().any(|(fd, _)| *fd == target) {
+            // `dup` fails with EBADF when `target` simply isn't open yet —
+            // normal for fd 3+ (`exec 7>file`, C111). Record `-1` so the
+            // restore closes it again instead of erroring here.
             let saved = unsafe { crate::sys::dup(target) };
-            if saved == -1 {
-                return Err(crate::sys::last_os_error().to_string());
-            }
             guard.saved.push((target, saved));
         }
         if unsafe { crate::sys::dup2(source.as_raw_fd(), target) } == -1 {
@@ -1380,14 +1394,40 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
                 let dst = *fd as i32;
                 let src = *target as i32;
                 if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
+                    // As in `redirect_to`: -1 means "wasn't open" (C111).
                     let saved = unsafe { crate::sys::dup(dst) };
-                    if saved == -1 {
-                        return Err(crate::sys::last_os_error().to_string());
-                    }
                     guard.saved.push((dst, saved));
                 }
                 if unsafe { crate::sys::dup2(src, dst) } == -1 {
                     return Err(crate::sys::last_os_error().to_string());
+                }
+            }
+            // `fd>&-`: close, tracked so a scoped call restores it (C111).
+            Redirect::Close { fd } => {
+                let dst = *fd as i32;
+                if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
+                    let saved = unsafe { crate::sys::dup(dst) };
+                    guard.saved.push((dst, saved));
+                }
+                unsafe {
+                    crate::sys::close(dst);
+                }
+            }
+            // `fd>&target-`: dup then close the source — both tracked (C111).
+            Redirect::Move { fd, target } => {
+                let dst = *fd as i32;
+                let src = *target as i32;
+                for tracked in [dst, src] {
+                    if !guard.saved.iter().any(|(fd, _)| *fd == tracked) {
+                        let saved = unsafe { crate::sys::dup(tracked) };
+                        guard.saved.push((tracked, saved));
+                    }
+                }
+                if unsafe { crate::sys::dup2(src, dst) } == -1 {
+                    return Err(crate::sys::last_os_error().to_string());
+                }
+                unsafe {
+                    crate::sys::close(src);
                 }
             }
         }
@@ -1464,8 +1504,10 @@ impl StdioGuard {
     /// redirects are meant to outlive the call.
     fn disarm(&mut self) {
         for (_, saved) in self.saved.drain(..) {
-            unsafe {
-                crate::sys::close(saved);
+            if saved != -1 {
+                unsafe {
+                    crate::sys::close(saved);
+                }
             }
         }
     }
@@ -1476,8 +1518,14 @@ impl Drop for StdioGuard {
     fn drop(&mut self) {
         for (fd, saved) in self.saved.drain(..) {
             unsafe {
-                crate::sys::dup2(saved, fd);
-                crate::sys::close(saved);
+                if saved == -1 {
+                    // The fd wasn't open before this redirect (C111) —
+                    // restoring means closing it again.
+                    crate::sys::close(fd);
+                } else {
+                    crate::sys::dup2(saved, fd);
+                    crate::sys::close(saved);
+                }
             }
         }
     }
@@ -2077,6 +2125,13 @@ pub(crate) fn build_stage(
                     extra_fds.push(FdAction::Dup { source: *target, dest: *fd });
                 }
             }
+            // For an external child, close/move are pre_exec fd surgery
+            // (C111) — same sequencing rules as the extra-fd dups above.
+            Redirect::Close { fd } => extra_fds.push(FdAction::Close(*fd)),
+            Redirect::Move { fd, target } => {
+                extra_fds.push(FdAction::Dup { source: *target, dest: *fd });
+                extra_fds.push(FdAction::Close(*target));
+            }
         }
     }
 
@@ -2122,6 +2177,10 @@ pub(crate) fn build_stage(
                     let (source, dest) = match action {
                         FdAction::Open(f, dest) => (f.as_raw_fd(), *dest),
                         FdAction::Dup { source, dest } => (*source as i32, *dest),
+                        FdAction::Close(fd) => {
+                            crate::sys::close(*fd as i32); // C111
+                            continue;
+                        }
                     };
                     if crate::sys::dup2(source, dest as i32) == -1 {
                         return Err(crate::sys::last_os_error());
@@ -2150,6 +2209,8 @@ enum FdAction {
     /// Duplicate whatever `source` already resolves to (in the child, at
     /// this point in the sequence) onto `dest`.
     Dup { source: u32, dest: u32 },
+    /// Close the fd outright (`fd>&-`, C111).
+    Close(u32),
 }
 
 /// Where one descriptor is routed. Files are kept as handles so `2>&1` can

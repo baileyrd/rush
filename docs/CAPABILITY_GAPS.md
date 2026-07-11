@@ -3261,7 +3261,7 @@ inner `false` (no output, rc 1); bash prints `in`, rc 0. The single most
 common errexit interop pattern aborts the whole script. (Plain
 `if false` already works.) **Effort: M**
 
-### C82 — Builtins as pipeline stages are exec'd as external commands
+### C82 — Builtins as pipeline stages are exec'd as external commands ✅ done
 `echo hi | read x`, `readonly -p | grep RV`, `alias | cat`, `jobs -r |
 grep sleep` → all fail with `No such file or directory (os error 2)`;
 each works in rush *without* the pipe. The pipeline stage builder in
@@ -3449,7 +3449,7 @@ leaves the var unset; `jobs -r` ("any jobs still running?") is an
 invalid option. Both are small option-parsing additions over the
 existing C13/C64 machinery. **Effort: S**
 
-### C111 — `exec` persistent redirections: fd > 3 fails; dup, close, and move all fail
+### C111 — `exec` persistent redirections: fd > 3 fails; dup, close, and move all fail ✅ done
 `exec 7>/tmp/x`, `exec 4>&1`, `exec 3>&-`, `exec 1>&3-` → all `Bad file
 descriptor` (rc 1) — and the error aborts the rest of the script. Blocks
 `exec 5>>log` logging setups, the ubiquitous `exec 3>&1 … 3>&-`

@@ -58,6 +58,10 @@ pub enum Redirect {
     Close { fd: u32 },
     /// `fd>&target-` — dup then close `target` ("move", C111).
     Move { fd: u32, target: u32 },
+    /// `{name}>file` (C115): perform `inner` on a freshly-allocated fd
+    /// (>= 10, via `F_DUPFD`) and store that fd's number in `name`. The
+    /// allocated fd persists past the command, bash's rule.
+    VarFd { name: String, inner: Box<Redirect> },
 }
 
 pub use crate::parser::RedirMode;
@@ -1577,6 +1581,14 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
                     crate::sys::close(dst);
                 }
             }
+            // `{name}>…` (C115): open/dup per `inner`, move the result
+            // to a fresh fd >= 10 (`F_DUPFD` — which also clears CLOEXEC,
+            // so children inherit it), and assign the variable. Not
+            // tracked by the guard: varfds persist, bash's rule.
+            Redirect::VarFd { name, inner } => {
+                let allocated = allocate_varfd(inner)?;
+                crate::vars::set(name, &allocated.to_string());
+            }
             // `fd>&target-`: dup then close the source — both tracked (C111).
             Redirect::Move { fd, target } => {
                 let dst = *fd as i32;
@@ -2289,6 +2301,13 @@ pub(crate) fn build_stage(
                     extra_fds.push(FdAction::Dup { source: *target, dest: *fd });
                 }
             }
+            // `{name}>…` (C115) allocates in the *parent* (the variable
+            // must persist there); the fd has no CLOEXEC, so the child
+            // simply inherits it.
+            Redirect::VarFd { name, inner } => {
+                let allocated = allocate_varfd(inner)?;
+                crate::vars::set(name, &allocated.to_string());
+            }
             // For an external child, close/move are pre_exec fd surgery
             // (C111) — same sequencing rules as the extra-fd dups above.
             Redirect::Close { fd } => extra_fds.push(FdAction::Close(*fd)),
@@ -2358,6 +2377,38 @@ pub(crate) fn build_stage(
     let _ = extra_fds; // No raw `dup2` equivalent off Unix — same platform limit `redirect_stdio` documents.
 
     Ok((command, real_pipe_read))
+}
+
+/// Allocate the fd for a `{name}>…` redirect (C115): open the file (or
+/// dup the target) and move the result to the first free fd >= 10 via
+/// `F_DUPFD`, returning the allocated number.
+#[cfg(unix)]
+fn allocate_varfd(inner: &Redirect) -> Result<i32, String> {
+    use std::os::unix::io::AsRawFd;
+    const F_DUPFD: i32 = 0;
+    let (src, close_src) = match inner {
+        Redirect::File { file, mode, .. } => {
+            let f = match mode {
+                RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                _ => open_write(file, *mode)?,
+            };
+            let fd = f.as_raw_fd();
+            std::mem::forget(f); // ownership passes to the fd table
+            (fd, true)
+        }
+        Redirect::Dup { target, .. } => (*target as i32, false),
+        _ => return Err("unsupported {varname} redirection form".to_string()),
+    };
+    let allocated = unsafe { crate::sys::fcntl(src, F_DUPFD, 10) };
+    if close_src {
+        unsafe {
+            crate::sys::close(src);
+        }
+    }
+    if allocated == -1 {
+        return Err(crate::sys::last_os_error().to_string());
+    }
+    Ok(allocated)
 }
 
 /// One `pre_exec`-time step for setting up an fd other than 0/1/2 in a

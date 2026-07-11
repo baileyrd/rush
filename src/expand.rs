@@ -312,6 +312,17 @@ pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Op
             RawRedirect::Move { fd, target } => {
                 redirects.push(Redirect::Move { fd: *fd, target: *target })
             }
+            // `{name}>…` (C115): expand the wrapped redirect, then tag it
+            // with the variable that receives the allocated fd number.
+            RawRedirect::VarFd { name, inner } => {
+                let (mut inner_redirects, _) = expand_redirects(std::slice::from_ref(inner))?;
+                if let Some(inner_redirect) = inner_redirects.pop() {
+                    redirects.push(Redirect::VarFd {
+                        name: name.clone(),
+                        inner: Box::new(inner_redirect),
+                    });
+                }
+            }
             // `fd>&$word` (C66): the word must expand to an fd number —
             // the coproc idiom `<&"${COPROC[0]}"`.
             RawRedirect::DupWord { fd, word } => {

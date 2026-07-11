@@ -52,6 +52,11 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "unabbr" => Some(unabbr_cmd(argv)),
         "let" => Some(let_cmd(argv)),
         "history" => Some(history_cmd(argv)),
+        "times" => Some(times_cmd()),
+        "help" => Some(help_cmd(argv)),
+        "caller" => Some(caller_cmd()),
+        "enable" => Some(enable_cmd(argv)),
+        "suspend" => Some(suspend_cmd()),
         // `builtin name [args...]` (C92): run the builtin directly, so a
         // wrapper function can call the thing it shadows without recursing.
         "builtin" => Some(match argv.get(1) {
@@ -73,14 +78,14 @@ pub const NAMES: &[&str] = &[
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
-    "readonly", "let", "builtin", "history",
+    "readonly", "let", "builtin", "history", "times", "help", "caller", "enable", "suspend",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
 /// redirects for a builtin *before* running it, without a speculative,
 /// side-effect-free call to `try_run` itself.
 pub fn is_builtin(name: &str) -> bool {
-    NAMES.contains(&name) || other_is_builtin(name)
+    (NAMES.contains(&name) || other_is_builtin(name)) && !builtin_disabled(name)
 }
 
 /// Every builtin name, for tab completion in command position.
@@ -2428,6 +2433,129 @@ pub fn history_entries() -> Vec<String> {
 /// Take (and clear) the "editor must rebuild its history" flag.
 pub fn history_reset_pending() -> bool {
     HISTORY_RESET.with(|f| f.replace(false))
+}
+
+/// `times` (C94): the shell's and its children's CPU times, in bash's
+/// `XmY.YYYs` pair-per-line format — from the kernel's per-process
+/// accounting (Linux; zeros elsewhere, same narrowing as `time`).
+fn times_cmd() -> i32 {
+    fn fmt(ticks: f64) -> String {
+        let secs = ticks / 100.0; // Linux USER_HZ
+        format!("{}m{:.3}s", (secs / 60.0) as u64, secs % 60.0)
+    }
+    let mut vals = [0.0f64; 4];
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat")
+        && let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r)
+    {
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        for (i, idx) in [11usize, 12, 13, 14].iter().enumerate() {
+            vals[i] = fields.get(*idx).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        }
+    }
+    println!("{} {}", fmt(vals[0]), fmt(vals[1]));
+    println!("{} {}", fmt(vals[2]), fmt(vals[3]));
+    0
+}
+
+/// `help [name...]` (C94): a minimal builtin reference — the list of
+/// builtins, or per-name one-liners; unknown names are status 1 (the
+/// `if help foo` feature-detection idiom needs the status more than the
+/// text).
+fn help_cmd(argv: &[String]) -> i32 {
+    if argv.len() == 1 {
+        println!("rush {}: builtin commands", env!("CARGO_PKG_VERSION"));
+        let mut names: Vec<&str> = all_names();
+        names.sort_unstable();
+        for chunk in names.chunks(6) {
+            println!("  {}", chunk.join("  "));
+        }
+        return 0;
+    }
+    let mut status = 0;
+    for name in &argv[1..] {
+        if is_builtin(name) {
+            println!("{name}: shell builtin");
+        } else {
+            eprintln!("help: no help topics match `{name}'");
+            status = 1;
+        }
+    }
+    status
+}
+
+/// `caller` (C94): the source line/file of the current call context —
+/// status 1 at top level, where there is no caller.
+fn caller_cmd() -> i32 {
+    if crate::vars::function_depth() == 0 && crate::vars::sourcing_depth() == 0 {
+        return 1;
+    }
+    let line = crate::vars::get("LINENO").unwrap_or_else(|| "0".to_string());
+    let source = crate::vars::array_get("BASH_SOURCE", 0).unwrap_or_else(|| "NULL".to_string());
+    println!("{line} {source}");
+    0
+}
+
+thread_local! {
+    // Builtins turned off with `enable -n` (C94) — `try_run` skips them
+    // so the on-disk command runs instead.
+    static DISABLED_BUILTINS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+pub fn builtin_disabled(name: &str) -> bool {
+    DISABLED_BUILTINS.with(|d| d.borrow().contains(name))
+}
+
+/// `enable [-n] [name...]` (C94): disable (`-n`) or re-enable builtins;
+/// bare `enable`/`enable -a` lists them re-runnably.
+fn enable_cmd(argv: &[String]) -> i32 {
+    let (disable, names) = match argv.get(1).map(String::as_str) {
+        Some("-n") => (true, &argv[2..]),
+        Some("-a") | None => {
+            let mut all: Vec<&str> = all_names();
+            all.sort_unstable();
+            for name in all {
+                if builtin_disabled(name) {
+                    println!("enable -n {name}");
+                } else {
+                    println!("enable {name}");
+                }
+            }
+            return 0;
+        }
+        _ => (false, &argv[1..]),
+    };
+    let mut status = 0;
+    for name in names {
+        if !NAMES.contains(&name.as_str()) && !other_is_builtin(name) {
+            eprintln!("enable: {name}: not a shell builtin");
+            status = 1;
+            continue;
+        }
+        DISABLED_BUILTINS.with(|d| {
+            if disable {
+                d.borrow_mut().insert(name.clone());
+            } else {
+                d.borrow_mut().remove(name.as_str());
+            }
+        });
+    }
+    status
+}
+
+/// `suspend` (C94): stop the shell with SIGSTOP — interactive only
+/// (a non-interactive shell has no job-control parent to resume it).
+fn suspend_cmd() -> i32 {
+    if !crate::vars::interactive() {
+        eprintln!("suspend: cannot suspend a non-interactive shell");
+        return 1;
+    }
+    #[cfg(unix)]
+    unsafe {
+        crate::sys::kill(crate::sys::getpid(), crate::sys::SIGSTOP);
+    }
+    0
 }
 
 /// Define functions exported by a parent shell (C98): every environment

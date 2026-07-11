@@ -382,6 +382,39 @@ fn assignment_split(word: &Word) -> Option<(String, RawAssign)> {
     // (`[`/`]` aren't name characters).
     if let Some(bracket) = text.find('[') {
         let name = &text[..bracket];
+        // A quoted key (`a["x y"]=1`, `a[$'k']=v` — C84): the `[` and the
+        // `]=` land in *different* word parts, with the key's quoted text
+        // in between. Stitch the subscript across parts (quoted/literal
+        // text joins verbatim) up to the part whose unquoted text carries
+        // the closing `]=`/`]+=`.
+        if is_valid_name(name) && !text[bracket..].contains(']') {
+            let mut subscript = text[bracket + 1..].to_string();
+            for (i, part) in word.iter().enumerate().skip(1) {
+                match part {
+                    WordPart::Quoted(s) | WordPart::Literal(s) => subscript.push_str(s),
+                    WordPart::Unquoted(s) => {
+                        let close = s.find(']')?;
+                        subscript.push_str(&s[..close]);
+                        let after = &s[close + 1..];
+                        let (append, after_op) = if let Some(rest) = after.strip_prefix("+=") {
+                            (true, rest)
+                        } else if let Some(rest) = after.strip_prefix('=') {
+                            (false, rest)
+                        } else {
+                            return None;
+                        };
+                        let mut value: Word = vec![WordPart::Unquoted(after_op.to_string())];
+                        value.extend(word[i + 1..].iter().cloned());
+                        return Some((
+                            name.to_string(),
+                            RawAssign::Index(subscript, append, value),
+                        ));
+                    }
+                    WordPart::ArrayLiteral(_) => return None,
+                }
+            }
+            return None;
+        }
         if is_valid_name(name)
             && let Some(close) = text[bracket..].find(']').map(|i| i + bracket)
         {
@@ -562,7 +595,19 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for field in fields {
         if field.globbable && !crate::vars::noglob() {
-            let matches = crate::glob::glob(&field.pattern);
+            let mut matches = crate::glob::glob(&field.pattern);
+            // `$GLOBIGNORE` (C108's remainder): drop matches that match
+            // any of its colon-separated patterns; a set (even empty-
+            // pattern) GLOBIGNORE also never yields `.`/`..`, like bash.
+            if let Some(ignore) = crate::vars::get("GLOBIGNORE").filter(|g| !g.is_empty()) {
+                matches.retain(|m| {
+                    let base = m.rsplit('/').next().unwrap_or(m);
+                    base != "." && base != ".."
+                        && !ignore.split(':').filter(|p| !p.is_empty()).any(|p| {
+                            crate::glob::match_component(p, m)
+                        })
+                });
+            }
             if !matches.is_empty() {
                 out.extend(matches);
                 continue;
@@ -2379,6 +2424,8 @@ fn string_transform(value: &str, rest: &str) -> Result<String, String> {
         let pattern = expand_dollars(pat_src)?;
         let replacement = expand_dollars(repl_src)?;
         return Ok(replace_pattern(value, &pattern, &replacement, mode));
+        // (`&` in the replacement is resolved inside `replace_pattern`,
+        // gated on the `patsub_replacement` shopt — bash 5.2.)
     }
     // Case conversion: `^`/`^^` upper, `,`/`,,` lower; the doubled form
     // converts every character, the single form just the first. An
@@ -2439,12 +2486,35 @@ fn replace_pattern(value: &str, pattern: &str, replacement: &str, mode: char) ->
         let s: String = chars[from..to].iter().collect();
         crate::glob::match_component(pattern, &s)
     };
+    // `patsub_replacement` (bash 5.2, on by default): an unescaped `&`
+    // in the replacement stands for the matched text; `\&` is a
+    // literal ampersand.
+    let expand_amp = crate::vars::shopt("patsub_replacement") && replacement.contains('&');
+    let render = |matched: &str| -> String {
+        if !expand_amp {
+            return replacement.to_string();
+        }
+        let mut out = String::new();
+        let mut rc = replacement.chars().peekable();
+        while let Some(c) = rc.next() {
+            match c {
+                '\\' if rc.peek() == Some(&'&') => {
+                    rc.next();
+                    out.push('&');
+                }
+                '&' => out.push_str(matched),
+                _ => out.push(c),
+            }
+        }
+        out
+    };
     match mode {
         'P' => {
             for j in (0..=n).rev() {
                 if matches_range(0, j) {
+                    let matched: String = chars[..j].iter().collect();
                     let rest: String = chars[j..].iter().collect();
-                    return format!("{replacement}{rest}");
+                    return format!("{}{rest}", render(&matched));
                 }
             }
             value.to_string()
@@ -2453,7 +2523,8 @@ fn replace_pattern(value: &str, pattern: &str, replacement: &str, mode: char) ->
             for i in 0..=n {
                 if matches_range(i, n) {
                     let head: String = chars[..i].iter().collect();
-                    return format!("{head}{replacement}");
+                    let matched: String = chars[i..].iter().collect();
+                    return format!("{head}{}", render(&matched));
                 }
             }
             value.to_string()
@@ -2468,7 +2539,8 @@ fn replace_pattern(value: &str, pattern: &str, replacement: &str, mode: char) ->
                     .flatten();
                 match hit {
                     Some(j) => {
-                        out.push_str(replacement);
+                        let matched: String = chars[i..j].iter().collect();
+                        out.push_str(&render(&matched));
                         replaced = true;
                         if j == i {
                             out.push(chars[i]);
@@ -2486,7 +2558,7 @@ fn replace_pattern(value: &str, pattern: &str, replacement: &str, mode: char) ->
             // A pattern that only matches the empty string at the very
             // end (or an empty value with a match-empty pattern).
             if n == 0 && (!replaced || mode == 'A') && matches_range(0, 0) {
-                out.push_str(replacement);
+                out.push_str(&render(""));
             }
             out
         }

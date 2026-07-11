@@ -3287,7 +3287,7 @@ degrades more gracefully. Needs a call-depth counter in `func.rs`, a
 `FUNCNEST` check, and a hard internal cap below the native stack limit.
 **Effort: M**
 
-### C84 — Assoc-array assignment with a quoted key isn't parsed as an assignment
+### C84 — Assoc-array assignment with a quoted key isn't parsed as an assignment ✅ done
 `declare -A a; a["x y"]=1` → rush: `a[x y]=1: command not found`; bash
 assigns. Any assoc key containing spaces is unusable. **Effort: M**
 
@@ -3343,7 +3343,7 @@ to load. rush has a real completion engine (`completion.rs`, C34) but no
 programmable interface (`COMP_WORDS`/`COMP_CWORD`/`COMPREPLY` protocol).
 **Effort: L**
 
-### C94 — `times`, `help`, `caller`, `enable`, `suspend` all missing
+### C94 — `times`, `help`, `caller`, `enable`, `suspend` all missing ✅ done
 Each returns 127 where bash returns a proper result/status — and 127
 breaks feature-detection (`if help foo >/dev/null …`). **Effort: S each
 (help M)**
@@ -3420,7 +3420,7 @@ restricted shells, and `curl | rush -s -- args` pipelines. **Effort: L**
 `BASH_ENV=/tmp/e rush -c …` never sources the file; CI/wrapper-injected
 setup silently vanishes. **Effort: S**
 
-### C106 — Standard shell variables not seeded; `UID` writable; `SHLVL` not incremented ✅ done (RUSH_VERSION instead of BASH_VERSION — deliberate; SHELLOPTS/BASHOPTS reflection still open)
+### C106 — Standard shell variables not seeded; `UID` writable; `SHLVL` not incremented ✅ done (RUSH_VERSION instead of BASH_VERSION — deliberate; SHELLOPTS/BASHOPTS now live)
 `UID`, `EUID`, `HOSTNAME`, `OSTYPE`, `HOSTTYPE`, `MACHTYPE`,
 `BASH_VERSION`/`BASH_VERSINFO` analogs, `SHELLOPTS`/`BASHOPTS` are all
 unset; `UID=5` succeeds silently (bash: readonly error); inherited
@@ -3436,7 +3436,7 @@ posix/errtrace/functrace` all print `set: -X: not supported`. `set -a`
 `set -euEo pipefail` preambles fail outright. **Effort: M–L** (some can
 be accepted as no-ops initially)
 
-### C108 — `shopt` table is glob-only (5 options) ✅ table + autocd/nocasematch/xpg_echo wired; rest accepted-inert; GLOBIGNORE/patsub_replacement still open
+### C108 — `shopt` table is glob-only (5 options) ✅ table + autocd/nocasematch/xpg_echo wired; rest accepted-inert; GLOBIGNORE and patsub_replacement now done too
 Missing everything else: `lastpipe`, `inherit_errexit`, `xpg_echo`,
 `patsub_replacement`, `login_shell`, `huponexit`, `execfail`, `cmdhist`,
 `histappend`, `checkwinsize`, `sourcepath`, `extdebug`, `autocd`,

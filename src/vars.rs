@@ -330,6 +330,44 @@ pub fn set_shopt(name: &str, on: bool) -> bool {
 fn dynamic_var(name: &str) -> Option<String> {
     match name {
         "RANDOM" => Some(next_random().to_string()),
+        // Live option reflection (C106's remainder): the currently-on
+        // `set -o` names and `shopt` names, colon-joined and sorted.
+        "SHELLOPTS" => {
+            let mut on: Vec<&str> = [
+                // Always-on in rush (and default-on in bash): brace
+                // expansion, command hashing, and `#` comments all work.
+                ("braceexpand", true),
+                ("hashall", true),
+                ("interactive-comments", true),
+                ("allexport", allexport()),
+                ("errexit", errexit()),
+                ("noclobber", noclobber()),
+                ("noexec", noexec()),
+                ("noglob", noglob()),
+                ("nounset", nounset()),
+                ("pipefail", pipefail()),
+                // The editing-mode names appear only in an interactive
+                // shell, matching bash.
+                ("vi", interactive() && edit_mode_vi()),
+                ("emacs", interactive() && !edit_mode_vi()),
+                ("xtrace", xtrace()),
+            ]
+            .iter()
+            .filter(|&&(_, v)| v)
+            .map(|&(n, _)| n)
+            .collect();
+            on.sort_unstable();
+            Some(on.join(":"))
+        }
+        "BASHOPTS" => {
+            let mut on: Vec<&str> = SHOPT_DEFAULTS
+                .iter()
+                .map(|&(n, _)| n)
+                .filter(|n| shopt(n))
+                .collect();
+            on.sort_unstable();
+            Some(on.join(":"))
+        }
         "SECONDS" => Some(
             SECONDS_BASE
                 .with(|b| {

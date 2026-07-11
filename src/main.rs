@@ -516,6 +516,9 @@ fn interactive() -> std::io::Result<()> {
     // Accumulates lines until a complete command is parsed — so an `if`/`while`
     // can span several lines, with a `> ` continuation prompt.
     let mut buffer = String::new();
+    // Consecutive Ctrl-D presses at an empty prompt, for `$IGNOREEOF` (C130's
+    // rush-side half): with it set to n, only the (n+1)th EOF exits.
+    let mut eof_count = 0u32;
 
     loop {
         // Report any background jobs that finished or stopped since last prompt.
@@ -537,6 +540,7 @@ fn interactive() -> std::io::Result<()> {
             .unwrap_or_default();
         match rl.read_line(&prompt, &rprompt, &ShellHooks)? {
             ReadResult::Line(line) => {
+                eof_count = 0;
                 if buffer.is_empty() && line.trim().is_empty() {
                     continue;
                 }
@@ -575,6 +579,15 @@ fn interactive() -> std::io::Result<()> {
                 match parser::parse(&buffer) {
                     Ok(list) => {
                         record(&mut rl, &buffer);
+                        // `$PS0` (C126's remainder): printed after a
+                        // complete command is read, before it executes —
+                        // same expansion as PS1.
+                        if let Some(ps0) = vars::get("PS0").filter(|p| !p.is_empty()) {
+                            let escaped = expand_ps1(&ps0);
+                            print!("{}", expand::expand_dollars(&escaped).unwrap_or(escaped));
+                            use std::io::Write as _;
+                            let _ = std::io::stdout().flush();
+                        }
                         if let Err(e) = exec::run_list(&list) {
                             eprintln!("rush: {e}");
                         }
@@ -606,8 +619,20 @@ fn interactive() -> std::io::Result<()> {
                 buffer.clear();
                 continue;
             }
-            // Ctrl-D on an empty line: exit.
-            ReadResult::Eof => break,
+            // Ctrl-D on an empty line: exit — unless `$IGNOREEOF` asks
+            // for more presses first (guards the classic accidental
+            // Ctrl-D killing an SSH session).
+            ReadResult::Eof => {
+                let required = vars::get("IGNOREEOF")
+                    .map(|v| v.parse::<u32>().unwrap_or(10))
+                    .unwrap_or(0);
+                if eof_count < required {
+                    eof_count += 1;
+                    eprintln!("Use \"exit\" to leave the shell.");
+                    continue;
+                }
+                break;
+            }
         }
     }
 

@@ -3624,3 +3624,51 @@ fn export_f_crosses_into_children() {
         .expect("spawn bash");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "bash-to-rush\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn small_wins_batch() {
+    // patsub_replacement `&` (bash 5.2).
+    let (out, _) = rush(r#"v=aXbXc; echo "${v/X*/[&]}"; echo "${v//X/<&>}"; echo "${v/X/\&}""#);
+    assert_eq!(out, "a[XbXc]\na<X>b<X>c\na&bXc\n");
+
+    // C84: assoc keys with spaces, literal and via a variable.
+    let (out, _) = rush(r#"declare -A a; a["x y"]=1; echo "${a[x y]}"; k="p q"; a["$k"]=2; echo "${a[$k]}""#);
+    assert_eq!(out, "1\n2\n");
+
+    // SHELLOPTS/BASHOPTS reflect live option state.
+    let (out, _) = rush(r#"echo "[$SHELLOPTS]"; set -e; echo $SHELLOPTS | grep -qc errexit && echo reflected"#);
+    assert_eq!(out, "[braceexpand:hashall:interactive-comments]\nreflected\n");
+    let (out, _) = rush("shopt -s dotglob; echo $BASHOPTS | grep -qc dotglob && echo bash-reflected");
+    assert_eq!(out, "bash-reflected\n");
+
+    // C94: times/help/caller/enable.
+    let (out, _) = rush("times | wc -l");
+    assert_eq!(out, "2\n");
+    let (out, _) = rush("help nosuchxyz 2>/dev/null; echo st=$?; caller; echo st=$?; f(){ caller; }; f");
+    assert_eq!(out, "st=1\nst=1\n1 NULL\n");
+    let (out, _) = rush("enable -n echo; type -t echo; enable echo; type -t echo");
+    assert_eq!(out, "file\nbuiltin\n");
+
+    // GLOBIGNORE filters matches.
+    let dir = std::env::temp_dir().join(format!("rush_gi_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["a.txt", "b.log", "c.txt"] {
+        std::fs::write(dir.join(f), "").unwrap();
+    }
+    let (out, _) = rush(&format!("cd {}; GLOBIGNORE='*.log'; echo *", dir.display()));
+    assert_eq!(out, "a.txt c.txt\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn ignoreeof_and_ps0() {
+    // IGNOREEOF: piped EOF still exits after the guard count.
+    let out = rush_session(std::path::Path::new("/tmp"), "IGNOREEOF=2\n");
+    let _ = out; // the guard message goes to stderr; surviving to exit is the test
+
+    // PS0 prints after a command is read, before it runs.
+    let out = rush_session(std::path::Path::new("/tmp"), "PS0='[ps0]'\necho hi\n");
+    assert!(out.contains("[ps0]hi"), "got: {out:?}");
+}

@@ -3718,11 +3718,11 @@ Every reported gap is fixed except the narrowings below.
 
 Remaining narrowings (documented, low-value or blocked on a sibling crate):
 
-- `ulimit -a`'s `-p` (pipe size) row is still absent: it's a bash
-  *pseudo-resource* with no `RLIMIT_*` backing (a hardcoded constant), so it
-  would be a rush-side synthetic entry, not a real limit. (The `-R`
-  real-time row is now present — rusty_libc exposed `RLIMIT_RTTIME`; see
-  `docs/HANDOFF_RUSTY_LIBC.md`.)
+- `ulimit -a` now matches bash line-for-line: the `-R` real-time row came
+  from rusty_libc's `RLIMIT_RTTIME` (see `docs/HANDOFF_RUSTY_LIBC.md`), and
+  `-p` (pipe size) is modelled as a read-only pseudo-resource with bash's
+  fixed value (`PIPE_BUF` = 4096 bytes = 8 × 512-byte blocks) — it has no
+  `RLIMIT_*` backing, so setting it is rejected exactly as bash does.
 - `time ( subshell ) 2>/dev/null` does not suppress the timing report: the
   redirection is applied inside the forked subshell child, never in the
   parent that writes the report. Simple/pipeline timed commands

@@ -3316,7 +3316,7 @@ termios/timeout plumbing)
 recognized. Scripts emit garbage flag text into their output.
 **Effort: S**
 
-### C91 — `let` builtin missing
+### C91 — `let` builtin missing ✅ done
 `let x=3+4; echo $x` → `let: command not found`, `$x` empty; scripts
 proceed with empty variables. Thin wrapper over the existing `(( ))`
 arithmetic (C28/C29). **Effort: S**
@@ -3479,7 +3479,7 @@ rush treats `{x}` as a filename (or a command name in prefix position).
 Standard idiom for flock/lock-file and saved-stream management.
 **Effort: M**
 
-### C116 — Arithmetic evaluator gaps: `base#n` literals, empty expression, string re-evaluation
+### C116 — Arithmetic evaluator gaps: `base#n` literals, empty expression, string re-evaluation ✅ done
 - `$((2#101))`/`$((16#ff))` → `unexpected character '#'` (bash: 5/255).
 - `$(( ))` (e.g. from `$(($empty))`) → error instead of 0.
 - `x=1+2; echo $((x))` → `not an integer` (bash evaluates a variable's

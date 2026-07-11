@@ -21,6 +21,11 @@
 //! `arr[i] = x` — arithmetic-context array element assignment).
 
 pub fn eval(src: &str) -> Result<i64, String> {
+    // An empty (or all-blank) expression evaluates to 0, matching bash
+    // (C116) — `$(($unset))` is ubiquitous in scripts without `set -u`.
+    if src.trim().is_empty() {
+        return Ok(0);
+    }
     let tokens = tokenize(src)?;
     let mut parser = Parser { tokens, pos: 0 };
     let expr = parser.parse_assign()?;
@@ -47,15 +52,87 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
         if c.is_whitespace() {
             i += 1;
         } else if c.is_ascii_digit() {
+            // `0x`/`0X` hex and leading-`0` octal literals (C116), same as
+            // bash/C — checked before the plain-decimal scan.
+            if c == '0'
+                && i + 1 < chars.len()
+                && matches!(chars[i + 1], 'x' | 'X')
+                && i + 2 < chars.len()
+                && chars[i + 2].is_ascii_hexdigit()
+            {
+                let start = i + 2;
+                i += 2;
+                while i < chars.len() && chars[i].is_ascii_hexdigit() {
+                    i += 1;
+                }
+                let n = i64::from_str_radix(&chars[start..i].iter().collect::<String>(), 16)
+                    .map_err(|_| "number too large".to_string())?;
+                toks.push(Tok::Num(n));
+                continue;
+            }
             let start = i;
             while i < chars.len() && chars[i].is_ascii_digit() {
                 i += 1;
             }
-            let n: i64 = chars[start..i]
-                .iter()
-                .collect::<String>()
-                .parse()
-                .map_err(|_| "number too large".to_string())?;
+            // `base#digits` — an arbitrary-radix literal, base 2–64
+            // (C116): digits are 0-9, a-z (10–35), A-Z (36–61), `@` (62),
+            // `_` (63); when the base is ≤ 36, letters are
+            // case-insensitive. bash's own rules exactly.
+            if i < chars.len() && chars[i] == '#' {
+                let base: i64 = chars[start..i]
+                    .iter()
+                    .collect::<String>()
+                    .parse()
+                    .map_err(|_| "number too large".to_string())?;
+                if !(2..=64).contains(&base) {
+                    return Err(format!("{base}: invalid arithmetic base"));
+                }
+                i += 1; // `#`
+                let dstart = i;
+                let mut n: i64 = 0;
+                while i < chars.len() {
+                    let d = match chars[i] {
+                        d @ '0'..='9' => d as i64 - '0' as i64,
+                        d @ 'a'..='z' => d as i64 - 'a' as i64 + 10,
+                        d @ 'A'..='Z' => {
+                            if base <= 36 {
+                                chars[i].to_ascii_lowercase() as i64 - 'a' as i64 + 10
+                            } else {
+                                d as i64 - 'A' as i64 + 36
+                            }
+                        }
+                        '@' => 62,
+                        '_' => 63,
+                        _ => break,
+                    };
+                    if d >= base {
+                        return Err(format!(
+                            "value too great for base (error token is \"{}\")",
+                            chars[start..=i].iter().collect::<String>()
+                        ));
+                    }
+                    n = n
+                        .checked_mul(base)
+                        .and_then(|n| n.checked_add(d))
+                        .ok_or_else(|| "number too large".to_string())?;
+                    i += 1;
+                }
+                if i == dstart {
+                    return Err("missing digits after base#".to_string());
+                }
+                toks.push(Tok::Num(n));
+                continue;
+            }
+            let text: String = chars[start..i].iter().collect();
+            // A leading 0 means octal (C116), same as bash/C — `010` is 8,
+            // and `08` is the classic "value too great for base" error.
+            let n: i64 = if text.len() > 1 && text.starts_with('0') {
+                i64::from_str_radix(&text, 8).map_err(|_| {
+                    format!("value too great for base (error token is \"{text}\")")
+                })?
+            } else {
+                text.parse().map_err(|_| "number too large".to_string())?
+            };
             toks.push(Tok::Num(n));
         } else if c == '_' || c.is_ascii_alphabetic() {
             let start = i;
@@ -525,7 +602,17 @@ fn bool_int(b: bool) -> i64 {
     if b { 1 } else { 0 }
 }
 
-/// A variable's value as an integer: unset/empty → 0, non-numeric → error.
+thread_local! {
+    // Recursion guard for string re-evaluation in `var_value` — bash caps
+    // expression recursion at 1024; a chain like `a=b b=a` must error,
+    // not blow the native stack.
+    static EVAL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A variable's value as an integer: unset/empty → 0. A non-numeric value
+/// is re-evaluated as a full sub-expression, recursively (C116) — bash's
+/// rule, which makes `x=1+2; echo $((x))` print 3 — with a depth cap so
+/// reference cycles error out instead of overflowing the stack.
 fn var_value(name: &str) -> Result<i64, String> {
     // `vars::get` alone is a complete answer since `main.rs` seeds every
     // inherited environment variable into it at startup (C36) — see
@@ -536,8 +623,17 @@ fn var_value(name: &str) -> Result<i64, String> {
     if s.is_empty() {
         return Ok(0);
     }
-    s.parse::<i64>()
-        .map_err(|_| format!("`{name}`: not an integer (`{raw}`)"))
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(n);
+    }
+    let depth = EVAL_DEPTH.with(std::cell::Cell::get);
+    if depth >= 1024 {
+        return Err(format!("{name}: expression recursion level exceeded"));
+    }
+    EVAL_DEPTH.with(|d| d.set(depth + 1));
+    let result = eval(s);
+    EVAL_DEPTH.with(|d| d.set(depth));
+    result.map_err(|_| format!("`{name}`: not an integer (`{raw}`)"))
 }
 
 #[cfg(test)]

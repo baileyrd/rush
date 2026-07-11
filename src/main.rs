@@ -109,7 +109,19 @@ fn apply_history_knobs(rl: &mut Editor) {
     rl.set_history_dedup(control.split(':').any(|c| c == "erasedups"));
 }
 
+thread_local! {
+    // `--norc` / `--rcfile FILE` (C104).
+    static RC_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RC_OVERRIDE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 fn rc_path() -> Option<PathBuf> {
+    if RC_DISABLED.with(std::cell::Cell::get) {
+        return None;
+    }
+    if let Some(f) = RC_OVERRIDE.with(|p| p.borrow().clone()) {
+        return Some(PathBuf::from(f));
+    }
     let mut p = PathBuf::from(std::env::var_os("HOME")?);
     p.push(".rushrc");
     Some(p)
@@ -415,32 +427,120 @@ fn main() -> std::io::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
-    // `rush -n …` (C51): the standard `sh -n script.sh` linting idiom —
-    // parse everything, report syntax errors (status 2), execute nothing
-    // (status 0 when the syntax is clean). Composes with both `-c` and a
-    // script file by simply pre-setting the same noexec flag `set -n`
-    // uses; `run_source`'s parse still happens, `exec::run_andor` skips
-    // every job.
-    let args: Vec<String> = if args.get(1).map(String::as_str) == Some("-n") {
-        vars::set_noexec(true);
-        let mut rest = args.clone();
-        rest.remove(1);
-        rest
-    } else {
-        args
-    };
-
-    // Non-interactive modes: `rush -c "cmd" [name args…]` and `rush FILE [args…]`.
-    match args.get(1).map(String::as_str) {
-        Some("-c") => {
-            let cmd = args.get(2).cloned().unwrap_or_default();
-            let name = args.get(3).cloned().unwrap_or_else(|| "rush".to_string());
-            vars::set_args(name, args.get(4..).unwrap_or(&[]).to_vec());
-            source_bash_env();
-            trap::exit_shell(run_source(&cmd));
+    // Invocation flags (C104), bash's set: `-c cmd`, `-s` (stdin with
+    // positional args — the `curl | sh -s -- args` pipeline shape), `-i`
+    // (force interactive), `-l`/`--login`, `-r`/`--restricted`, `-n`
+    // (C51's lint mode), `--posix` (accepted), `--norc`/`--rcfile FILE`,
+    // `-O`/`+O shopt_name`, and `--`. Single-letter flags cluster
+    // (`-lc`). An argv[0] starting with `-` is a login shell too.
+    let mut command: Option<String> = None;
+    let mut read_stdin = false;
+    let mut force_interactive = false;
+    let mut login = args.first().is_some_and(|a| a.starts_with('-'));
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        match arg {
+            "--" => {
+                idx += 1;
+                break;
+            }
+            "--login" => login = true,
+            "--restricted" => vars::set_restricted(true),
+            "--posix" => {} // accepted: rush's default behavior is the target
+            "--norc" => RC_DISABLED.with(|f| f.set(true)),
+            "--rcfile" | "--init-file" => {
+                idx += 1;
+                match args.get(idx) {
+                    Some(f) => RC_OVERRIDE.with(|p| *p.borrow_mut() = Some(f.clone())),
+                    None => {
+                        eprintln!("rush: {arg}: option requires an argument");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "-O" | "+O" => {
+                idx += 1;
+                match args.get(idx) {
+                    Some(name) => {
+                        let _ = vars::set_shopt(name, arg == "-O");
+                    }
+                    None => {
+                        eprintln!("rush: {arg}: option requires an argument");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            flags
+                if flags.len() > 1
+                    && flags.starts_with('-')
+                    && flags[1..].chars().all(|c| matches!(c, 'c' | 's' | 'i' | 'l' | 'r' | 'n')) =>
+            {
+                for c in flags[1..].chars() {
+                    match c {
+                        'c' => {
+                            idx += 1;
+                            match args.get(idx) {
+                                Some(cmd) => command = Some(cmd.clone()),
+                                None => {
+                                    eprintln!("rush: -c: option requires an argument");
+                                    std::process::exit(2);
+                                }
+                            }
+                        }
+                        's' => read_stdin = true,
+                        'i' => force_interactive = true,
+                        'l' => login = true,
+                        'r' => vars::set_restricted(true),
+                        'n' => vars::set_noexec(true),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ => break, // first non-flag word: the script file (or -c's name)
         }
+        idx += 1;
+    }
+    if login {
+        vars::set_shopt("login_shell", true);
+    }
+
+    // A login shell sources ~/.profile before anything else (kept to the
+    // one file every shell family reads — no /etc/profile pass).
+    if login
+        && let Some(home) = vars::get("HOME")
+        && let Ok(src) = std::fs::read_to_string(format!("{home}/.profile"))
+    {
+        run_source(&src);
+    }
+
+    if let Some(cmd) = command {
+        let name = args.get(idx).cloned().unwrap_or_else(|| "rush".to_string());
+        vars::set_args(name, args.get(idx + 1..).unwrap_or(&[]).to_vec());
+        source_bash_env();
+        trap::exit_shell(run_source(&cmd));
+    }
+    // `-s`, or plain `rush` with leftover args after `--`: read stdin,
+    // with the remaining words as positional parameters.
+    if read_stdin || (idx < args.len() && args[idx - 1] == "--") {
+        let name = args.first().cloned().unwrap_or_else(|| "rush".to_string());
+        vars::set_args(name, args.get(idx..).unwrap_or(&[]).to_vec());
+        if force_interactive {
+            return interactive();
+        }
+        let mut src = String::new();
+        use std::io::Read as _;
+        if std::io::stdin().read_to_string(&mut src).is_err() {
+            trap::exit_shell(1);
+        }
+        source_bash_env();
+        trap::exit_shell(run_source(&src));
+    }
+
+    // Non-interactive modes: `rush FILE [args…]`; otherwise the REPL.
+    match args.get(idx).map(String::as_str) {
         Some(file) => {
-            vars::set_args(file.to_string(), args.get(2..).unwrap_or(&[]).to_vec());
+            vars::set_args(file.to_string(), args.get(idx + 1..).unwrap_or(&[]).to_vec());
             vars::push_source(file); // `${BASH_SOURCE[0]}` (C67); empty under `-c`, same as bash
             source_bash_env();
             match std::fs::read_to_string(file) {

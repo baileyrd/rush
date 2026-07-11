@@ -3410,7 +3410,7 @@ editor's history store into the builtin layer is the M part)
 
 ## Tier III — Options, environment, invocation, job control (C104–C111)
 
-### C104 — Invocation flags missing: `-s`, `-i`, `-l`, `-r`, `--posix`, `--norc`/`--rcfile`, `-O`/`+O`, `-D`
+### C104 — Invocation flags missing: `-s`, `-i`, `-l`, `-r`, `--posix`, `--norc`/`--rcfile`, `-O`/`+O`, `-D` ✅ done (--posix accepted-inert; -D not applicable — rush has no locale catalogs)
 `main.rs` understands only `-c`, a script path, and a special-cased
 `-n`; every other flag is treated as a script filename
 (`rush: -s: No such file or directory`). Blocks login-shell use,

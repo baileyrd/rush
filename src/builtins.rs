@@ -847,6 +847,11 @@ fn cd_fallback_target(target: &str) -> Option<String> {
 }
 
 fn cd(argv: &[String]) -> i32 {
+    // A restricted shell can't change directory (C104).
+    if crate::vars::restricted() {
+        eprintln!("cd: restricted");
+        return 1;
+    }
     // `-L`/`-P`/`-e` are accepted and skipped (C101): rush always tracks
     // the physical directory (`std::env` has no logical-path notion), so
     // `-P` is the native behavior and `-L` a documented approximation.

@@ -238,6 +238,21 @@ pub fn allexport() -> bool {
     ALLEXPORT.with(|e| *e.borrow())
 }
 
+thread_local! {
+    // `rush -r` (C104): the restricted shell. One-way — nothing unsets it.
+    static RESTRICTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn set_restricted(on: bool) {
+    if on {
+        RESTRICTED.with(|r| r.set(true));
+    }
+}
+
+pub fn restricted() -> bool {
+    RESTRICTED.with(std::cell::Cell::get)
+}
+
 pub fn set_noglob(on: bool) {
     NOGLOB.with(|e| *e.borrow_mut() = on);
 }
@@ -921,6 +936,12 @@ fn transformed(name: &str, value: &str) -> Option<String> {
 /// `arr[1]`/`arr[2]` alone, verified directly for both array kinds); a
 /// plain, never-arrayed variable is unaffected by this rule.
 pub fn set(name: &str, value: &str) {
+    // A restricted shell can't repoint its search path or environment
+    // hooks (C104) — bash's rule for these four names.
+    if restricted() && matches!(name, "PATH" | "SHELL" | "ENV" | "BASH_ENV") {
+        eprintln!("rush: {name}: restricted");
+        return;
+    }
     // Assigning the dynamic specials re-bases them (C67): `RANDOM=42`
     // seeds the generator, `SECONDS=100` restarts the counter from 100 —
     // both matching bash.

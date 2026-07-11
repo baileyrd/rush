@@ -693,7 +693,7 @@ fn interactive() -> std::io::Result<()> {
                 // (C122), and appended to $HISTFILE right away so a
                 // crashed session loses nothing and concurrent sessions
                 // interleave instead of clobbering (C123).
-                let mut record = |rl: &mut Editor, buffer: &str| {
+                let record = |rl: &mut Editor, buffer: &str| {
                     if history_should_record(buffer, rl.history().last().map(String::as_str)) {
                         rl.add_history_entry(buffer);
                         builtins::history_record(&buffer.replace('\n', "; "));

@@ -1031,7 +1031,7 @@ fn read_cmd(argv: &[String]) -> i32 {
         if !arg.starts_with('-') || arg.len() < 2 {
             break;
         }
-        let mut value_for = |flag: char, rest: &str, idx: &mut usize| -> Option<String> {
+        let value_for = |flag: char, rest: &str, idx: &mut usize| -> Option<String> {
             if !rest.is_empty() {
                 return Some(rest.to_string());
             }

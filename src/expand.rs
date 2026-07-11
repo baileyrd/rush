@@ -169,8 +169,17 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     let declare_print_form = matches!(decl_word.as_deref(), Some("declare") | Some("typeset"))
         && matches!(rc.argv.get(idx + 1).map(|w| w.as_slice()),
             Some([WordPart::Unquoted(s)]) if matches!(s.as_str(), "-p" | "-f" | "-F"));
+    // `export NAME=(...)` — route through the decl path (C132) so the
+    // array literal parses; only when an array literal is actually
+    // present, so `export -n`/`-f`/bare `export NAME` keep the builtin
+    // path.
+    let export_array_form = decl_word.as_deref() == Some("export")
+        && rc.argv[idx + 1..].iter().any(|w| {
+            w.iter().any(|p| matches!(p, WordPart::ArrayLiteral(_)))
+        });
     let (argv, local_decls, decl_attrs) = if !declare_print_form
-        && matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("typeset") | Some("readonly")) {
+        && (export_array_form
+            || matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("typeset") | Some("readonly"))) {
         let cmd_name = decl_word.unwrap();
         let mut rest = &rc.argv[idx + 1..];
         // Leading flags apply to every name that follows in this same
@@ -718,7 +727,12 @@ fn atoms_to_word(atoms: &[BraceAtom]) -> Word {
 fn brace_expand_atoms(atoms: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
     let mut i = 0;
     while i < atoms.len() {
-        if matches!(atoms[i], BraceAtom::Ch('{'))
+        // A `{` immediately after `$` is a parameter expansion `${...}`,
+        // never a brace list (C132) — `${x,,}` must not brace-expand into
+        // `$x`, `$`, `$`. Same for `$` before it being part of `$(`/etc.
+        let dollar_prefixed = i > 0 && matches!(atoms[i - 1], BraceAtom::Ch('$'));
+        if !dollar_prefixed
+            && matches!(atoms[i], BraceAtom::Ch('{'))
             && let Some(j) = matching_close(atoms, i)
             && let Some(alternatives) = expand_group(&atoms[i + 1..j])
         {
@@ -1819,6 +1833,30 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         _ => {}
     }
 
+    // `${@OP}` / `${*OP}` — `@`-transforms and the default/alternate
+    // family on the positional parameters (C132): `${@@Q}`, `${*@U}`,
+    // `${@:-def}` (the colon slicing/default is handled just below; this
+    // covers the colon-less transforms the array `[@]` path also does).
+    if let Some(first) = inner.chars().next()
+        && matches!(first, '@' | '*')
+        && inner.len() > 1
+    {
+        let rest = &inner[1..];
+        let star = first == '*';
+        let values = crate::vars::args();
+        let sep = if star { Ifs::current().star_sep.clone() } else { " ".to_string() };
+        if let Some(op) = rest.strip_prefix('@') {
+            let mut out = Vec::with_capacity(values.len());
+            for v in &values {
+                out.push(at_transform(v, op).ok_or_else(|| format!("${{{inner}}}: bad substitution"))?);
+            }
+            return Ok(out.join(&sep));
+        }
+        if let Some(result) = whole_array_default(&values, star, rest, inner)? {
+            return Ok(result);
+        }
+    }
+
     // `${@:off[:len]}` / `${*:off[:len]}` — positional-parameter slicing
     // (C86). The list is `$0` followed by the positional parameters, so
     // offset 0 starts at the shell/script name and offset 1 at `$1`,
@@ -1983,6 +2021,13 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
             };
             let sep = if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
             return Ok(values[start as usize..end.max(start) as usize].join(&sep));
+        }
+        // Default/alternate family on the whole array (C132): the array is
+        // "unset/empty" for `:-`/`:+`/`:?` when it has no elements (or, with
+        // the colon, joins to an empty string).
+        let star = &inner[open + 1..close] == "*";
+        if let Some(result) = whole_array_default(&values, star, rest, inner)? {
+            return Ok(result);
         }
         // Per-element `@`-transforms (C118): `${a[@]@U}` etc., plus the
         // whole-array `@K`/`@k` forms, which emit key/value *pairs* (their
@@ -2179,6 +2224,55 @@ fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str) -> Result<Strin
         }
         _ => Err(format!("${{{inner}}}: bad substitution")),
     }
+}
+
+/// The default/alternate family (`:-`/`:+`/`:?`, and colon-less) applied
+/// to a whole value list (C132) — `${a[@]:-x}`, `${@:-x}`. `Ok(None)`
+/// means "not a default-family operator, try something else". `sep` joins
+/// the present values (space for `@`, IFS-first for `*`).
+fn whole_array_default(
+    values: &[String],
+    star: bool,
+    rest: &str,
+    inner: &str,
+) -> Result<Option<String>, String> {
+    let colon = rest.starts_with(':');
+    let ops = if colon { &rest[1..] } else { rest };
+    let op = match ops.chars().next() {
+        Some(c @ ('-' | '+' | '?')) => c,
+        _ => return Ok(None),
+    };
+    let sep = if star { Ifs::current().star_sep.clone() } else { " ".to_string() };
+    let joined = values.join(&sep);
+    // "Unset/empty": no elements, or (with colon) they join to empty.
+    let empty = values.is_empty() || (colon && joined.is_empty());
+    let word = expand_braced_word(&ops[op.len_utf8()..], false)?;
+    Ok(Some(match op {
+        '-' => {
+            if empty {
+                word
+            } else {
+                joined
+            }
+        }
+        '+' => {
+            if empty {
+                String::new()
+            } else {
+                word
+            }
+        }
+        _ => {
+            if empty {
+                return Err(if word.is_empty() {
+                    format!("{inner}: parameter null or not set")
+                } else {
+                    word
+                });
+            }
+            joined
+        }
+    }))
 }
 
 /// The value-based `@`-transform operators, shared between the scalar

@@ -2288,6 +2288,19 @@ pub(crate) fn declare_print(argv: &[String]) -> i32 {
     }
 }
 
+/// `export NAME=(...)` (C132): apply the declarations (creating arrays/
+/// scalars) via the shared decl path, then mark each name exported.
+pub(crate) fn export_from_decls(
+    decls: &[(String, Option<crate::vars::AssignOp>)],
+    attrs: crate::vars::Attrs,
+) -> i32 {
+    let status = declare_from_decls(decls, attrs);
+    for (name, _) in decls {
+        crate::vars::export(name);
+    }
+    status
+}
+
 pub(crate) fn declare_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,

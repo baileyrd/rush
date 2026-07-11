@@ -3940,6 +3940,10 @@ struct UlimitResource {
 
 #[cfg(unix)]
 const ULIMIT_RESOURCES: &[UlimitResource] = &[
+    // bash lists resources alphabetically by flag letter; uppercase `-R`
+    // sorts ahead of the lowercase letters, so it heads `ulimit -a`.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'R', resource: crate::sys::RLIMIT_RTTIME as i32, label: "real-time non-blocking time  (microseconds, -R)", scale: 1 },
     UlimitResource { letter: 'c', resource: crate::sys::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512 },
     UlimitResource { letter: 'd', resource: crate::sys::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024 },
     // bash lists resources alphabetically by flag letter, so `-e` precedes `-f`.

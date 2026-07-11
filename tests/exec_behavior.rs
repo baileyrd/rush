@@ -4185,3 +4185,16 @@ fn read_poll_and_delimiter_trimming() {
     // The same trailing-whitespace trim applies to an ordinary multi-field read.
     assert_eq!(rush(r#"read a b <<< "1 2 3   "; echo "[$b]""#).0, "[2 3]\n");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ulimit_real_time_row_present() {
+    // With rusty_libc exposing RLIMIT_RTTIME, `ulimit -a` now leads with the
+    // real-time (`-R`) row (bash's alphabetical order), and `ulimit -R`
+    // reads it. Verified against bash.
+    let (out, _) = rush("ulimit -a");
+    assert!(out.lines().next().unwrap().contains("(microseconds, -R)"), "got: {out:?}");
+    let (r, code) = rush("ulimit -R");
+    assert_eq!(code, 0);
+    assert!(r.trim() == "unlimited" || r.trim().parse::<u64>().is_ok(), "got: {r:?}");
+}

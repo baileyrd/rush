@@ -3302,7 +3302,7 @@ continues (rc 0 line status). Sourced-file behavior already matches.
 
 ## Tier II — Missing builtins and builtin flags (C89–C103)
 
-### C89 — `read`/`mapfile` flag coverage
+### C89 — `read`/`mapfile` flag coverage ✅ done
 `read` supports *no* option flags: `-t` (timeout), `-n`/`-N` (chars),
 `-d` (delimiter), `-a` (array), `-u` (fd), `-p` (prompt), `-s` (silent),
 `-e` each print `read: -X: invalid option` and leave the variable empty.
@@ -3458,7 +3458,7 @@ high fds; this is `exec`'s persistent form.) **Effort: M**
 
 ## Tier IV — Language/syntax parity (C112–C121)
 
-### C112 — `time` reserved word missing (with `TIMEFORMAT`, `time -p`)
+### C112 — `time` reserved word missing (with `TIMEFORMAT`, `time -p`) ✅ done
 `time cmd` → 127. There is no external fallback for timing pipelines or
 builtins. Needs a reserved word wrapping a full pipeline, rusage
 collection, and `TIMEFORMAT`/`-p` formatting. **Effort: M**

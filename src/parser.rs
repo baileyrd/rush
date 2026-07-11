@@ -55,6 +55,11 @@ pub enum Connector {
 #[derive(Debug, Clone)]
 pub struct RawPipeline {
     pub commands: Vec<RawCommand>,
+    /// A leading `time` reserved word (C112) — report real/user/sys
+    /// times for the whole pipeline when it finishes; `time -p` uses the
+    /// POSIX output format instead of `TIMEFORMAT`.
+    pub timed: bool,
+    pub time_posix: bool,
     /// 1-based source line the pipeline starts on (`$LINENO`, C67) —
     /// computed from newline-token counts, so a here-doc body's own
     /// newlines (swallowed by the lexer) don't advance it: a documented
@@ -464,6 +469,24 @@ impl Parser {
 
     fn parse_pipeline(&mut self) -> Result<RawPipeline, ParseError> {
         let line = self.line_at(self.pos);
+        // `time [-p] pipeline` (C112): the reserved word covers the whole
+        // pipeline (recognized only in command position, like the other
+        // reserved words — `echo time` is untouched).
+        let mut timed = false;
+        let mut time_posix = false;
+        if matches!(self.peek(),
+            Some(Token::Word(parts)) if matches!(parts.as_slice(), [WordPart::Unquoted(s)] if s == "time"))
+            && !matches!(self.toks.get(self.pos + 1), Some(Token::Pipe))
+        {
+            self.pos += 1;
+            timed = true;
+            if matches!(self.peek(),
+                Some(Token::Word(parts)) if matches!(parts.as_slice(), [WordPart::Unquoted(s)] if s == "-p"))
+            {
+                self.pos += 1;
+                time_posix = true;
+            }
+        }
         // A leading `!` (possibly repeated — `! ! cmd` toggles, same as
         // bash) negates the whole pipeline's exit status.
         let mut negated = false;
@@ -479,7 +502,7 @@ impl Parser {
             self.skip_newlines();
             commands.push(self.parse_command()?);
         }
-        Ok(RawPipeline { commands, negated, line })
+        Ok(RawPipeline { commands, negated, line, timed, time_posix })
     }
 
     fn parse_command(&mut self) -> Result<RawCommand, ParseError> {

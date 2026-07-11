@@ -977,24 +977,79 @@ fn export(argv: &[String]) -> i32 {
 /// a trailing, unterminated partial line was read first (its content is
 /// still assigned, matching real bash).
 fn read_cmd(argv: &[String]) -> i32 {
-    let mut raw = false;
+    // Full flag set (C89): -r raw, -p prompt, -s silent, -t timeout,
+    // -n/-N char counts, -d delimiter, -a array, -u fd, -e (accepted,
+    // no readline editing — a documented approximation). Values may be
+    // attached (`-t5`) or separate (`-t 5`), same as bash.
+    let mut opts = ReadOpts::default();
     let mut idx = 1;
     while idx < argv.len() {
-        match argv[idx].as_str() {
-            "-r" => {
-                raw = true;
-                idx += 1;
+        let arg = argv[idx].as_str();
+        if arg == "--" {
+            idx += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg.len() < 2 {
+            break;
+        }
+        let mut value_for = |flag: char, rest: &str, idx: &mut usize| -> Option<String> {
+            if !rest.is_empty() {
+                return Some(rest.to_string());
             }
-            "--" => {
-                idx += 1;
-                break;
+            *idx += 1;
+            let v = argv.get(*idx).cloned();
+            if v.is_none() {
+                eprintln!("read: -{flag}: option requires an argument");
             }
-            s if s.starts_with('-') && s.len() > 1 => {
-                eprintln!("read: {s}: invalid option");
+            v
+        };
+        match (&arg[1..2], &arg[2..]) {
+            ("r", "") => opts.raw = true,
+            ("s", "") => opts.silent = true,
+            ("e", "") => {} // readline editing: plain read, documented
+            ("p", rest) => match value_for('p', rest, &mut idx) {
+                Some(v) => opts.prompt = Some(v),
+                None => return 2,
+            },
+            ("t", rest) => match value_for('t', rest, &mut idx).map(|v| v.parse::<f64>()) {
+                Some(Ok(v)) if v >= 0.0 => opts.timeout = Some(v),
+                _ => {
+                    eprintln!("read: invalid timeout specification");
+                    return 2;
+                }
+            },
+            ("n", rest) | ("N", rest) => {
+                let ignore_delim = &arg[1..2] == "N";
+                match value_for('n', rest, &mut idx).map(|v| v.parse::<usize>()) {
+                    Some(Ok(n)) => opts.nchars = Some((n, ignore_delim)),
+                    _ => {
+                        eprintln!("read: invalid number");
+                        return 2;
+                    }
+                }
+            }
+            ("d", rest) => match value_for('d', rest, &mut idx) {
+                // An empty delimiter means NUL, same as bash.
+                Some(v) => opts.delim = v.bytes().next().unwrap_or(0),
+                None => return 2,
+            },
+            ("a", rest) => match value_for('a', rest, &mut idx) {
+                Some(v) => opts.array = Some(v),
+                None => return 2,
+            },
+            ("u", rest) => match value_for('u', rest, &mut idx).map(|v| v.parse::<i32>()) {
+                Some(Ok(fd)) if fd >= 0 => opts.fd = fd,
+                _ => {
+                    eprintln!("read: invalid file descriptor specification");
+                    return 2;
+                }
+            },
+            _ => {
+                eprintln!("read: {arg}: invalid option");
                 return 2;
             }
-            _ => break,
         }
+        idx += 1;
     }
 
     let mut names: Vec<&str> = argv[idx..].iter().map(String::as_str).collect();
@@ -1002,10 +1057,65 @@ fn read_cmd(argv: &[String]) -> i32 {
         names.push("REPLY");
     }
 
-    let (line, protected, hit_eof) = read_logical_line(raw);
+    // Prompt only when the input is a terminal, like bash.
+    let tty = unsafe { crate::sys::isatty(opts.fd) } == 1;
+    if let Some(prompt) = &opts.prompt
+        && tty
+    {
+        eprint!("{prompt}");
+    }
+    // `-s` on a terminal: shell out to `stty` to stop echo — rush carries
+    // no termios binding of its own (documented approximation).
+    let silenced = opts.silent && tty && opts.fd == 0
+        && std::process::Command::new("stty").arg("-echo").status().is_ok_and(|s| s.success());
+
+    let (line, protected, status) = read_logical_line(&opts);
+
+    if silenced {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+        eprintln!();
+    }
+
+    if let Some(array) = &opts.array {
+        let fields = split_read_fields(&line, &protected);
+        let values: Vec<String> = fields
+            .iter()
+            .map(|f| String::from_utf8_lossy(&line[f.start..f.end]).into_owned())
+            .collect();
+        crate::vars::set_array(array, values);
+        return status;
+    }
     let fields = split_read_fields(&line, &protected);
     assign_read_fields(&names, &line, &fields);
-    if hit_eof { 1 } else { 0 }
+    status
+}
+
+/// `read`'s parsed flags (C89) — see `read_cmd`.
+struct ReadOpts {
+    raw: bool,
+    silent: bool,
+    prompt: Option<String>,
+    timeout: Option<f64>,
+    /// `(n, ignore_delim)`: `-n` stops at the delimiter too, `-N` doesn't.
+    nchars: Option<(usize, bool)>,
+    delim: u8,
+    array: Option<String>,
+    fd: i32,
+}
+
+impl Default for ReadOpts {
+    fn default() -> Self {
+        ReadOpts {
+            raw: false,
+            silent: false,
+            prompt: None,
+            timeout: None,
+            nchars: None,
+            delim: b'\n',
+            array: None,
+            fd: 0,
+        }
+    }
 }
 
 /// `select`'s own line read: same backslash-continuation processing as
@@ -1026,12 +1136,24 @@ fn read_cmd(argv: &[String]) -> i32 {
 /// off fd 0 via the same primitive `read` uses, so it never over-consumes.
 fn mapfile_cmd(argv: &[String]) -> i32 {
     let mut strip = false;
+    let mut delim = b'\n';
     let mut name: Option<&str> = None;
-    for arg in &argv[1..] {
+    let mut args = argv[1..].iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-t" => strip = true,
+            // `-d DELIM` (C89): split on DELIM instead of newline; an
+            // empty argument means NUL, same as bash.
+            "-d" => match args.next() {
+                Some(d) => delim = d.bytes().next().unwrap_or(0),
+                None => {
+                    eprintln!("{}: -d: option requires an argument", argv[0]);
+                    return 2;
+                }
+            },
+            other if other.starts_with("-d") => delim = other[2..].bytes().next().unwrap_or(0),
             other if other.starts_with('-') => {
-                eprintln!("{}: {other}: only -t is supported", argv[0]);
+                eprintln!("{}: {other}: only -t and -d are supported", argv[0]);
                 return 2;
             }
             other if name.is_none() => name = Some(other),
@@ -1049,16 +1171,18 @@ fn mapfile_cmd(argv: &[String]) -> i32 {
         return 1;
     }
     let mut lines = Vec::new();
+    let raw_opts = ReadOpts { raw: true, delim, ..ReadOpts::default() };
     loop {
-        let (bytes, _, hit_eof) = read_logical_line(true);
+        let (bytes, _, status) = read_logical_line(&raw_opts);
+        let hit_eof = status != 0;
         let mut line = String::from_utf8_lossy(&bytes).into_owned();
         if line.is_empty() && hit_eof {
             break;
         }
         // `hit_eof` means this line was unterminated — it has no trailing
-        // newline to keep even without `-t` (matching bash).
+        // delimiter to keep even without `-t` (matching bash).
         if !strip && !hit_eof {
-            line.push('\n');
+            line.push(delim as char);
         }
         lines.push(line);
         if hit_eof {
@@ -1070,8 +1194,8 @@ fn mapfile_cmd(argv: &[String]) -> i32 {
 }
 
 pub(crate) fn read_reply_line() -> (String, bool) {
-    let (line, _protected, hit_eof) = read_logical_line(false);
-    (String::from_utf8_lossy(&line).into_owned(), hit_eof)
+    let (line, _protected, status) = read_logical_line(&ReadOpts::default());
+    (String::from_utf8_lossy(&line).into_owned(), status != 0)
 }
 
 /// Read one logical line from stdin, byte at a time (see `read_cmd`'s doc for
@@ -1085,29 +1209,82 @@ pub(crate) fn read_reply_line() -> (String, bool) {
 ///
 /// Returns `(line, protected, hit_eof)`: `hit_eof` is true iff the line
 /// ended by exhausting stdin rather than a real newline.
-fn read_logical_line(raw: bool) -> (Vec<u8>, Vec<bool>, bool) {
-    use std::io::Read;
-
-    let mut stdin = std::io::stdin();
+/// Returns `(bytes, protected, exit_status)`: 0 = delimiter reached (or
+/// the `-n`/`-N` count filled), 1 = EOF, 142 (128+SIGALRM) = `-t` timeout
+/// — matching bash's statuses. Reads byte-at-a-time off `opts.fd` so a
+/// loop of `read` calls never over-consumes.
+fn read_logical_line(opts: &ReadOpts) -> (Vec<u8>, Vec<bool>, i32) {
     let mut line = Vec::new();
     let mut protected = Vec::new();
-    let mut byte = [0u8; 1];
+
+    // `-t`: a whole-call deadline, enforced by putting the fd in
+    // non-blocking mode and polling (Linux constants; the default
+    // backend is Linux-only — elsewhere `-t` degrades to blocking).
+    let deadline = opts.timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+    #[cfg(target_os = "linux")]
+    let restore_flags = deadline.and_then(|_| {
+        const F_GETFL: i32 = 3;
+        const F_SETFL: i32 = 4;
+        const O_NONBLOCK: i32 = 0o4000;
+        let flags = unsafe { crate::sys::fcntl(opts.fd, F_GETFL, 0) };
+        (flags != -1
+            && unsafe { crate::sys::fcntl(opts.fd, F_SETFL, flags | O_NONBLOCK) } != -1)
+            .then_some((F_SETFL, flags))
+    });
+    #[cfg(not(target_os = "linux"))]
+    let restore_flags: Option<(i32, i32)> = None;
+
+    let finish = |line: Vec<u8>, protected: Vec<bool>, status: i32| {
+        if let Some((setfl, flags)) = restore_flags {
+            unsafe {
+                crate::sys::fcntl(opts.fd, setfl, flags);
+            }
+        }
+        (line, protected, status)
+    };
+
+    let read_byte = |deadline: Option<std::time::Instant>| -> Result<Option<u8>, i32> {
+        let mut byte = [0u8; 1];
+        loop {
+            let n = unsafe {
+                let mut f = std::mem::ManuallyDrop::new(<std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(opts.fd));
+                std::io::Read::read(&mut *f, &mut byte)
+            };
+            match n {
+                Ok(0) => return Ok(None),
+                Ok(_) => return Ok(Some(byte[0])),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    match deadline {
+                        Some(d) if std::time::Instant::now() >= d => return Err(142),
+                        _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Ok(None),
+            }
+        }
+    };
 
     loop {
-        match stdin.read(&mut byte) {
-            Ok(0) => return (line, protected, true),
-            Err(_) => return (line, protected, true),
-            Ok(_) => {}
+        if let Some((n, _)) = opts.nchars
+            && line.len() >= n
+        {
+            return finish(line, protected, 0);
         }
-        let b = byte[0];
-        if b == b'\n' {
-            return (line, protected, false);
+        let b = match read_byte(deadline) {
+            Ok(Some(b)) => b,
+            Ok(None) => return finish(line, protected, 1),
+            Err(status) => return finish(line, protected, status),
+        };
+        let ignore_delim = matches!(opts.nchars, Some((_, true)));
+        if b == opts.delim && !ignore_delim {
+            return finish(line, protected, 0);
         }
-        if !raw && b == b'\\' {
-            match stdin.read(&mut byte) {
-                Ok(0) | Err(_) => return (line, protected, true),
-                Ok(_) => {
-                    let next = byte[0];
+        if !opts.raw && b == b'\\' {
+            match read_byte(deadline) {
+                Ok(None) => return finish(line, protected, 1),
+                Err(status) => return finish(line, protected, status),
+                Ok(Some(next)) => {
                     if next != b'\n' {
                         line.push(next);
                         protected.push(true);

@@ -3217,24 +3217,24 @@ Effort scale as before: S (hours), M (a day or two), L (multi-day).
 These are the highest-priority items: not "feature missing" but "rush
 runs the script and produces wrong results or dies".
 
-### C74 — IFS splitting is applied to literal command-line words
+### C74 — IFS splitting is applied to literal command-line words ✅ done
 `IFS=x; echo axb` → rush `a b`, bash `axb`. Splitting must apply only to
 the *results of expansions*, never to literal source text. Any script
 that sets a custom IFS silently corrupts every later command line
 containing an IFS character. **Effort: M**
 
-### C75 — Temporary env-assignment prefix before a builtin isn't scoped
+### C75 — Temporary env-assignment prefix before a builtin isn't scoped ✅ done
 `IFS=: read -r x y <<< "1:2:3"; echo "$x|$y"` → rush `1:2:3|`, bash
 `1|2:3`. The prefix assignment neither applies to the builtin nor gets
 restored afterward (`IFS` is left clobbered to empty). Breaks the
 canonical `IFS=x read` idiom twice over. **Effort: M**
 
-### C76 — Quotes inside `${v:-word}` defaults are literal; inner whitespace mangled
+### C76 — Quotes inside `${v:-word}` defaults are literal; inner whitespace mangled ✅ done (inner quoting in an *unquoted* `${...}` still does not suppress splitting - documented)
 `unset v; echo "${v:-"a b"}"` → rush `"a b"` (quote characters in
 output), bash `a b`. Unquoted form also collapses runs of spaces.
 Extremely common default-value idiom produces wrong strings. **Effort: M**
 
-### C77 — Adjacent text around `"x${arr[@]}y"` collapses the array
+### C77 — Adjacent text around `"x${arr[@]}y"` collapses the array ✅ done
 `a=(1 2); printf "[%s]" "x${a[@]}y"` → rush `[x1 2y]` (one word), bash
 `[x1][2y]` (prefix glues to first element, suffix to last). Same for
 `"$@"`. **Effort: M**

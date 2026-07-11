@@ -3487,3 +3487,52 @@ fn ps4_expansion_and_wait_jobs_flags() {
     let (out, _) = rush("sleep 5 & jobs -r | grep -c sleep; kill %1");
     assert_eq!(out, "1\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn ifs_splits_only_expansion_results() {
+    // C74: literal command-line text was split on a custom IFS — severe,
+    // silent corruption. Only expansion output may split.
+    let (out, _) = rush("IFS=x; echo axb");
+    assert_eq!(out, "axb\n");
+    let (out, _) = rush(r#"IFS=-; set -- a b c; echo "$*"; echo $*"#);
+    assert_eq!(out, "a-b-c\na b c\n");
+    // …while expansion results still split, adjacent literals unsplit.
+    let (out, _) = rush(r#"IFS=,; v="1,2"; printf "[%s]" a${v}b; echo"#);
+    assert_eq!(out, "[a1][2b]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn prefix_assignments_scope_to_builtins() {
+    // C75: `IFS=: read` neither applied nor restored the assignment.
+    let (out, _) = rush(r#"IFS=: read -r x y <<< "1:2:3"; echo "$x|$y"; printf '[%s]' "$IFS""#);
+    assert_eq!(out, "1|2:3\n[ \t\n]");
+    // The builtin's own writes persist; the prefix var restores fully
+    // (removed again if it didn't exist before).
+    let (out, _) = rush(r#"FOO=1 true; echo "${FOO:-none}"; f(){ echo "in=$FOO"; }; FOO=baz f; echo "after=${FOO:-none}""#);
+    assert_eq!(out, "none\nin=baz\nafter=none\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn quotes_inside_default_expansion_words() {
+    // C76: quotes inside ${v:-word} leaked into the output verbatim.
+    let (out, _) = rush(r#"unset v; echo "${v:-"a b"}"; echo "${v:-"a  b"}""#);
+    assert_eq!(out, "a b\na  b\n");
+    // Inside a double-quoted ${}, single quotes are literal characters.
+    let (out, _) = rush(r#"unset v; echo "${v:-'lit'}"; echo ${v:-'one two'}"#);
+    assert_eq!(out, "'lit'\none two\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn quoted_array_expansion_with_adjacent_text() {
+    // C77: "x${a[@]}y" collapsed the whole array into one word.
+    let (out, _) = rush(r#"a=(1 2); printf "[%s]" "x${a[@]}y"; echo"#);
+    assert_eq!(out, "[x1][2y]\n");
+    let (out, _) = rush(r#"set -- p q r; printf "[%s]" "x$@y"; echo; set --; printf "[%s]" "x$@y"; echo"#);
+    assert_eq!(out, "[xp][q][ry]\n[xy]\n");
+    let (out, _) = rush(r#"a=(only); printf "[%s]" "x${a[@]}y"; echo; a=(1 2); printf "[%s]" "L${!a[@]}R"; echo"#);
+    assert_eq!(out, "[xonlyy]\n[L0][1R]\n");
+}

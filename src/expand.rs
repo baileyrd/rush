@@ -505,10 +505,39 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
     for (i, part) in word.iter().enumerate() {
         match part {
             WordPart::Literal(s) => sp.add_unsplit(s),
-            WordPart::Quoted(s) => sp.add_unsplit(&expand_dollars(s)?),
+            WordPart::Quoted(s) => {
+                // `"x${a[@]}y"` / `"x$@y"` (C77): the prefix attaches to
+                // the first element and the suffix to the last, with each
+                // middle element its own field — bash's rule. The
+                // standalone forms were already handled above.
+                if let Some((pre, values, post)) = quoted_embedded_at(s)? {
+                    if values.is_empty() {
+                        if !(pre.is_empty() && post.is_empty()) || word.len() > 1 {
+                            sp.add_unsplit(&format!("{pre}{post}"));
+                        }
+                    } else {
+                        sp.add_unsplit(&format!("{pre}{}", values[0]));
+                        for v in &values[1..] {
+                            sp.soft_pending = true;
+                            sp.add_unsplit(v);
+                        }
+                        sp.add_unsplit(&post);
+                    }
+                    continue;
+                }
+                sp.add_unsplit(&expand_dollars(s)?)
+            }
             WordPart::Unquoted(s) => {
                 let text = if i == 0 { tilde_expand(s) } else { s.clone() };
-                sp.add_split(&expand_unquoted(&text)?, &ifs);
+                // Only expansion output splits on `$IFS` (C74) — literal
+                // source text (a tilde result included) never does.
+                for (chunk, from_expansion) in expand_unquoted_chunks(&text)? {
+                    if from_expansion {
+                        sp.add_split(&chunk, &ifs);
+                    } else {
+                        sp.add_literal_unquoted(&chunk);
+                    }
+                }
             }
             // See `WordPart::ArrayLiteral`'s own doc comment: `assignment_split`
             // always intercepts a word shaped like this before it reaches here.
@@ -946,6 +975,22 @@ impl Splitter {
         f.quoted = true;
     }
 
+    /// Add literal unquoted source text (C74): never split — the only
+    /// text `$IFS` may split is what an expansion produced — but glob
+    /// metacharacters stay active, and the field is not marked quoted
+    /// (an all-empty unquoted field still drops).
+    fn add_literal_unquoted(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        let f = self.current();
+        f.plain.push_str(s);
+        f.pattern.push_str(s);
+        if has_glob_meta(s) {
+            f.globbable = true;
+        }
+    }
+
     /// Add the result of an unquoted expansion: `$IFS` characters become
     /// field boundaries (whitespace collapses; non-whitespace delimiters
     /// don't), and metacharacters stay active for globbing.
@@ -1124,6 +1169,57 @@ fn parse_whole_array_at(s: &str) -> Option<WholeArrayAt> {
     }
 }
 
+/// Scan quoted text for an embedded `$@`, `${@}`, `${arr[@]}`, or
+/// `${!arr[@]}` (C77). `Some((pre, values, post))` when found — `pre` and
+/// `post` already `$`-expanded; only the *first* occurrence is treated
+/// this way (multiple whole-array references in one quoted word is out of
+/// scope). `None` means "no embedded whole-array reference: expand
+/// normally".
+fn quoted_embedded_at(s: &str) -> Result<Option<(String, Vec<String>, String)>, String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        // `$@`
+        if bytes.get(i + 1) == Some(&b'@') {
+            let pre = expand_dollars(&s[..i])?;
+            let post = expand_dollars(&s[i + 2..])?;
+            return Ok(Some((pre, crate::vars::args(), post)));
+        }
+        if bytes.get(i + 1) == Some(&b'{')
+            && let Some(close) = s[i + 2..].find('}').map(|c| c + i + 2)
+        {
+            let inner = &s[i + 2..close];
+            let values = if inner == "@" {
+                Some(crate::vars::args())
+            } else {
+                match parse_whole_array_at(&format!("${{{inner}}}")) {
+                    Some(WholeArrayAt::Values(name)) => Some(crate::vars::array_values(&name)),
+                    Some(WholeArrayAt::Keys(name)) if crate::vars::is_assoc(&name) => {
+                        Some(crate::vars::assoc_keys(&name))
+                    }
+                    Some(WholeArrayAt::Keys(name)) => Some(
+                        crate::vars::array_indices(&name).iter().map(usize::to_string).collect(),
+                    ),
+                    None => None,
+                }
+            };
+            if let Some(values) = values {
+                let pre = expand_dollars(&s[..i])?;
+                let post = expand_dollars(&s[close + 1..])?;
+                return Ok(Some((pre, values, post)));
+            }
+            i = close + 1;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(None)
+}
+
 /// Tilde expansion at the start of a string (C117): `~` is `$HOME`, `~+`
 /// is `$PWD`, `~-` is `$OLDPWD`, and `~user` is that user's home directory
 /// from the password database. An unresolvable prefix (unknown user, unset
@@ -1180,18 +1276,57 @@ pub(crate) fn expand_unquoted(text: &str) -> Result<String, String> {
 }
 
 fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, String> {
-    let mut out = String::new();
+    Ok(expand_dollars_chunks(text, allow_process_sub)?.into_iter().map(|(s, _)| s).collect())
+}
+
+/// Chunked output for [`expand_dollars_impl`]: accumulated text spans
+/// tagged with whether they came from an expansion (C74) — only those
+/// spans are subject to `$IFS` field splitting. Literal source text never
+/// splits, so `IFS=x; echo axb` keeps `axb` whole like bash.
+#[derive(Default)]
+struct Chunks(Vec<(String, bool)>);
+
+impl Chunks {
+    fn lit_char(&mut self, c: char) {
+        match self.0.last_mut() {
+            Some((s, false)) => s.push(c),
+            _ => self.0.push((c.to_string(), false)),
+        }
+    }
+    fn lit(&mut self, text: &str) {
+        match self.0.last_mut() {
+            Some((s, false)) => s.push_str(text),
+            _ => self.0.push((text.to_string(), false)),
+        }
+    }
+    fn exp(&mut self, text: &str) {
+        match self.0.last_mut() {
+            Some((s, true)) => s.push_str(text),
+            _ => self.0.push((text.to_string(), true)),
+        }
+    }
+}
+
+/// As [`expand_dollars`], but for unquoted argv text: process substitution
+/// allowed, and the result arrives as (text, from_expansion) chunks — see
+/// [`Chunks`].
+pub(crate) fn expand_unquoted_chunks(text: &str) -> Result<Vec<(String, bool)>, String> {
+    expand_dollars_chunks(text, true)
+}
+
+fn expand_dollars_chunks(text: &str, allow_process_sub: bool) -> Result<Vec<(String, bool)>, String> {
+    let mut out = Chunks::default();
     let mut chars = text.chars().peekable();
 
     while let Some(c) = chars.next() {
         if allow_process_sub && matches!(c, '<' | '>') && chars.peek() == Some(&'(') {
             chars.next(); // consume '('
             let inner = take_balanced_paren(&mut chars)?;
-            out.push_str(&crate::exec::process_substitute(&inner, c == '>')?);
+            out.lit(&crate::exec::process_substitute(&inner, c == '>')?);
             continue;
         }
         if c != '$' {
-            out.push(c);
+            out.lit_char(c);
             continue;
         }
 
@@ -1204,26 +1339,26 @@ fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, St
                     chars.next();
                     let expr = take_arith(&mut chars)?;
                     let expr = expand_dollars(&expr)?;
-                    out.push_str(&crate::arith::eval(&expr)?.to_string());
+                    out.exp(&crate::arith::eval(&expr)?.to_string());
                 } else {
                     // `$(...)` — command substitution. Drops trailing newlines
                     // (and the `\r` that precedes them on Windows).
                     let inner = take_balanced_paren(&mut chars)?;
                     let output = command_substitute(&inner)?;
-                    out.push_str(output.trim_end_matches(['\n', '\r']));
+                    out.exp(output.trim_end_matches(['\n', '\r']));
                 }
             }
             // `$?` — the last pipeline's exit status.
             Some('?') => {
                 chars.next();
-                out.push_str(&crate::vars::last_status().to_string());
+                out.exp(&crate::vars::last_status().to_string());
             }
             // `$!` — the most recently backgrounded job's pid; empty if
             // nothing has been backgrounded yet.
             Some('!') => {
                 chars.next();
                 if let Some(pid) = crate::vars::last_bg_pid() {
-                    out.push_str(&pid.to_string());
+                    out.exp(&pid.to_string());
                 }
             }
             // `$$` — the shell's own pid (C41). One process per shell here,
@@ -1232,35 +1367,35 @@ fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, St
             // likewise the *parent* shell's pid even inside `(...)`/`$(...)`.
             Some('$') => {
                 chars.next();
-                out.push_str(&std::process::id().to_string());
+                out.exp(&std::process::id().to_string());
             }
             // `$-` — the currently-set single-letter options (C41).
             Some('-') => {
                 chars.next();
-                out.push_str(&crate::vars::option_flags());
+                out.exp(&crate::vars::option_flags());
             }
             // `$#` — number of positional parameters.
             Some('#') => {
                 chars.next();
-                out.push_str(&crate::vars::arg_count().to_string());
+                out.exp(&crate::vars::arg_count().to_string());
             }
             // `$@` — all positional parameters, space-joined here. (A
             // standalone `"$@"` keeps each parameter separate; see below.)
             Some('@') => {
                 chars.next();
-                out.push_str(&crate::vars::args().join(" "));
+                out.exp(&crate::vars::args().join(" "));
             }
             // `$*` — all positional parameters, joined with `$IFS`'s first
             // character (space if unset, nothing if IFS is set but empty).
             Some('*') => {
                 chars.next();
-                out.push_str(&crate::vars::args().join(&Ifs::current().star_sep));
+                out.exp(&crate::vars::args().join(&Ifs::current().star_sep));
             }
             // `$0`–`$9` — positional parameters.
             Some(&c) if c.is_ascii_digit() => {
                 chars.next();
                 let n = (c as u8 - b'0') as usize;
-                out.push_str(&arg_checked(n)?);
+                out.exp(&arg_checked(n)?);
             }
             Some('{') => {
                 chars.next(); // consume '{'
@@ -1282,7 +1417,7 @@ fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, St
                 if !closed {
                     return Err("unterminated `${`".into());
                 }
-                out.push_str(&expand_braced(&inner)?);
+                out.exp(&expand_braced(&inner, allow_process_sub)?);
             }
             Some(&c2) if c2 == '_' || c2.is_ascii_alphabetic() => {
                 let mut name = String::new();
@@ -1294,15 +1429,15 @@ fn expand_dollars_impl(text: &str, allow_process_sub: bool) -> Result<String, St
                         break;
                     }
                 }
-                out.push_str(&var_lookup_checked(&name)?);
+                out.exp(&var_lookup_checked(&name)?);
             }
             // A lone `$` (or one before punctuation/digits we don't handle yet)
             // is just a literal dollar sign.
-            _ => out.push('$'),
+            _ => out.lit_char('$'),
         }
     }
 
-    Ok(out)
+    Ok(out.0)
 }
 
 /// Read up to the matching `)` after an already-consumed `(`, returning the
@@ -1531,7 +1666,7 @@ pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<UnsetTarget>,
 /// *not* a subscript combined with pattern-removal or a default/alternate
 /// operator (`${arr[0]#pat}`, `${arr[@]:-x}`), a documented, accepted scope
 /// limit (bash supports these; this codebase doesn't yet).
-fn expand_braced(inner: &str) -> Result<String, String> {
+fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
     // `${!arr[@]}` / `${!arr[*]}` — the array's own set indices/keys, not
     // the values (skips gaps in a sparse indexed array entirely, same as
     // `${arr[@]}`).
@@ -1581,7 +1716,7 @@ fn expand_braced(inner: &str) -> Result<String, String> {
                 // empty expansion (verified: `w=; echo "${!w}"` aborts).
                 return Err(format!("{target}: invalid variable name"));
             }
-            return expand_braced(&format!("{referent}{ops}"));
+            return expand_braced(&format!("{referent}{ops}"), unquoted);
         }
     }
 
@@ -1850,7 +1985,7 @@ fn expand_braced(inner: &str) -> Result<String, String> {
     let colon = rest.starts_with(':');
     let ops = if colon { &rest[1..] } else { rest };
     let op = ops.chars().next();
-    let word = expand_dollars(&ops[op.map_or(0, char::len_utf8)..])?;
+    let word = expand_braced_word(&ops[op.map_or(0, char::len_utf8)..], unquoted)?;
 
     let value = var_raw(name);
     let use_word = match &value {
@@ -2083,6 +2218,71 @@ fn reconstruct_assignment(name: &str) -> String {
     } else {
         format!("declare -{flags} {name}={value}")
     }
+}
+
+/// Expand a default/alternate-family word (`${v:-word}`'s `word`) with
+/// quote *removal* (C76): `'…'` spans are literal, `"…"` spans expand
+/// without their quotes, a backslash escapes the next character, and bare
+/// text gets ordinary `$`-expansion. The quotes used to leak into the
+/// output verbatim. (When the whole `${…}` is unquoted, the result still
+/// splits as one expansion — inner quoting doesn't suppress field
+/// splitting here, a documented narrowing; the ubiquitous outer-quoted
+/// `"${v:-…}"` form is exact.)
+fn expand_braced_word(src: &str, unquoted: bool) -> Result<String, String> {
+    let mut out = String::new();
+    let mut pending = String::new();
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // Inside a double-quoted `${…}`, a single quote is an
+            // ordinary literal character (bash: `"${v:-'lit $x'}"` keeps
+            // the quotes and expands `$x`); only an unquoted `${…}` treats
+            // it as quoting.
+            '\'' if !unquoted => pending.push('\''),
+            '\'' => {
+                out.push_str(&expand_dollars(&std::mem::take(&mut pending))?);
+                for qc in chars.by_ref() {
+                    if qc == '\'' {
+                        break;
+                    }
+                    out.push(qc);
+                }
+            }
+            '"' => {
+                out.push_str(&expand_dollars(&std::mem::take(&mut pending))?);
+                let mut inner = String::new();
+                let mut closed = false;
+                while let Some(qc) = chars.next() {
+                    match qc {
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
+                        '\\' => match chars.next() {
+                            Some(n @ ('"' | '\\' | '`')) => inner.push(n),
+                            Some(n) => {
+                                inner.push('\\');
+                                inner.push(n);
+                            }
+                            None => break,
+                        },
+                        _ => inner.push(qc),
+                    }
+                }
+                let _ = closed;
+                out.push_str(&expand_dollars(&inner)?);
+            }
+            '\\' => {
+                out.push_str(&expand_dollars(&std::mem::take(&mut pending))?);
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            _ => pending.push(c),
+        }
+    }
+    out.push_str(&expand_dollars(&pending)?);
+    Ok(out)
 }
 
 /// One `declare -p` output line (C96), in bash's own format exactly:
@@ -2478,10 +2678,10 @@ mod tests {
         assert_eq!(one("echo \"$*\""), vec!["echo", "a:b:c"]);
         assert_eq!(one("echo \"${*}\""), vec!["echo", "a:b:c"]);
 
-        // `$@` is unaffected — always space-joined regardless of IFS (when
-        // not the standalone `"$@"` idiom, which instead yields separate
-        // arguments — see `variable_tilde_and_quoting`-adjacent behavior).
-        assert_eq!(one("echo \"x$@y\""), vec!["echo", "xa b cy"]);
+        // `"x$@y"` (C77): the prefix attaches to the first parameter and
+        // the suffix to the last, each middle one its own word —
+        // unaffected by IFS (verified against bash).
+        assert_eq!(one("echo \"x$@y\""), vec!["echo", "xa", "b", "cy"]);
 
         crate::vars::unset("IFS");
         crate::vars::set_args("rush".to_string(), Vec::new());

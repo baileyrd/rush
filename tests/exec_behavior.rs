@@ -3976,3 +3976,37 @@ fn declare_redeclare_preserves_and_setu_arrays() {
     let (out, _) = rush("set -u; declare -A m=([k]=v); echo \"${m[k]}\"; echo ok");
     assert_eq!(out, "v\nok\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn test_builtin_file_operators_and_grouping() {
+    // C132: the test/[ builtin was missing the file-type/comparison
+    // operators that already worked in [[ ]], plus \( \) grouping.
+    let dir = std::env::temp_dir().join(format!("rush_testops_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (f1, f2) = (dir.join("f1"), dir.join("f2"));
+    std::fs::write(&f1, "").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&f2, "").unwrap();
+    std::os::unix::fs::symlink(&f1, dir.join("link")).unwrap();
+
+    let (out, _) = rush(&format!(
+        "[ -h {d}/link ]; echo $?; [ -L {d}/link ]; echo $?; test {f2} -nt {f1}; echo $?; test {f1} -ot {f2}; echo $?; test {f1} -ef {f1}; echo $?; [ -O {f1} ]; echo $?",
+        d = dir.display(), f1 = f1.display(), f2 = f2.display()
+    ));
+    assert_eq!(out, "0\n0\n0\n0\n0\n0\n");
+
+    // -t 1 is not a tty under the test harness; parenthesized grouping.
+    let (out, _) = rush(r#"[ -t 1 ]; echo notty=$?; [ \( a = a \) ]; echo $?; [ \( -n x \) -a \( -z "" \) ]; echo $?"#);
+    assert_eq!(out, "notty=1\n0\n0\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_zero_checks_existence() {
+    // C132: kill -0 always succeeded; it must probe liveness.
+    let (out, _) = rush("kill -0 $$; echo self=$?; kill -0 999999 2>/dev/null; echo dead=$?");
+    assert_eq!(out, "self=0\ndead=1\n");
+}

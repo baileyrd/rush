@@ -148,6 +148,9 @@ thread_local! {
     static ALLEXPORT: RefCell<bool> = const { RefCell::new(false) };
     // `set -f`: pathname expansion (globbing) is disabled (C107).
     static NOGLOB: RefCell<bool> = const { RefCell::new(false) };
+    // `set -T` (functrace): DEBUG/RETURN traps are inherited by functions
+    // (C132) — without it, a global RETURN trap must not fire on return.
+    static FUNCTRACE: RefCell<bool> = const { RefCell::new(false) };
     // `set -x`: echo each command to stderr before running it (see
     // `exec::trace_command`).
     static XTRACE: RefCell<bool> = const { RefCell::new(false) };
@@ -259,6 +262,14 @@ pub fn set_noglob(on: bool) {
 
 pub fn noglob() -> bool {
     NOGLOB.with(|e| *e.borrow())
+}
+
+pub fn set_functrace(on: bool) {
+    FUNCTRACE.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn functrace() -> bool {
+    FUNCTRACE.with(|e| *e.borrow())
 }
 
 pub fn set_nounset(on: bool) {

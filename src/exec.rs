@@ -280,11 +280,15 @@ fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
                 && let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r)
             {
                 let fields: Vec<&str> = rest.split_whitespace().collect();
-                // After the comm field: state=0 …, cutime=13, cstime=14.
+                let field = |i: usize| fields.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                // After the comm field: state=0 …, utime=11, stime=12,
+                // cutime=13, cstime=14. Bash's `time` reports the shell's
+                // own CPU (in-process builtins/loops) *plus* reaped
+                // children, so sum self and child times for each of user/sys.
                 let ticks = 100.0; // Linux USER_HZ
-                let cu = fields.get(13).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                let cs = fields.get(14).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                return (cu / ticks, cs / ticks);
+                let user = field(11) + field(13);
+                let sys = field(12) + field(14);
+                return (user / ticks, sys / ticks);
             }
         }
         (0.0, 0.0)
@@ -750,17 +754,29 @@ fn call_function(argv: &[String]) -> Result<i32, String> {
     crate::vars::push_local_frame();
     crate::vars::push_function(&argv[0]); // `${FUNCNAME[@]}` (C67)
 
+    // Whether a RETURN trap fires for this call depends on inheritance: an
+    // enclosing RETURN trap is only inherited by a function under
+    // `set -T`/functrace. Without it, RETURN fires only if the trap was
+    // (re)installed *within* this function — so capture the pre-body value
+    // to detect that (C132), matching bash.
+    let return_before = crate::trap::get("RETURN");
+
     let result = exec_list(&body);
 
+    let return_after = crate::trap::get("RETURN");
     crate::vars::pop_function();
     let returned = crate::vars::returning();
     crate::vars::set_returning(None);
     crate::vars::set_args(name0, saved);
     crate::vars::pop_local_frame();
 
-    // `trap 'cmd' RETURN` (C65) fires as the function returns, with the
-    // function's own status preserved for the caller.
-    crate::trap::fire_preserving("RETURN");
+    // `trap 'cmd' RETURN` (C65) fires as the function returns — always under
+    // functrace, otherwise only when the body set its own RETURN trap.
+    if crate::vars::functrace()
+        || (return_after.is_some() && return_after != return_before)
+    {
+        crate::trap::fire_preserving("RETURN");
+    }
 
     Ok(returned.unwrap_or(result?))
 }

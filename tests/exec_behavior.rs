@@ -4031,3 +4031,74 @@ fn expansion_transforms_and_export_array() {
     let (out, _) = rush(r#"export a=(1 2 3); echo "${a[1]}"; export b=(x "y z"); echo "${b[@]}""#);
     assert_eq!(out, "2\nx y z\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn printf_hex_unicode_and_b_terminator() {
+    // C135: `\xHH` hex escapes in both the format string and a `%b`
+    // argument, `\uHHHH` Unicode, `\e` escape, and `%b`'s `\c` which stops
+    // the whole printf. Each verified against bash.
+    assert_eq!(rush(r#"printf 'A\x42C\n'"#).0, "ABC\n");
+    assert_eq!(rush(r#"printf '%b\n' 'A\x42C'"#).0, "ABC\n");
+    assert_eq!(rush(r#"printf '%b' 'foo\cbar'; echo END"#).0, "fooEND\n");
+    // `\c` is not special in the format string itself.
+    assert_eq!(rush(r#"printf 'foo\cbar'; echo END"#).0, "foo\\cbarEND\n");
+    // `%b` octal accepts an optional leading `0` prefix (`\0NNN`).
+    assert_eq!(rush(r#"printf '%b\n' '\101\0101'"#).0, "AA\n");
+    // A syntactically valid but oversized integer is a warning (status 0),
+    // not an error (status 1); bash clamps to i64::MAX.
+    let (out, st) = rush("printf '%d\\n' 99999999999999999999");
+    assert_eq!(out, "9223372036854775807\n");
+    assert_eq!(st, 0);
+    // A non-numeric argument is a hard error (status 1).
+    assert_eq!(rush("printf '%d\\n' abc").1, 1);
+    // `%'d` thousands flag: accepted, no-op in the C locale.
+    assert_eq!(rush("printf \"%'d\\n\" 1234567").0, "1234567\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn mapfile_skip_count_origin_callback() {
+    // C135: mapfile's -s (skip), -n (count), -O (origin, preserving the
+    // rest of the array), and -c/-C (callback every quantum lines with the
+    // target index and line appended). All verified against bash.
+    assert_eq!(rush_stdin(r#"mapfile -t -s 1 arr; echo "${arr[@]}""#, "a\nb\nc\nd\n").0, "b c d\n");
+    assert_eq!(rush_stdin(r#"mapfile -t -n 2 arr; echo "${arr[@]}""#, "a\nb\nc\nd\n").0, "a b\n");
+    assert_eq!(
+        rush_stdin(r#"arr=(x y z w q r); mapfile -t -O 2 arr; echo "${arr[@]}""#, "a\nb\n").0,
+        "x y a b q r\n"
+    );
+    assert_eq!(rush_stdin(r#"mapfile -t -c 1 -C "echo cb" arr"#, "a\nb\n").0, "cb 0 a\ncb 1 b\n");
+    assert_eq!(rush_stdin(r#"mapfile -c 2 -C "echo CB" -t arr"#, "a\nb\nc\nd\ne\n").0, "CB 1 b\nCB 3 d\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn parameter_error_carries_name_prefix() {
+    // C135: `${x:?msg}` / `${x?}` errors are prefixed with the parameter
+    // name, and the default text distinguishes `:?` ("null or not set")
+    // from `?` ("not set"), matching bash. Custom messages keep the prefix.
+    assert_eq!(rush("unset x; echo ${x:?is empty}").1, 1);
+    assert!(rush_stderr("unset x; echo ${x:?is empty}").0.contains("x: is empty"));
+    assert!(rush_stderr("unset foo; echo ${foo?}").0.contains("foo: parameter not set"));
+    assert!(rush_stderr("foo=; echo ${foo:?}").0.contains("foo: parameter null or not set"));
+    assert!(rush_stderr("a=(); echo ${a[0]:?boom}").0.contains("a[0]: boom"));
+}
+
+#[cfg(unix)]
+#[test]
+fn return_trap_inheritance_follows_functrace() {
+    // C135: a RETURN trap set *inside* a function fires on that function's
+    // return regardless of functrace; an enclosing (top-level) RETURN trap
+    // is only inherited by functions under `set -T`. Verified against bash.
+    assert_eq!(rush("f(){ trap 'echo R' RETURN; echo in-f; }; f; echo after").0, "in-f\nR\nafter\n");
+    assert_eq!(rush("trap 'echo R' RETURN; f(){ echo in-f; }; f; echo after").0, "in-f\nafter\n");
+    assert_eq!(rush("set -T; trap 'echo R' RETURN; f(){ echo in-f; }; f; echo after").0, "in-f\nR\nafter\n");
+    // A callee does not inherit its caller's own RETURN trap without -T.
+    assert_eq!(
+        rush("g(){ echo in-g; }; f(){ trap 'echo R' RETURN; g; echo in-f; }; f; echo after").0,
+        "in-g\nin-f\nR\nafter\n"
+    );
+    // trap -p prints DEBUG/ERR/RETURN/EXIT bare, without a SIG prefix.
+    assert_eq!(rush("trap 'echo e' ERR; trap -p ERR").0, "trap -- 'echo e' ERR\n");
+}

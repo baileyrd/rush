@@ -3300,3 +3300,56 @@ fn funcnest_and_recursion_cap() {
     let (_, code) = rush("f() { f; }; f");
     assert_eq!(code, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn builtins_and_functions_as_pipeline_stages() {
+    // C82: a builtin/function pipeline stage was exec'd as an external
+    // command and failed with "No such file or directory".
+    let (out, code) = rush("echo hi | read x; echo done$?");
+    assert_eq!(out, "done0\n");
+    assert_eq!(code, 0);
+
+    let (out, _) = rush("readonly RV=1; readonly -p | grep -c RV");
+    assert_eq!(out, "1\n");
+
+    let (out, _) = rush("alias aa=1; alias | cat");
+    assert_eq!(out, "alias aa='1'\n");
+
+    let (out, _) = rush("f(){ echo fn-out; }; f | tr a-z A-Z");
+    assert_eq!(out, "FN-OUT\n");
+
+    // The variable set by a piped `read` stays in the stage's subshell —
+    // bash's default (no lastpipe) semantics.
+    let (out, _) = rush(r#"x=old; echo new | read x; echo "$x""#);
+    assert_eq!(out, "old\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_persistent_fd_redirections() {
+    // C111: exec with fd > 3, dup, close, and move all failed with
+    // "Bad file descriptor" — and the failure aborted the script.
+    let dir = std::env::temp_dir().join(format!("rush_exec_fds_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("log");
+
+    let (out, _) = rush(&format!(
+        "exec 5>>{p}; echo entry >&5; exec 5>&-; cat {p}",
+        p = log.display()
+    ));
+    assert_eq!(out, "entry\n");
+
+    let (out, _) = rush("exec 4>&1; echo via4 >&4; exec 4>&-; echo after");
+    assert_eq!(out, "via4\nafter\n");
+
+    // Move: dup then close the source.
+    let (out, _) = rush("exec 3>&1; exec 1>&3-; echo moved");
+    assert_eq!(out, "moved\n");
+
+    // Closing an fd that was never open is fine; per-command close too.
+    let (out, _) = rush("exec 9>&-; echo ok; ls /nosuchdir 2>&-; echo rc=$?");
+    assert_eq!(out, "ok\nrc=2\n");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

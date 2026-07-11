@@ -129,6 +129,19 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
         let target_pgid = pgid;
 
         let pid = match stage {
+            // A builtin or function as a pipeline stage runs by forking
+            // (C82) — it can't be exec'd as an external command, which is
+            // what `echo hi | read x` / `alias | cat` used to attempt.
+            Stage::Simple(cmd)
+                if cmd.argv.first().is_some_and(|n| {
+                    crate::func::exists(n) || crate::builtins::is_builtin(n)
+                }) =>
+            {
+                let (pid, next_stdin) =
+                    spawn_builtin_stage(cmd, prev_stdin.take(), is_last, target_pgid)?;
+                prev_stdin = next_stdin;
+                pid
+            }
             Stage::Simple(cmd) => {
                 let (mut command, real_pipe_read) = crate::exec::build_stage(
                     cmd,
@@ -222,6 +235,57 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
 /// running the compound, so there's nothing to give the fds back to).
 /// Returns `(pid, next_stdin)`: the child's pid, and — if `!is_last` — the
 /// read end of a pipe the next stage should use as its own stdin.
+/// Fork one builtin/function pipeline stage (C82) — the same wiring as
+/// [`spawn_compound_stage`], with the child dispatching in-process
+/// builtin/function machinery instead of `run_compound`.
+fn spawn_builtin_stage(
+    cmd: &crate::exec::Command,
+    stdin_src: Option<File>,
+    is_last: bool,
+    target_pgid: pid_t,
+) -> Result<(pid_t, Option<File>), String> {
+    let next_pipe = if is_last { None } else { Some(crate::exec::make_pipe()?) };
+
+    match unsafe { crate::sys::fork() } {
+        -1 => Err(crate::sys::last_os_error().to_string()),
+        0 => {
+            unsafe {
+                crate::sys::setpgid(0, target_pgid);
+                for &sig in &JOB_SIGNALS {
+                    crate::sys::signal(sig, crate::sys::SIG_DFL);
+                }
+                crate::sys::signal(crate::sys::SIGCHLD, crate::sys::SIG_DFL);
+            }
+            if let Some(stdin) = &stdin_src {
+                unsafe {
+                    crate::sys::dup2(stdin.as_raw_fd(), 0);
+                }
+            }
+            if let Some((_, write)) = &next_pipe {
+                unsafe {
+                    crate::sys::dup2(write.as_raw_fd(), 1);
+                }
+            }
+            drop(stdin_src);
+            drop(next_pipe);
+            match crate::exec::redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref()) {
+                Ok(guard) => std::mem::forget(guard),
+                Err(e) => {
+                    eprintln!("rush: {e}");
+                    crate::trap::exit_shell(1);
+                }
+            }
+            crate::trap::enter_subshell(); // C80: traps reset in the child
+            let status = crate::exec::run_stage_command_in_child(cmd);
+            crate::trap::exit_shell(status);
+        }
+        pid => {
+            let next_stdin = next_pipe.map(|(read, _)| read);
+            Ok((pid, next_stdin))
+        }
+    }
+}
+
 fn spawn_compound_stage(
     stage: &CompoundStage,
     stdin_src: Option<File>,
@@ -949,17 +1013,17 @@ mod tests {
 
     #[test]
     fn foreground_single_command_reports_exit_status() {
-        let pipeline = Pipeline { commands: vec![cmd(&["true"])] };
+        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "exit 0"])] };
         assert_eq!(run_foreground(&pipeline).unwrap(), 0);
 
-        let pipeline = Pipeline { commands: vec![cmd(&["false"])] };
+        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "exit 1"])] };
         assert_eq!(run_foreground(&pipeline).unwrap(), 1);
     }
 
     #[test]
     fn foreground_pipeline_reports_last_stage_status() {
         let pipeline = Pipeline {
-            commands: vec![cmd(&["false"]), cmd(&["true"])],
+            commands: vec![cmd(&["sh", "-c", "exit 1"]), cmd(&["sh", "-c", "exit 0"])],
         };
         // Every stage still runs (no short-circuiting within a pipeline);
         // only the last stage's status is the pipeline's status.
@@ -982,7 +1046,7 @@ mod tests {
         // job control needs a tty to hand the terminal back to), so it would
         // silently no-op here. Drive the same underlying bookkeeping
         // (`update_by_pid`/`notify_and_prune`) directly instead.
-        let pipeline = Pipeline { commands: vec![cmd(&["true"])] };
+        let pipeline = Pipeline { commands: vec![cmd(&["sh", "-c", "exit 0"])] };
         run_background(&pipeline).unwrap();
 
         let pid = STATE.with(|s| s.borrow().jobs.last().unwrap().pids[0]);

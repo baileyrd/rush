@@ -98,6 +98,7 @@ pub enum RedirOp {
     Both,        // `&>`       — stdout+stderr to a file (truncate)
     BothAppend,  // `&>>`      — stdout+stderr to a file (append)
     Dup(u32),    // `>&n`/`<&n`— fd duplicates fd n
+    Move(u32),   // `>&n-`/`<&n-` — dup then close n (C111)
     /// `>&$word`/`<&"${arr[N]}"` — the target fd comes from a word,
     /// resolved at expansion time (C66's coproc plumbing).
     DupWord,
@@ -601,7 +602,12 @@ fn lex_lt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
                 let t = target
                     .parse()
                     .map_err(|_| LexError::Syntax("expected a file descriptor after `<&`".into()))?;
-                RedirOp::Dup(t)
+                if chars.peek() == Some(&'-') {
+                    chars.next();
+                    RedirOp::Move(t) // `<&n-` (C111)
+                } else {
+                    RedirOp::Dup(t)
+                }
             }
         }
         _ => RedirOp::Read,
@@ -633,7 +639,12 @@ fn lex_gt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
                 let t = target
                     .parse()
                     .map_err(|_| LexError::Syntax("expected a file descriptor after `>&`".into()))?;
-                RedirOp::Dup(t)
+                if chars.peek() == Some(&'-') {
+                    chars.next();
+                    RedirOp::Move(t) // `>&n-` (C111)
+                } else {
+                    RedirOp::Dup(t)
+                }
             }
         }
         // `>|` — noclobber override (C50): truncate even under `set -C`.

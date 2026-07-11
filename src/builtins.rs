@@ -188,6 +188,12 @@ fn echo(argv: &[String]) -> i32 {
 /// arguments than the format consumes (and it consumes at least one), the
 /// whole format repeats against the rest, POSIX/bash style: `printf
 /// "%s-%d\n" a 1 b 2 c` is `a-1`, `b-2`, `c-0`.
+/// The `%(fmt)T` strftime subset, exposed for the prompt's `\t`-family
+/// escapes (C125).
+pub(crate) fn strftime_utc(fmt: &str, epoch: i64) -> String {
+    printf::strftime(fmt, epoch)
+}
+
 fn printf_cmd(argv: &[String]) -> i32 {
     // `printf -v var format args...` (C99): format into `var` (or
     // `arr[i]`) instead of stdout — the standard no-subshell formatter.
@@ -415,7 +421,7 @@ mod printf {
 
     /// A strftime subset for `%(fmt)T` (C99), UTC: civil date via the
     /// days-from-epoch algorithm, no timezone database.
-    fn strftime(fmt: &str, epoch: i64) -> String {
+    pub(crate) fn strftime(fmt: &str, epoch: i64) -> String {
         const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June",
             "July", "August", "September", "October", "November", "December"];
         const DAYS: [&str; 7] =

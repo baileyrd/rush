@@ -2041,7 +2041,12 @@ fn at_transform(value: &str, op: &str) -> Option<String> {
                 None => String::new(),
             }
         }
-        "P" => crate::expand_ps1(value),
+        "P" => {
+            // Full prompt expansion: escapes, then `promptvars`-style
+            // `$`-expansion — same two passes the live prompt gets.
+            let escaped = crate::expand_ps1(value);
+            expand_dollars(&escaped).unwrap_or(escaped)
+        }
         _ => return None,
     })
 }

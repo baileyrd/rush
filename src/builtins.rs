@@ -237,7 +237,7 @@ fn printf_cmd(argv: &[String]) -> i32 {
     let mut idx = 0;
     let mut out = String::new();
     let mut status = 0;
-    loop {
+    'cycle: loop {
         let start_idx = idx;
         for piece in &pieces {
             match piece {
@@ -264,11 +264,18 @@ fn printf_cmd(argv: &[String]) -> i32 {
                     if arg.is_some() {
                         idx += 1;
                     }
-                    let (text, err) = printf::format_conv(&resolved, arg.map(String::as_str).unwrap_or(""));
-                    out.push_str(&text);
-                    if let Some(e) = err {
+                    let r = printf::format_conv(&resolved, arg.map(String::as_str).unwrap_or(""));
+                    out.push_str(&r.text);
+                    if let Some(e) = r.error {
                         eprintln!("printf: {e}");
                         status = 1;
+                    }
+                    if let Some(w) = r.warning {
+                        eprintln!("printf: warning: {w}");
+                    }
+                    // `%b`'s `\c` stops the whole printf immediately.
+                    if r.terminate {
+                        break 'cycle;
                     }
                 }
             }
@@ -350,7 +357,7 @@ mod printf {
 
         while let Some(c) = chars.next() {
             if c == '\\' {
-                push_escape(&mut literal, &mut chars);
+                push_escape(&mut literal, &mut chars, false);
             } else if c == '%' {
                 if chars.peek() == Some(&'%') {
                     chars.next();
@@ -372,9 +379,16 @@ mod printf {
     }
 
     /// Resolve one backslash escape (the `\` itself already consumed) into
-    /// `out` — `\\`/`\a`/`\b`/`\f`/`\n`/`\r`/`\t`/`\v`, `\NNN` (one to three
-    /// octal digits), or an unrecognized sequence kept literally.
-    fn push_escape(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars>) {
+    /// `out` — `\\`/`\a`/`\b`/`\e`/`\f`/`\n`/`\r`/`\t`/`\v`, `\xHH` (hex),
+    /// `\uHHHH`/`\UHHHHHHHH` (Unicode), `\NNN` (octal), or an unrecognized
+    /// sequence kept literally. `in_b` marks the `%b` argument context,
+    /// where `\c` terminates all output (signalled by the returned `true`)
+    /// and an octal escape may carry a leading `0` prefix (`\0NNN`).
+    fn push_escape(
+        out: &mut String,
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        in_b: bool,
+    ) -> bool {
         match chars.peek() {
             Some('\\') => {
                 out.push('\\');
@@ -386,6 +400,10 @@ mod printf {
             }
             Some('b') => {
                 out.push('\x08');
+                chars.next();
+            }
+            Some('e') | Some('E') => {
+                out.push('\x1b');
                 chars.next();
             }
             Some('f') => {
@@ -408,7 +426,61 @@ mod printf {
                 out.push('\x0b');
                 chars.next();
             }
+            // `%b`'s `\c` stops the entire printf, discarding the rest.
+            Some('c') if in_b => {
+                chars.next();
+                return true;
+            }
+            // `\xHH`: one or two hex digits.
+            Some('x') => {
+                chars.next();
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < 2 {
+                    match chars.peek().and_then(|c| c.to_digit(16)) {
+                        Some(d) => {
+                            val = val * 16 + d;
+                            chars.next();
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if n == 0 {
+                    out.push_str("\\x");
+                } else {
+                    out.push((val as u8) as char);
+                }
+            }
+            // `\uHHHH` / `\UHHHHHHHH`: a Unicode codepoint.
+            Some('u') | Some('U') => {
+                let wide = chars.peek() == Some(&'U');
+                chars.next();
+                let max = if wide { 8 } else { 4 };
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < max {
+                    match chars.peek().and_then(|c| c.to_digit(16)) {
+                        Some(d) => {
+                            val = val * 16 + d;
+                            chars.next();
+                            n += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if n == 0 {
+                    out.push('\\');
+                    out.push(if wide { 'U' } else { 'u' });
+                } else if let Some(ch) = char::from_u32(val) {
+                    out.push(ch);
+                }
+            }
             Some('0'..='7') => {
+                // `%b` treats a leading `0` as a prefix, not a counted digit.
+                if in_b && chars.peek() == Some(&'0') {
+                    chars.next();
+                }
                 let mut val: u32 = 0;
                 for _ in 0..3 {
                     match chars.peek().and_then(|c| c.to_digit(8)) {
@@ -423,6 +495,7 @@ mod printf {
             }
             _ => out.push('\\'),
         }
+        false
     }
 
     /// Parse `[flags][width][.precision]spec` right after the `%` that
@@ -435,6 +508,9 @@ mod printf {
                 Some('0') => conv.zero = true,
                 Some('+') => conv.plus = true,
                 Some(' ') => conv.space = true,
+                // `%'d` thousands grouping: accepted, no-op in the C locale
+                // (which is all rush runs), matching bash.
+                Some('\'') => {}
                 _ => break,
             }
             chars.next();
@@ -602,13 +678,34 @@ mod printf {
         any.then_some(n)
     }
 
+    /// The result of formatting one conversion: the rendered `text`, an
+    /// optional `error` (printed to stderr, forces exit status 1), an
+    /// optional `warning` (printed to stderr, status unchanged — e.g. an
+    /// out-of-range integer, which bash clamps but still succeeds on), and
+    /// `terminate` (a `%b` argument's `\c`, which stops the whole printf).
+    #[derive(Default)]
+    pub struct Formatted {
+        pub text: String,
+        pub error: Option<String>,
+        pub warning: Option<String>,
+        pub terminate: bool,
+    }
+
+    /// Is `s` syntactically an integer literal (so an unparseable value is
+    /// an overflow, which bash treats as a warning, not a hard error)?
+    fn is_int_syntax(s: &str) -> bool {
+        let s = s.trim();
+        let s = s.strip_prefix(['+', '-']).unwrap_or(s);
+        match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            Some(hex) => !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
+            None => !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
+        }
+    }
+
     /// Format one conversion against its argument (`""` if none was left).
-    /// Returns the formatted text and, if the argument couldn't be parsed as
-    /// a number a numeric conversion needed, an error message (the
-    /// conversion still yields `0`/`""` rather than aborting the whole
-    /// `printf`, matching bash).
-    pub fn format_conv(conv: &Conv, raw: &str) -> (String, Option<String>) {
+    pub fn format_conv(conv: &Conv, raw: &str) -> Formatted {
         let mut error = None;
+        let mut warning = None;
         let mut parse_int = || match raw.trim() {
             "" => 0i64,
             // A leading `'` or `"` means the next character's codepoint —
@@ -617,16 +714,17 @@ mod printf {
             s if s.starts_with('\'') || s.starts_with('"') => {
                 s.chars().nth(1).map(|c| c as i64).unwrap_or(0)
             }
-            // `0x`/`0` prefixed integers, then a float fallback (bash
-            // truncates `printf %d 3.9` to 3, still warning) (C131).
+            // `0x`/`0` prefixed integers, then a fallback. A syntactically
+            // valid but oversized integer is a warning (bash clamps and
+            // still succeeds); anything else (`3.9`, `abc`) is an error.
             s => parse_int_literal(s).unwrap_or_else(|| {
-                if let Ok(f) = s.parse::<f64>() {
-                    error = Some(format!("{raw}: invalid number"));
-                    f as i64
+                let val = s.parse::<f64>().map(|f| f as i64).unwrap_or(0);
+                if is_int_syntax(s) {
+                    warning = Some(format!("{raw}: Numerical result out of range"));
                 } else {
                     error = Some(format!("{raw}: invalid number"));
-                    0
                 }
+                val
             }),
         };
         // Floating-point argument for the float conversions (C131).
@@ -654,9 +752,14 @@ mod printf {
                     body.insert(0, ' ');
                 }
             }
-            return (pad(body, conv, true), float_error);
+            return Formatted {
+                text: pad(body, conv, true),
+                error: float_error,
+                ..Default::default()
+            };
         }
 
+        let mut terminate = false;
         let (body, is_numeric) = match conv.spec {
             's' => (truncate(raw, conv.precision), false),
             // `%q` (C63): quote for reuse as shell input — bash/zsh's
@@ -669,7 +772,10 @@ mod printf {
                 let mut chars = raw.chars().peekable();
                 while let Some(c) = chars.next() {
                     if c == '\\' {
-                        push_escape(&mut expanded, &mut chars);
+                        if push_escape(&mut expanded, &mut chars, true) {
+                            terminate = true;
+                            break;
+                        }
                     } else {
                         expanded.push(c);
                     }
@@ -702,7 +808,12 @@ mod printf {
             _ => unreachable!("parse_conv only accepts known specifiers"),
         };
 
-        (pad(body, conv, is_numeric), error)
+        Formatted {
+            text: pad(body, conv, is_numeric),
+            error,
+            warning,
+            terminate,
+        }
     }
 
     /// Parse an integer literal the way `printf` does: `0x`/`0X` hex,
@@ -1378,33 +1489,74 @@ impl Default for ReadOpts {
 /// where `read reply` on the same input would trim it to empty). "Blank"
 /// (for the menu-redisplay rule) is the caller's job: it means this
 /// returned line is zero-length, not merely all-whitespace.
-/// `mapfile [-t] [array]` / `readarray [-t] [array]` (C61) — read every
-/// line from stdin into an indexed array (`MAPFILE` when no name is
-/// given). Without `-t` each element keeps its trailing newline; with it
-/// the delimiter is stripped — the one flag that matters in real usage
-/// (`-d`/`-n`/`-s`/`-O`/`-c`/`-C` are documented waits, per the item's
-/// own scoping). Reads raw (no backslash processing), one byte at a time
-/// off fd 0 via the same primitive `read` uses, so it never over-consumes.
+/// `mapfile [-t] [-d delim] [-s count] [-n count] [-O origin] [-c quantum]
+/// [-C callback] [array]` / `readarray` (C61) — read lines from stdin into
+/// an indexed array (`MAPFILE` when no name is given). Without `-t` each
+/// element keeps its trailing delimiter; with it the delimiter is stripped.
+/// `-s` skips leading lines, `-n` caps how many are read, `-O` assigns from
+/// a starting index (preserving the rest of the array), and `-c`/`-C`
+/// evaluate a callback every `quantum` lines with the target index and line
+/// appended. Reads raw, one byte at a time off fd 0, so it never
+/// over-consumes.
 fn mapfile_cmd(argv: &[String]) -> i32 {
     let mut strip = false;
     let mut delim = b'\n';
     let mut name: Option<&str> = None;
+    let mut count: usize = 0; // -n: 0 = unlimited
+    let mut skip: usize = 0; // -s
+    let mut origin: usize = 0; // -O
+    let mut has_origin = false;
+    let mut quantum: usize = 5000; // -c
+    let mut callback: Option<String> = None; // -C
     let mut args = argv[1..].iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-t" => strip = true,
-            // `-d DELIM` (C89): split on DELIM instead of newline; an
-            // empty argument means NUL, same as bash.
-            "-d" => match args.next() {
-                Some(d) => delim = d.bytes().next().unwrap_or(0),
-                None => {
-                    eprintln!("{}: -d: option requires an argument", argv[0]);
-                    return 2;
+    // Parse the value of an option given either as `-Xvalue` or `-X value`.
+    macro_rules! opt_val {
+        ($arg:expr, $rest:expr, $flag:literal) => {
+            if !$rest.is_empty() {
+                $rest.to_string()
+            } else {
+                match args.next() {
+                    Some(v) => v.clone(),
+                    None => {
+                        eprintln!("{}: {}: option requires an argument", argv[0], $flag);
+                        return 2;
+                    }
                 }
-            },
-            other if other.starts_with("-d") => delim = other[2..].bytes().next().unwrap_or(0),
-            other if other.starts_with('-') => {
-                eprintln!("{}: {other}: only -t and -d are supported", argv[0]);
+            }
+        };
+    }
+    while let Some(arg) = args.next() {
+        let a = arg.as_str();
+        match a {
+            "-t" => strip = true,
+            _ if a.starts_with("-d") => {
+                // `-d DELIM` (C89): split on DELIM instead of newline; an
+                // empty argument means NUL, same as bash.
+                let v = opt_val!(a, &a[2..], "-d");
+                delim = v.bytes().next().unwrap_or(0);
+            }
+            _ if a.starts_with("-n") => {
+                let v = opt_val!(a, &a[2..], "-n");
+                count = v.parse().unwrap_or(0);
+            }
+            _ if a.starts_with("-s") => {
+                let v = opt_val!(a, &a[2..], "-s");
+                skip = v.parse().unwrap_or(0);
+            }
+            _ if a.starts_with("-O") => {
+                let v = opt_val!(a, &a[2..], "-O");
+                origin = v.parse().unwrap_or(0);
+                has_origin = true;
+            }
+            _ if a.starts_with("-c") => {
+                let v = opt_val!(a, &a[2..], "-c");
+                quantum = v.parse().unwrap_or(5000).max(1);
+            }
+            _ if a.starts_with("-C") => {
+                callback = Some(opt_val!(a, &a[2..], "-C"));
+            }
+            other if other.starts_with('-') && other.len() > 1 => {
+                eprintln!("{}: {other}: invalid option", argv[0]);
                 return 2;
             }
             other if name.is_none() => name = Some(other),
@@ -1423,25 +1575,64 @@ fn mapfile_cmd(argv: &[String]) -> i32 {
     }
     let mut lines = Vec::new();
     let raw_opts = ReadOpts { raw: true, delim, ..ReadOpts::default() };
+    let mut skipped = 0usize;
+    let mut read_in_batch = 0usize;
     loop {
+        if count != 0 && lines.len() >= count {
+            break;
+        }
         let (bytes, _, status) = read_logical_line(&raw_opts);
         let hit_eof = status != 0;
         let mut line = String::from_utf8_lossy(&bytes).into_owned();
         if line.is_empty() && hit_eof {
             break;
         }
+        // `-s`: discard the first `skip` lines before collecting.
+        if skipped < skip {
+            skipped += 1;
+            if hit_eof {
+                break;
+            }
+            continue;
+        }
         // `hit_eof` means this line was unterminated — it has no trailing
         // delimiter to keep even without `-t` (matching bash).
         if !strip && !hit_eof {
             line.push(delim as char);
+        }
+        // `-C`: fire the callback before the assignment, every `quantum`
+        // lines, with the target index and the line as trailing arguments.
+        read_in_batch += 1;
+        if let Some(cb) = &callback
+            && read_in_batch % quantum == 0
+        {
+            let idx = origin + lines.len();
+            let cmd = format!("{cb} {idx} {}", single_quote(&line));
+            if let Ok(list) = crate::parser::parse(&cmd) {
+                let _ = crate::exec::run_list(&list);
+            }
         }
         lines.push(line);
         if hit_eof {
             break;
         }
     }
-    crate::vars::set_array(name, lines);
+    // Without `-O` the array is replaced; with it, elements are overlaid
+    // starting at `origin`, leaving the rest of the array intact.
+    if has_origin {
+        for (i, line) in lines.into_iter().enumerate() {
+            crate::vars::array_set(name, origin + i, &line);
+        }
+    } else {
+        crate::vars::set_array(name, lines);
+    }
     0
+}
+
+/// Wrap `s` in single quotes for safe reuse as one shell word (embedded
+/// single quotes become `'\''`).
+fn single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 pub(crate) fn read_reply_line() -> (String, bool) {
@@ -3721,9 +3912,10 @@ struct UlimitResource {
 const ULIMIT_RESOURCES: &[UlimitResource] = &[
     UlimitResource { letter: 'c', resource: crate::sys::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512 },
     UlimitResource { letter: 'd', resource: crate::sys::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024 },
-    UlimitResource { letter: 'f', resource: crate::sys::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512 },
+    // bash lists resources alphabetically by flag letter, so `-e` precedes `-f`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     UlimitResource { letter: 'e', resource: crate::sys::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1 },
+    UlimitResource { letter: 'f', resource: crate::sys::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512 },
     #[cfg(any(target_os = "linux", target_os = "android"))]
     UlimitResource { letter: 'i', resource: crate::sys::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1 },
     UlimitResource { letter: 'l', resource: crate::sys::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024 },
@@ -4032,6 +4224,7 @@ fn set_cmd(argv: &[String]) -> i32 {
                 'e' => crate::vars::set_errexit(on),
                 'a' => crate::vars::set_allexport(on),
                 'f' => crate::vars::set_noglob(on),
+                'T' => crate::vars::set_functrace(on),
                 'u' => crate::vars::set_nounset(on),
                 'x' => crate::vars::set_xtrace(on),
                 'C' => crate::vars::set_noclobber(on),
@@ -4088,13 +4281,13 @@ fn set_cmd(argv: &[String]) -> i32 {
                 let on = other.starts_with('-');
                 for c in other[1..].chars() {
                     match c {
-                        'e' | 'u' | 'x' | 'C' | 'n' | 'a' | 'f' => pending.push((c, on)),
+                        'e' | 'u' | 'x' | 'C' | 'n' | 'a' | 'f' | 'T' => pending.push((c, on)),
                         // Accepted but inert (C107): `set -euEbo pipefail`
                         // preambles must not hard-error. `b` notify, `h`
                         // hashall, `k` keyword, `m` monitor, `B`
                         // braceexpand, `H` histexpand, `P` physical, `E`
                         // errtrace, `T` functrace, `v` verbose.
-                        'b' | 'h' | 'k' | 'm' | 'B' | 'H' | 'P' | 'E' | 'T' | 'v' => {}
+                        'b' | 'h' | 'k' | 'm' | 'B' | 'H' | 'P' | 'E' | 'v' => {}
                         // `-o name` — the long spellings (C52), mapped to
                         // the same letters the short forms queue. A bare
                         // `set -o`/`set +o` (no name following) lists every
@@ -4117,10 +4310,11 @@ fn set_cmd(argv: &[String]) -> i32 {
                             Some("emacs") => pending.push(('v', !on)),
                             Some("allexport") => pending.push(('a', on)),
                             Some("noglob") => pending.push(('f', on)),
+                            Some("functrace") => pending.push(('T', on)),
                             // Accepted but inert (C107) — see the letter
                             // cluster above.
                             Some(
-                                "braceexpand" | "errtrace" | "functrace" | "hashall"
+                                "braceexpand" | "errtrace" | "hashall"
                                 | "histexpand" | "history" | "ignoreeof" | "keyword"
                                 | "monitor" | "notify" | "onecmd" | "physical" | "posix"
                                 | "privileged" | "verbose",
@@ -4189,6 +4383,16 @@ fn unabbr_cmd(argv: &[String]) -> i32 {
     status
 }
 
+/// How `trap -p`/bare `trap` prints a signal name (C132): real signals
+/// get the `SIG` prefix; the pseudo-signals EXIT/DEBUG/ERR/RETURN are
+/// printed bare, matching bash (so `eval "$(trap -p DEBUG)"` round-trips).
+fn trap_display_name(name: &str) -> String {
+    match name {
+        "EXIT" | "DEBUG" | "ERR" | "RETURN" => name.to_string(),
+        _ => format!("SIG{name}"),
+    }
+}
+
 fn trap_cmd(argv: &[String]) -> i32 {
     // `trap -l` (C65): the numbered signal-name table, in bash's own
     // five-per-line tab-separated format.
@@ -4211,7 +4415,7 @@ fn trap_cmd(argv: &[String]) -> i32 {
             if !argv[2..].is_empty() && !filter.contains(&name.as_str()) {
                 continue;
             }
-            let display = if name == "EXIT" { name } else { format!("SIG{name}") };
+            let display = trap_display_name(&name);
             println!("trap -- '{command}' {display}");
         }
         return 0;
@@ -4220,7 +4424,7 @@ fn trap_cmd(argv: &[String]) -> i32 {
         for (name, command) in crate::trap::all() {
             // Listing prints real signals `SIG`-prefixed, `EXIT` bare —
             // matching real bash's own `trap` output format exactly.
-            let display = if name == "EXIT" { name } else { format!("SIG{name}") };
+            let display = trap_display_name(&name);
             println!("trap -- '{command}' {display}");
         }
         return 0;
@@ -4399,7 +4603,7 @@ mod tests {
                         if arg.is_some() {
                             idx += 1;
                         }
-                        out.push_str(&printf::format_conv(conv, arg.unwrap_or("")).0);
+                        out.push_str(&printf::format_conv(conv, arg.unwrap_or("")).text);
                     }
                 }
             }
@@ -4454,8 +4658,8 @@ mod tests {
     fn printf_invalid_number_reports_error_but_still_formats() {
         let pieces = printf::parse_format("%d").unwrap();
         let printf::Piece::Conv(conv) = &pieces[0] else { panic!("expected a conversion") };
-        let (text, err) = printf::format_conv(conv, "abc");
-        assert_eq!(text, "0");
-        assert_eq!(err.as_deref(), Some("abc: invalid number"));
+        let r = printf::format_conv(conv, "abc");
+        assert_eq!(r.text, "0");
+        assert_eq!(r.error.as_deref(), Some("abc: invalid number"));
     }
 }

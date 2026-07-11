@@ -190,6 +190,11 @@ pub fn unset(name: &str) {
     sync_signal_disposition(name, false);
 }
 
+/// The command currently registered for `name`, if any.
+pub fn get(name: &str) -> Option<String> {
+    TRAPS.with(|t| t.borrow().get(name).cloned())
+}
+
 pub fn all() -> Vec<(String, String)> {
     // Inside a subshell that hasn't set traps of its own, report the
     // parent's (see `enter_subshell`).

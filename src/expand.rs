@@ -1982,7 +1982,7 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         let subscript = &inner[open + 1..close];
         let rest = &inner[close + 1..];
         let value = read_subscript(name, subscript)?;
-        return apply_scalar_op(value.as_deref(), rest, inner);
+        return apply_scalar_op(value.as_deref(), rest, inner, &format!("{name}[{subscript}]"));
     }
 
     // `${arr[@]^^}`, `${arr[@]:1:2}`… — the scalar operator applied to
@@ -2158,15 +2158,17 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         }
         // `:+` / `+`: substitute the word only when set (and non-empty).
         Some('+') => Ok(if use_word { String::new() } else { word }),
-        // `:?` / `?`: error out when unset (or empty).
+        // `:?` / `?`: error out when unset (or empty). bash prefixes the
+        // parameter name and picks its default text by whether a colon was
+        // used (`:?` → "null or not set", `?` → "not set").
         Some('?') => {
             if use_word {
-                let msg = if word.is_empty() {
-                    format!("{name}: parameter null or not set")
+                let detail = if word.is_empty() {
+                    if colon { "parameter null or not set" } else { "parameter not set" }
                 } else {
-                    word
+                    &word
                 };
-                Err(msg)
+                Err(format!("{name}: {detail}"))
             } else {
                 Ok(value.unwrap())
             }
@@ -2182,7 +2184,7 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
 /// removal, string transforms, value-based `@`-transforms, and the
 /// default/alternate family; `:=` write-back to an element isn't
 /// supported (a documented narrowing — rare).
-fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str) -> Result<String, String> {
+fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str, prefix: &str) -> Result<String, String> {
     let present = value.unwrap_or("");
     // Pattern removal (`##`/`%%` before the single forms).
     if let Some(word_src) = rest.strip_prefix("##") {
@@ -2217,7 +2219,12 @@ fn apply_scalar_op(value: Option<&str>, rest: &str, inner: &str) -> Result<Strin
         Some('+') => Ok(if use_word { String::new() } else { word }),
         Some('?') => {
             if use_word {
-                Err(if word.is_empty() { format!("{inner}: parameter null or not set") } else { word })
+                let detail = if word.is_empty() {
+                    if colon { "parameter null or not set" } else { "parameter not set" }
+                } else {
+                    &word
+                };
+                Err(format!("{prefix}: {detail}"))
             } else {
                 Ok(present.to_string())
             }

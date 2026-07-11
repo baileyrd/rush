@@ -3651,3 +3651,64 @@ Left for the next review pass (cosmetic / low-value): `$-`'s exact
 arithmetic comma operator inside `let` (`let "a=1, b=2"`), and
 `${!BASH*}`-style prefix listing of bash-only variable names (rush uses
 `RUSH_*`).
+
+---
+
+# 2026-07-11 fourth review pass — C132–C135
+
+A systematic fourth differential pass against bash 5.2 (every snippet run
+through both `rush -c` and `bash -c`) turned up a further cluster of gaps,
+fixed across four PRs. Highlights:
+
+- **C132 — arithmetic overflow crash (severe).** `$((MAX+1))` panicked the
+  whole shell (rc 101). All arithmetic binary/unary ops now use `wrapping_*`,
+  matching bash's silent two's-complement wraparound. Same batch: the
+  arithmetic comma operator (`$((a=1, b=2))`), `BASHPID`/`$$` subshell
+  semantics (`$$` stays the parent's pid via a startup-captured
+  `SHELL_PID`), `declare`-redeclare no longer wiping a value, and `set -u`
+  array element errors (`${a[i]}` unbound).
+- **C132 (cont.) — expansion.** `${x,,}` unquoted no longer leaks a stray
+  `$` (brace expansion wrongly firing on `${…}`); whole-array
+  default/alternate family (`${a[@]:-x}`, `${a[@]:+y}`); `${@@Q}`/`${*@Q}`/
+  `${@@U}` @-transforms on the positional params; `export NAME=(…)` creates
+  the array.
+- **C133 — test/`[` operators.** `-h -L -N -O -G -k -u -g -S -b -c -p -t`
+  file predicates, `-nt`/`-ot`/`-ef` comparisons, and `\( … \)` grouping;
+  `kill -0` liveness checking; `type -f`; cleaner OS-error messages
+  (`cd`/`kill` strip the `(os error N)` tail).
+- **C134 — `${x,,}` brace guard, export-array decl routing.**
+- **C135 — printf + mapfile + parameter errors + RETURN inheritance.**
+  - `printf`: `\xHH` hex and `\uHHHH`/`\UHHHHHHHH` Unicode escapes (both in
+    the format string and a `%b` argument); `%b`'s `\c` output terminator
+    and its `\0NNN` octal prefix form; `\e` escape; the `%'d` thousands flag
+    (accepted, a no-op in the C locale); and `%d` integer overflow now a
+    *warning* (status 0, clamped) rather than a hard error, while a
+    non-numeric argument stays an error (status 1).
+  - `mapfile`/`readarray`: `-s` (skip leading lines), `-n` (cap count),
+    `-O` (assign from a starting index, preserving the rest of the array),
+    and `-c`/`-C` (evaluate a callback every *quantum* lines with the
+    target index and line appended).
+  - `${x:?msg}` / `${x?}` errors now carry the parameter-name prefix
+    (`x: msg`), with the default text distinguishing `:?` ("parameter null
+    or not set") from `?` ("parameter not set"); array elements report
+    `a[i]: …`.
+  - RETURN-trap inheritance now follows functrace exactly: a trap set
+    *inside* a function fires on that function's return regardless of
+    `set -T`, while an enclosing top-level RETURN trap is inherited by
+    functions only under `set -T`. `set -T`/`set -o functrace` are wired,
+    and `trap -p` prints DEBUG/ERR/RETURN/EXIT bare (no `SIG` prefix).
+  - `ulimit -a` now lists resources in bash's alphabetical-by-letter order
+    (`-e` before `-f`). TIMEFORMAT `%U`/`%S`/`%P` now measure the shell's
+    own CPU time (in-process builtins/loops), not just reaped children, so
+    `%P` reflects real CPU utilization.
+
+Remaining narrowings (documented, low-value or blocked on a sibling crate):
+
+- `ulimit -a`'s `-R` (real-time non-blocking time) line needs
+  `RLIMIT_RTTIME` (asm-generic id 15), which rusty_libc does not yet expose
+  (it stops at `RLIMIT_RTPRIO`). `-p` (pipe size) is a bash pseudo-resource
+  with no `RLIMIT_*` backing.
+- `$-`'s exact `h`/`B`/`c`/`T` letters (the load-bearing `i` is already
+  reported) remain cosmetic.
+- `local NAME` (no value) re-declaring an existing variable preserves its
+  value rather than blanking it — rare.

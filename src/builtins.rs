@@ -3929,13 +3929,18 @@ fn umask_cmd(argv: &[String]) -> i32 {
 /// One `ulimit` resource: flag letter, `RLIMIT_*` id, the label bash's own
 /// `-a` output uses, and the unit scale (bash reports and accepts values
 /// in these units — 512-byte blocks for `-c`/`-f`, kbytes for the memory
-/// ones — converting to raw bytes for `setrlimit`).
+/// ones — converting to raw bytes for `setrlimit`). `synthetic` marks a
+/// bash *pseudo-resource* that isn't backed by `getrlimit`/`setrlimit` at
+/// all (`-p` pipe size): its raw value is fixed and it is read-only.
 #[cfg(unix)]
 struct UlimitResource {
     letter: char,
     resource: i32,
     label: &'static str,
     scale: u64,
+    /// A fixed raw value (bytes) for a read-only pseudo-resource; `None`
+    /// for a real `getrlimit`/`setrlimit`-backed resource.
+    synthetic: Option<u64>,
 }
 
 #[cfg(unix)]
@@ -3943,28 +3948,33 @@ const ULIMIT_RESOURCES: &[UlimitResource] = &[
     // bash lists resources alphabetically by flag letter; uppercase `-R`
     // sorts ahead of the lowercase letters, so it heads `ulimit -a`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'R', resource: crate::sys::RLIMIT_RTTIME as i32, label: "real-time non-blocking time  (microseconds, -R)", scale: 1 },
-    UlimitResource { letter: 'c', resource: crate::sys::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512 },
-    UlimitResource { letter: 'd', resource: crate::sys::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024 },
+    UlimitResource { letter: 'R', resource: crate::sys::RLIMIT_RTTIME as i32, label: "real-time non-blocking time  (microseconds, -R)", scale: 1, synthetic: None },
+    UlimitResource { letter: 'c', resource: crate::sys::RLIMIT_CORE as i32, label: "core file size              (blocks, -c)", scale: 512, synthetic: None },
+    UlimitResource { letter: 'd', resource: crate::sys::RLIMIT_DATA as i32, label: "data seg size               (kbytes, -d)", scale: 1024, synthetic: None },
     // bash lists resources alphabetically by flag letter, so `-e` precedes `-f`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'e', resource: crate::sys::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1 },
-    UlimitResource { letter: 'f', resource: crate::sys::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512 },
+    UlimitResource { letter: 'e', resource: crate::sys::RLIMIT_NICE as i32, label: "scheduling priority                 (-e)", scale: 1, synthetic: None },
+    UlimitResource { letter: 'f', resource: crate::sys::RLIMIT_FSIZE as i32, label: "file size                   (blocks, -f)", scale: 512, synthetic: None },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'i', resource: crate::sys::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1 },
-    UlimitResource { letter: 'l', resource: crate::sys::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024 },
-    UlimitResource { letter: 'm', resource: crate::sys::RLIMIT_RSS as i32, label: "max memory size             (kbytes, -m)", scale: 1024 },
-    UlimitResource { letter: 'n', resource: crate::sys::RLIMIT_NOFILE as i32, label: "open files                          (-n)", scale: 1 },
+    UlimitResource { letter: 'i', resource: crate::sys::RLIMIT_SIGPENDING as i32, label: "pending signals                     (-i)", scale: 1, synthetic: None },
+    UlimitResource { letter: 'l', resource: crate::sys::RLIMIT_MEMLOCK as i32, label: "max locked memory           (kbytes, -l)", scale: 1024, synthetic: None },
+    UlimitResource { letter: 'm', resource: crate::sys::RLIMIT_RSS as i32, label: "max memory size             (kbytes, -m)", scale: 1024, synthetic: None },
+    UlimitResource { letter: 'n', resource: crate::sys::RLIMIT_NOFILE as i32, label: "open files                          (-n)", scale: 1, synthetic: None },
+    // `-p` pipe size is a bash pseudo-resource: a fixed atomic pipe-buffer
+    // size (`PIPE_BUF` = 4096 bytes = 8 × 512-byte blocks), read-only. It
+    // sorts between `-n` and `-q`.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'q', resource: crate::sys::RLIMIT_MSGQUEUE as i32, label: "POSIX message queues         (bytes, -q)", scale: 1 },
+    UlimitResource { letter: 'p', resource: 0, label: "pipe size                (512 bytes, -p)", scale: 512, synthetic: Some(4096) },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'r', resource: crate::sys::RLIMIT_RTPRIO as i32, label: "real-time priority                  (-r)", scale: 1 },
-    UlimitResource { letter: 's', resource: crate::sys::RLIMIT_STACK as i32, label: "stack size                  (kbytes, -s)", scale: 1024 },
-    UlimitResource { letter: 't', resource: crate::sys::RLIMIT_CPU as i32, label: "cpu time                   (seconds, -t)", scale: 1 },
-    UlimitResource { letter: 'u', resource: crate::sys::RLIMIT_NPROC as i32, label: "max user processes                  (-u)", scale: 1 },
-    UlimitResource { letter: 'v', resource: crate::sys::RLIMIT_AS as i32, label: "virtual memory              (kbytes, -v)", scale: 1024 },
+    UlimitResource { letter: 'q', resource: crate::sys::RLIMIT_MSGQUEUE as i32, label: "POSIX message queues         (bytes, -q)", scale: 1, synthetic: None },
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    UlimitResource { letter: 'x', resource: crate::sys::RLIMIT_LOCKS as i32, label: "file locks                          (-x)", scale: 1 },
+    UlimitResource { letter: 'r', resource: crate::sys::RLIMIT_RTPRIO as i32, label: "real-time priority                  (-r)", scale: 1, synthetic: None },
+    UlimitResource { letter: 's', resource: crate::sys::RLIMIT_STACK as i32, label: "stack size                  (kbytes, -s)", scale: 1024, synthetic: None },
+    UlimitResource { letter: 't', resource: crate::sys::RLIMIT_CPU as i32, label: "cpu time                   (seconds, -t)", scale: 1, synthetic: None },
+    UlimitResource { letter: 'u', resource: crate::sys::RLIMIT_NPROC as i32, label: "max user processes                  (-u)", scale: 1, synthetic: None },
+    UlimitResource { letter: 'v', resource: crate::sys::RLIMIT_AS as i32, label: "virtual memory              (kbytes, -v)", scale: 1024, synthetic: None },
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    UlimitResource { letter: 'x', resource: crate::sys::RLIMIT_LOCKS as i32, label: "file locks                          (-x)", scale: 1, synthetic: None },
 ];
 
 /// `ulimit [-SH] [-a | -<letter> [limit]]` (C46) — get/set process resource
@@ -4011,6 +4021,10 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
         if raw == crate::sys::RLIM_INFINITY { "unlimited".to_string() } else { (raw / scale).to_string() }
     };
     let get = |res: &UlimitResource| -> Option<crate::sys::rlimit> {
+        // A pseudo-resource (`-p`) reports its fixed value for both limits.
+        if let Some(v) = res.synthetic {
+            return Some(crate::sys::rlimit { rlim_cur: v as _, rlim_max: v as _ });
+        }
         let mut rl = crate::sys::rlimit { rlim_cur: 0, rlim_max: 0 };
         (unsafe { crate::sys::getrlimit(res.resource as _, &mut rl) } == 0).then_some(rl)
     };
@@ -4039,6 +4053,13 @@ fn ulimit_cmd(argv: &[String]) -> i32 {
         println!("{}", display(raw, res.scale));
         return 0;
     };
+
+    // A pseudo-resource (`-p`) is read-only, same as bash.
+    if res.synthetic.is_some() {
+        let name = res.label.split("  ").next().unwrap_or(res.label).trim();
+        eprintln!("ulimit: {name}: cannot modify limit: Invalid argument");
+        return 1;
+    }
 
     let new_raw: crate::sys::rlim_t = if operand == "unlimited" {
         crate::sys::RLIM_INFINITY

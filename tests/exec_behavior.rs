@@ -4198,3 +4198,19 @@ fn ulimit_real_time_row_present() {
     assert_eq!(code, 0);
     assert!(r.trim() == "unlimited" || r.trim().parse::<u64>().is_ok(), "got: {r:?}");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ulimit_pipe_size_pseudo_resource() {
+    // `-p` (pipe size) is a bash pseudo-resource: a fixed value, read-only.
+    // Verified against bash.
+    assert_eq!(rush("ulimit -p").0, "8\n");
+    assert_eq!(rush("ulimit -Sp").0, "8\n");
+    assert_eq!(rush("ulimit -Hp").0, "8\n");
+    // It appears in `-a` between open files (-n) and POSIX message queues (-q).
+    let (out, _) = rush("ulimit -a");
+    assert!(out.contains("pipe size                (512 bytes, -p) 8"), "got: {out:?}");
+    // Attempting to set it is rejected (status 1), same as bash.
+    let (_, code) = rush("ulimit -p 16");
+    assert_eq!(code, 1);
+}

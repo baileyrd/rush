@@ -554,6 +554,7 @@ fn main() -> std::io::Result<()> {
     if read_stdin || (idx < args.len() && args[idx - 1] == "--") {
         let name = args.first().cloned().unwrap_or_else(|| "rush".to_string());
         vars::set_args(name, args.get(idx..).unwrap_or(&[]).to_vec());
+        vars::set_invoked_with_s(); // `$-` includes `s` when reading stdin
         if force_interactive {
             return interactive();
         }
@@ -579,6 +580,23 @@ fn main() -> std::io::Result<()> {
                     trap::exit_shell(1);
                 }
             }
+        }
+        // `-i` forces the interactive REPL even on a pipe (bash's own
+        // rule, and how interactive features are driven in tests).
+        None if force_interactive => interactive(),
+        // A plain `rush` with a terminal on stdin is the interactive REPL;
+        // with a pipe or file redirected onto stdin it reads commands from
+        // stdin as a *non-interactive* script — so `$-` gets `s`, not `i`,
+        // and interactive-only behaviour stays off (matching bash).
+        None if unsafe { crate::sys::isatty(0) } != 1 => {
+            vars::set_invoked_with_s();
+            let mut src = String::new();
+            use std::io::Read as _;
+            if std::io::stdin().read_to_string(&mut src).is_err() {
+                trap::exit_shell(1);
+            }
+            source_bash_env();
+            trap::exit_shell(run_source(&src));
         }
         None => interactive(),
     }

@@ -599,19 +599,23 @@ pub fn interactive() -> bool {
 }
 
 /// The `$-` special parameter: one letter per currently-set single-letter
-/// option, assembled from the flags this module tracks — `e` (errexit),
-/// `i` (interactive), `u` (nounset), `x` (xtrace). `set -o pipefail` has no
-/// single-letter spelling in real bash and so never appears here either
-/// (verified directly: `bash -c 'set -o pipefail; echo $-'` shows no new
-/// letter).
+/// option. bash assembles it as the lowercase set-flags in alphabetical
+/// order, then the uppercase ones, then the invocation flags `s`/`c`.
+/// `h` (hashall) and `B` (braceexpand) are on by default and rush has no
+/// way to turn them off, so they always appear — matching a stock bash
+/// (`bash -c 'echo $-'` → `hBc`). `H` (histexpand) shows only in an
+/// interactive shell. `set -o pipefail` has no single-letter spelling and
+/// so never appears here (verified directly against bash).
 pub fn option_flags() -> String {
     let mut flags = String::new();
-    if noclobber() {
-        flags.push('C');
-    }
+    // Lowercase set-flags, alphabetical.
     if errexit() {
         flags.push('e');
     }
+    if noglob() {
+        flags.push('f');
+    }
+    flags.push('h'); // hashall: always on
     if interactive() {
         flags.push('i');
     }
@@ -624,18 +628,45 @@ pub fn option_flags() -> String {
     if xtrace() {
         flags.push('x');
     }
+    // Uppercase set-flags, alphabetical.
+    flags.push('B'); // braceexpand: always on
+    if noclobber() {
+        flags.push('C');
+    }
+    if interactive() {
+        flags.push('H'); // histexpand: on in interactive shells
+    }
+    // Invocation flags, last.
+    if invoked_with_s() {
+        flags.push('s');
+    }
+    if invoked_with_c() {
+        flags.push('c');
+    }
     flags
 }
 
 thread_local! {
     static INVOKED_WITH_C: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INVOKED_WITH_S: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Recorded for completeness (`rush -c`) — `$-`'s exact `h`/`B`/`c`
-/// letters are a cosmetic gap left for a later pass; the load-bearing
-/// `i` flag is already reported.
+/// `rush -c cmd`: `$-` includes `c`.
 pub fn set_invoked_with_c() {
     INVOKED_WITH_C.with(|c| c.set(true));
+}
+
+fn invoked_with_c() -> bool {
+    INVOKED_WITH_C.with(std::cell::Cell::get)
+}
+
+/// `rush -s` or commands read from stdin: `$-` includes `s`.
+pub fn set_invoked_with_s() {
+    INVOKED_WITH_S.with(|c| c.set(true));
+}
+
+fn invoked_with_s() -> bool {
+    INVOKED_WITH_S.with(std::cell::Cell::get)
 }
 
 pub fn trace_depth() -> u32 {
@@ -2066,19 +2097,21 @@ mod tests {
     // thread-locals are per-test-thread, so this starts from all-off.
     #[test]
     fn option_flags_assembles_set_options() {
-        assert_eq!(option_flags(), "");
+        // `h` (hashall) and `B` (braceexpand) are always on, as in a stock
+        // bash; `H` (histexpand) rides `interactive`.
+        assert_eq!(option_flags(), "hB");
         set_errexit(true);
         set_xtrace(true);
-        assert_eq!(option_flags(), "ex");
+        assert_eq!(option_flags(), "ehxB");
         set_nounset(true);
         set_interactive(true);
-        assert_eq!(option_flags(), "eiux");
+        assert_eq!(option_flags(), "ehiuxBH");
         set_errexit(false);
-        assert_eq!(option_flags(), "iux");
+        assert_eq!(option_flags(), "hiuxBH");
         // pipefail has no single-letter spelling — it never appears
         // (verified against real bash).
         set_pipefail(true);
-        assert_eq!(option_flags(), "iux");
+        assert_eq!(option_flags(), "hiuxBH");
     }
 
     // C43: declared attributes transform every subsequent assignment —

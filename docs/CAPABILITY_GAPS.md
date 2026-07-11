@@ -331,6 +331,13 @@ dependency-blocked on rustyline's architecture until rustyline itself
 was replaced with a hand-rolled line editor (`src/editor.rs`) — see
 C71's write-up.
 
+**Update (2026-07-11): a third review pass found 57 new gaps, C74–C130,
+all open** — see the "2026-07-11 review pass" section at the end of this
+document. New-pass counts by tier: Tier I (correctness) 15, Tier II
+(builtins) 15, Tier III (options/environment/job control) 8, Tier IV
+(language parity) 10, Tier V (interactive UX) 9. Grand total tracked:
+130 items, 73 done, 57 open.
+
 ---
 
 ## Tier I — Correctness & POSIX risk
@@ -3187,3 +3194,409 @@ some natural orderings:
 - **C42 (POSIX character classes) and C49 (`typeset`)** were both
   small, self-contained wins with no dependencies on anything else in the
   new batch — both done.
+
+---
+
+# 2026-07-11 review pass — 57 new gaps, C74–C130
+
+A third full comparison pass, run after the rusty_regx/rusty_libc
+integration landed (C1–C73 all done). Method: five parallel review
+sweeps — expansions/quoting/arrays, builtins, grammar/control flow,
+shell options/environment/job control, and interactive UX — each
+differentially testing the built rush binary against real bash 5.2
+(`bash -c` vs `rush -c` on identical snippets) and reading the relevant
+`src/` modules. Every scripting-tier item below has a live, reproduced
+output difference; interactive-tier items are verified by source reading
+(absence in `src/main.rs`/`completion.rs`/the rusty_lines `Hooks` wiring)
+plus bash/zsh/fish documented behavior. Nothing here duplicates C1–C73.
+
+Effort scale as before: S (hours), M (a day or two), L (multi-day).
+
+## Tier I — Correctness: silent wrong behavior, aborts, crashes (C74–C88)
+
+These are the highest-priority items: not "feature missing" but "rush
+runs the script and produces wrong results or dies".
+
+### C74 — IFS splitting is applied to literal command-line words
+`IFS=x; echo axb` → rush `a b`, bash `axb`. Splitting must apply only to
+the *results of expansions*, never to literal source text. Any script
+that sets a custom IFS silently corrupts every later command line
+containing an IFS character. **Effort: M**
+
+### C75 — Temporary env-assignment prefix before a builtin isn't scoped
+`IFS=: read -r x y <<< "1:2:3"; echo "$x|$y"` → rush `1:2:3|`, bash
+`1|2:3`. The prefix assignment neither applies to the builtin nor gets
+restored afterward (`IFS` is left clobbered to empty). Breaks the
+canonical `IFS=x read` idiom twice over. **Effort: M**
+
+### C76 — Quotes inside `${v:-word}` defaults are literal; inner whitespace mangled
+`unset v; echo "${v:-"a b"}"` → rush `"a b"` (quote characters in
+output), bash `a b`. Unquoted form also collapses runs of spaces.
+Extremely common default-value idiom produces wrong strings. **Effort: M**
+
+### C77 — Adjacent text around `"x${arr[@]}y"` collapses the array
+`a=(1 2); printf "[%s]" "x${a[@]}y"` → rush `[x1 2y]` (one word), bash
+`[x1][2y]` (prefix glues to first element, suffix to last). Same for
+`"$@"`. **Effort: M**
+
+### C78 — Backslash-newline line continuation broken
+`echo one \` + newline + `two` → rush passes a literal newline into the
+argument (`-c` mode) or runs `two` as a second command (stdin mode);
+bash deletes the `\<newline>` pair during tokenization. One of the most
+common script formatting conventions. **Effort: M**
+
+### C79 — Backslash handling inside double quotes: `` \` `` kept, `\<newline>` not a continuation
+`printf "%s" "\\\`"` → rush `` \` ``, bash `` ` ``. A backslash-newline
+inside `"..."` also produces a stray backslash + newline instead of
+joining the line. **Effort: S**
+
+### C80 — EXIT trap not reset in subshells — cleanup runs twice
+`trap "echo bye" EXIT; (echo sub)` → rush prints `bye` twice, bash once.
+Every `( … )` or `$( … )` under an EXIT trap double-runs tempfile
+deletion / unlock / kill-children cleanup. **Effort: S–M**
+
+### C81 — `set -e` not suppressed inside functions called under `||`/`&&`/`if`
+`set -e; f(){ false; echo in; }; f || echo caught` → rush exits at the
+inner `false` (no output, rc 1); bash prints `in`, rc 0. The single most
+common errexit interop pattern aborts the whole script. (Plain
+`if false` already works.) **Effort: M**
+
+### C82 — Builtins as pipeline stages are exec'd as external commands
+`echo hi | read x`, `readonly -p | grep RV`, `alias | cat`, `jobs -r |
+grep sleep` → all fail with `No such file or directory (os error 2)`;
+each works in rush *without* the pipe. The pipeline stage builder in
+`exec.rs` doesn't route builtins/declaration-words through builtin
+dispatch. **Effort: M**
+
+### C83 — Deep function recursion aborts the whole process; `FUNCNEST` ignored
+Runaway recursion hits a native Rust stack overflow (`SIGABRT`, rc 134)
+at ~2700 frames; bash honors `FUNCNEST=n` with a recoverable error and
+degrades more gracefully. Needs a call-depth counter in `func.rs`, a
+`FUNCNEST` check, and a hard internal cap below the native stack limit.
+**Effort: M**
+
+### C84 — Assoc-array assignment with a quoted key isn't parsed as an assignment
+`declare -A a; a["x y"]=1` → rush: `a[x y]=1: command not found`; bash
+assigns. Any assoc key containing spaces is unusable. **Effort: M**
+
+### C85 — Negative array subscripts silently wrong (read and write)
+`a=(x y z); echo "${a[-1]}"` → rush empty, bash `z`; `a[-1]=Q` is
+silently dropped. Returns empty / no-ops instead of last-element access —
+silent logic errors. **Effort: S**
+
+### C86 — Slicing/`#` on positional parameters is a hard error
+`set -- a b c d; echo "${@:2:2}"` → rush `bad substitution` (exit 1),
+bash `b c`. `${#*}`/`${#@}` also error. (Named-array forms already
+work — only `@`/`*` fail.) **Effort: S**
+
+### C87 — A redirection with no command (`> file`) is an error instead of truncating
+`> f` → rush `empty command` (rc 1), file untouched; bash truncates/creates.
+The canonical truncate idiom fails and the error aborts the line.
+**Effort: S**
+
+### C88 — `return` at top level silently exits the whole script
+`return 5` outside any function/source → rush exits the script with
+rc 5; bash warns `can only return from a function or sourced script` and
+continues (rc 0 line status). Sourced-file behavior already matches.
+**Effort: S**
+
+## Tier II — Missing builtins and builtin flags (C89–C103)
+
+### C89 — `read`/`mapfile` flag coverage
+`read` supports *no* option flags: `-t` (timeout), `-n`/`-N` (chars),
+`-d` (delimiter), `-a` (array), `-u` (fd), `-p` (prompt), `-s` (silent),
+`-e` each print `read: -X: invalid option` and leave the variable empty.
+`mapfile -d` is likewise rejected (`only -t is supported`). Timed,
+per-char, prompted, and array reads all silently produce empty
+variables. **Effort: L** (flag pass is easy; `-t`/`-n` need
+termios/timeout plumbing)
+
+### C90 — `echo -e` / `-E` / combined flags printed as literal text
+`echo -e "a\tb"` → rush prints `-e a\tb`; only a lone `-n` is
+recognized. Scripts emit garbage flag text into their output.
+**Effort: S**
+
+### C91 — `let` builtin missing
+`let x=3+4; echo $x` → `let: command not found`, `$x` empty; scripts
+proceed with empty variables. Thin wrapper over the existing `(( ))`
+arithmetic (C28/C29). **Effort: S**
+
+### C92 — `builtin` builtin missing
+`cd(){ builtin cd "$@" && ls; }` — the standard shadow-a-builtin wrapper
+pattern — recurses or fails (`builtin: command not found`). **Effort: S**
+
+### C93 — Programmable completion builtins: `complete` / `compgen` / `compopt`
+All three are `command not found`, so every bash-completion script fails
+to load. rush has a real completion engine (`completion.rs`, C34) but no
+programmable interface (`COMP_WORDS`/`COMP_CWORD`/`COMPREPLY` protocol).
+**Effort: L**
+
+### C94 — `times`, `help`, `caller`, `enable`, `suspend` all missing
+Each returns 127 where bash returns a proper result/status — and 127
+breaks feature-detection (`if help foo >/dev/null …`). **Effort: S each
+(help M)**
+
+### C95 — `test`/`[` missing operators: `-v`, `-o`, string `<`/`>`, `-R`
+`x=1; test -v x` → rush `too many arguments` rc 2; bash rc 0. Exit code
+2-instead-of-0/1 actively flips conditionals. `test -v` is the standard
+"is variable set" check. **Effort: S–M**
+
+### C96 — `declare -p` / `-f` / `-F` silently print nothing (rc 0)
+`declare -p x` → no output, rc 0; bash prints `declare -- x="5"`.
+`declare -F nosuch` returns 0 instead of 1. Round-tripping
+(`eval "$(declare -p a)"`) and function-existence tests give wrong
+results — worse than an error because nothing fails visibly.
+**Effort: M**
+
+### C97 — `unset -f` doesn't remove functions
+`f(){ :; }; unset -f f; type f` → still `f is a function`. Functions
+cannot be undefined at all. **Effort: S**
+
+### C98 — `export -f` (functions) and `export -n` (un-export) unsupported
+`export -f f; bash -c f` → child gets `command not found` (needs the
+`BASH_FUNC_name%%=` env encoding); `export -n FOO` leaves FOO exported.
+Exported functions are load-bearing for xargs/parallel/make recipes.
+**Effort: M (`-n` is S)**
+
+### C99 — `printf` gaps: `-v var`, `%(fmt)T`, leading-quote char codes
+`printf -v x "%03d" 7` treats `-v` as the format (pollutes stdout, var
+unset); `printf "%(%Y)T" 0` → invalid conversion (bash: `1970`);
+`printf "%d" '"A'` → invalid number (bash: `65`). **Effort: M**
+
+### C100 — `type -p`/`-P` and `hash -t`/`-d`/`-p` flags unrecognized
+`type -p ls` errors + prints the wrong format (breaks `$(type -p x)`
+captures); `hash -p /path name` can't seed the table. **Effort: S**
+
+### C101 — Assorted verified flag gaps (batch)
+Each breaks a real pattern; all reproduced:
+- `kill -s TERM pid` → `invalid signal specification` (signal-by-name).
+- `kill -l 143` → error; bash prints `TERM` (decode `$?` of a
+  signal-killed child).
+- `trap -- "cmd" EXIT` → `--` misparsed (matters because `trap -p`
+  output itself uses `--`).
+- `exec -a name` / `-l` / `-c` → treated as filenames (argv[0] spoofing,
+  clean-env exec).
+- `cd -P` / `-L` → `No such file or directory`; `pwd -L` prints the
+  physical path after cd'ing through a symlink (no logical-path
+  tracking — M).
+- `dirs -v` prints no index column; `popd +1` pops the top instead of
+  entry 1.
+**Effort: S each (cd/pwd logical paths M)**
+
+### C102 — `fc` builtin missing entirely (POSIX-mandated)
+No `fc -l` (numbered listing), `fc -s old=new` (quick re-run), or
+`fc [-e editor] range` (edit-and-execute past commands). The editor's
+Ctrl-X Ctrl-E only covers the *current* line. **Effort: M**
+
+### C103 — `history` builtin missing
+`history | grep foo` — among the most common interactive idioms — fails
+with 127. No `-c` clear, `-d N` delete, `-a`/`-r`/`-w`/`-n` file sync,
+`-s`, `-p`. rusty_lines already exposes `history()`,
+`add_history_entry`, `save_history`, `append_history`; rush never
+surfaces them as a builtin. **Effort: M** (builtin S; threading the
+editor's history store into the builtin layer is the M part)
+
+## Tier III — Options, environment, invocation, job control (C104–C111)
+
+### C104 — Invocation flags missing: `-s`, `-i`, `-l`, `-r`, `--posix`, `--norc`/`--rcfile`, `-O`/`+O`, `-D`
+`main.rs` understands only `-c`, a script path, and a special-cased
+`-n`; every other flag is treated as a script filename
+(`rush: -s: No such file or directory`). Blocks login-shell use,
+restricted shells, and `curl | rush -s -- args` pipelines. **Effort: L**
+
+### C105 — `$BASH_ENV` startup file not honored in non-interactive mode
+`BASH_ENV=/tmp/e rush -c …` never sources the file; CI/wrapper-injected
+setup silently vanishes. **Effort: S**
+
+### C106 — Standard shell variables not seeded; `UID` writable; `SHLVL` not incremented
+`UID`, `EUID`, `HOSTNAME`, `OSTYPE`, `HOSTTYPE`, `MACHTYPE`,
+`BASH_VERSION`/`BASH_VERSINFO` analogs, `SHELLOPTS`/`BASHOPTS` are all
+unset; `UID=5` succeeds silently (bash: readonly error); inherited
+`SHLVL` isn't incremented. Root checks (`$UID -eq 0`), OS branching, and
+nesting detection all take wrong branches. **Effort: M**
+(`SHELLOPTS`/`BASHOPTS` need live option reflection)
+
+### C107 — `set` short options largely unsupported
+`-a` (allexport), `-b`, `-f` (noglob), `-h`, `-k`, `-v` (verbose), `-B`,
+`-E` (errtrace), `-P`, `-T` (functrace), and `set -o
+posix/errtrace/functrace` all print `set: -X: not supported`. `set -a`
+(env-file sourcing) and `set -f` (safe filename handling) are common;
+`set -euEo pipefail` preambles fail outright. **Effort: M–L** (some can
+be accepted as no-ops initially)
+
+### C108 — `shopt` table is glob-only (5 options)
+Missing everything else: `lastpipe`, `inherit_errexit`, `xpg_echo`,
+`patsub_replacement`, `login_shell`, `huponexit`, `execfail`, `cmdhist`,
+`histappend`, `checkwinsize`, `sourcepath`, `extdebug`, `autocd`,
+`nocaseglob`, `nocasematch`, `direxpand`/`dirspell`, `hostcomplete`, ….
+`shopt -s <any>` in a ported script is a hard `invalid shell option
+name` error, and the gated behaviors are unreachable. `nocasematch`
+also affects `[[ == ]]`/`case`; `autocd` is the type-a-directory habit
+for zsh/fish converts (one check in the command-not-found path).
+`GLOBIGNORE` is likewise ignored, and bash 5.2's `patsub_replacement`
+(`&` in `${v/pat/repl}`) doesn't expand. **Effort: M** (accept + wire
+the high-value ones first: `lastpipe`, `inherit_errexit`, `nocasematch`,
+`autocd`, `histappend`, `checkwinsize`, `xpg_echo`)
+
+### C109 — `$PS4` not expanded for xtrace
+`PS4='+${LINENO}: '; set -x` prints the literal `$LINENO` text. The
+standard debugging idiom produces useless traces. (First-char repetition
+already works.) **Effort: S**
+
+### C110 — `wait -f` / `wait -p var` and `jobs -n`/`-r`/`-s` unsupported
+bash-5.x `wait -n -p which` (identify the finished job) errors and
+leaves the var unset; `jobs -r` ("any jobs still running?") is an
+invalid option. Both are small option-parsing additions over the
+existing C13/C64 machinery. **Effort: S**
+
+### C111 — `exec` persistent redirections: fd > 3 fails; dup, close, and move all fail
+`exec 7>/tmp/x`, `exec 4>&1`, `exec 3>&-`, `exec 1>&3-` → all `Bad file
+descriptor` (rc 1) — and the error aborts the rest of the script. Blocks
+`exec 5>>log` logging setups, the ubiquitous `exec 3>&1 … 3>&-`
+fd-juggling, and any future `BASH_XTRACEFD`. (C38 fixed *per-command*
+high fds; this is `exec`'s persistent form.) **Effort: M**
+
+## Tier IV — Language/syntax parity (C112–C121)
+
+### C112 — `time` reserved word missing (with `TIMEFORMAT`, `time -p`)
+`time cmd` → 127. There is no external fallback for timing pipelines or
+builtins. Needs a reserved word wrapping a full pipeline, rusage
+collection, and `TIMEFORMAT`/`-p` formatting. **Effort: M**
+
+### C113 — `function name { …; }` definition syntax unsupported
+The ksh/bash form is a parse error — and `function name() { …; }`
+silently *misparses* (runs the body eagerly, then 127) rather than
+erroring cleanly. Add `function` to the parser's reserved words and
+accept both header shapes. **Effort: S**
+
+### C114 — `|&` pipe shorthand unsupported
+`cmd |& cat` → `expected a command`. Desugar to `2>&1 |` at parse time.
+**Effort: S**
+
+### C115 — `{varname}>file` variable-fd redirection unsupported
+`exec {x}>/dev/null; echo $x` should allocate fd ≥10 and set `$x`;
+rush treats `{x}` as a filename (or a command name in prefix position).
+Standard idiom for flock/lock-file and saved-stream management.
+**Effort: M**
+
+### C116 — Arithmetic evaluator gaps: `base#n` literals, empty expression, string re-evaluation
+- `$((2#101))`/`$((16#ff))` → `unexpected character '#'` (bash: 5/255).
+- `$(( ))` (e.g. from `$(($empty))`) → error instead of 0.
+- `x=1+2; echo $((x))` → `not an integer` (bash evaluates a variable's
+  string value as a sub-expression, recursively; needs a depth cap).
+**Effort: S + S + M**
+
+### C117 — Tilde expansion: `~user`, `~+`, `~-` unimplemented
+All three pass through literally (bash: passwd lookup, `$PWD`,
+`$OLDPWD`). **Effort: S**
+
+### C118 — Remaining expansion operators: `@U @u @L @K @k @P` transforms; `$"…"`
+Case transforms (`${v@U}` etc., bash 5.1+), assoc round-tripping
+(`${a[@]@K}`), prompt expansion (`${PS1@P}`) are `bad substitution`
+hard errors (only Q/E/a/A exist). `$"hello"` prints a stray `$`.
+**Effort: S**
+
+### C119 — `$'…'` escape coverage: `\xHH`, octal `\nnn`, `\uXXXX`, `\cX` left literal
+`echo $'\x41'` → `\x41` (bash: `A`). Byte-level string construction
+produces literal backslash text. (`\n`/`\t`/`\e` already work.)
+**Effort: S**
+
+### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108)
+`shopt -s nocasematch; [[ ABC == abc ]]` unreachable — tracked with the
+shopt table in C108 but called out separately because it changes
+matching *semantics* in `[[ ]]`/`case`/globs, not just an option table
+entry. **Effort: M** (glob and pattern matchers need a case-fold mode)
+
+### C121 — `/dev/tcp/host/port` and `/dev/udp` pseudo-devices not intercepted
+Redirections to them hit the kernel (ENOENT) instead of opening a
+socket. Niche but distinctive bash capability (port probes, minimal
+clients). **Effort: M**
+
+## Tier V — Interactive UX (C122–C130)
+
+### C122 — History configuration variables all ignored
+`HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`,
+`HISTTIMEFORMAT`: zero hits in `src/`. Path is hardcoded
+`~/.rush_history`, history is unbounded, and — a real privacy
+regression — `HISTCONTROL=ignorespace` is unhonored, so a
+leading-space ` secret-cmd` is recorded. The editor already has
+`set_max_history_len` and `set_history_dedup` knobs, unwired.
+**Effort: S–M** (HISTTIMEFORMAT needs a file-format decision)
+
+### C123 — History persists only on clean exit; concurrent sessions clobber each other
+`save_history` (a whole-file overwrite) runs once at REPL exit — a
+killed session/SSH drop loses everything, and the last of two concurrent
+sessions to exit wins. rusty_lines *already ships* `append_history`
+(documented as bash's `histappend` semantics); call it per accepted
+line. **Effort: S**
+
+### C124 — Multi-line compound commands recorded as history fragments (no `cmdhist`)
+Each physical line of a `for`/`if` typed interactively becomes its own
+(syntactically invalid) history entry. rusty_lines'
+`add_history_entry` already joins embedded newlines with `; ` — rush
+just never hands it the whole command. Buffer the lines and add one
+joined entry after `parser::parse` succeeds. **Effort: S**
+
+### C125 — PS1 escape coverage tiny; `\[`/`\]`/`\e` render as literal garbage
+Only `\w \W \u \h \$ \? \n \\` exist; unknown escapes are kept literal —
+so the single most common bash prompt,
+`PS1='\[\e[32m\]\u@\h\[\e[0m\] \w\$ '`, renders visibly corrupted.
+Missing: `\[ \] \e \a \nnn`, time/date (`\t \T \@ \A \d \D{fmt}`),
+`\j \! \# \v \V \s \l`. Also `\u`/`\h` read env vars instead of
+getpwuid/gethostname, so `\h` is usually empty on Linux. **Effort: S**
+
+### C126 — No `$`-expansion of PS1 (promptvars); no `PROMPT_COMMAND`; no PS0
+`prompt()` runs only the escape pass — `PS1='$(git_branch) \$ '` (the #1
+prompt customization in the wild) never expands, while RPS1 *does* get
+`expand_dollars` (internal inconsistency). No `PROMPT_COMMAND` hook
+(zsh `precmd`) runs before each prompt, so exit-status coloring,
+terminal-title updates, and `history -a`-style hooks are impossible.
+**Effort: S**
+
+### C127 — PS2 hardcoded to `"> "`; `PROMPT_DIRTRIM` missing
+`$PS2` is never read; continuation prompts can't be customized, and deep
+paths flood `\w`. **Effort: S**
+
+### C128 — No `bind` builtin, no inputrc-style keybinding configuration
+Keymaps are compiled into rusty_lines with no rebinding surface: no
+`bind -x` (fzf integrations), no readline variables
+(`completion-ignore-case`, `show-all-if-ambiguous`, `menu-complete`),
+no `~/.inputrc` analog. Hard blocker for users with muscle-memory
+bindings. **Effort: L** (needs a rusty_lines rebinding API; a
+S-sized subset: expose completion case-folding etc. as shopt options)
+
+### C129 — `COLUMNS`/`LINES` never set or updated (no `checkwinsize`)
+The editor queries winsize internally but the shell vars are never
+written — `exec.rs`'s own `select` implementation reads `$COLUMNS`,
+which is always empty. Set at startup + after each foreground job
+(bash 5 default). **Effort: S**
+
+### C130 — `IGNOREEOF` and `TMOUT` unsupported
+One stray Ctrl-D unconditionally kills the shell (`ReadResult::Eof =>
+break`) — no "Use `exit` to leave" guard; `TMOUT` idle auto-logout
+(a hardening requirement in some environments) is absent. **Effort: S
+(IGNOREEOF) / M (TMOUT — needs a read timeout in rusty_lines)**
+
+## Suggested sequencing for the C74+ batch
+
+- **Tier I first, and within it C74/C75/C76 (IFS + prefix assignments +
+  default-quoting)** — all three silently corrupt data in bread-and-butter
+  scripts, and C74/C75 share the same expansion-pipeline territory.
+- **C82 (builtins in pipelines)** unblocks a whole family of everyday
+  one-liners (`… | read`, `alias | grep`, `declare -p | grep` — the
+  latter also needs C96) and was independently rediscovered by two
+  separate review sweeps — a sign of how often real usage hits it.
+- **C80 + C81 (EXIT-trap double-fire, errexit-in-functions)** are the
+  two most dangerous trap/errexit semantics bugs; both are contained
+  changes in exec/trap state handling.
+- **The history cluster C103 + C122 + C123 + C124** is the standout
+  cheap win: rusty_lines already ships every needed API
+  (`append_history`, `set_max_history_len`, newline-joining
+  `add_history_entry`); rush just doesn't call them.
+- **The prompt cluster C125 + C126 + C127** is the first thing any
+  migrating bash user sees (their PS1 renders as garbage today); all S.
+- **C89 (`read` flags) and C93 (programmable completion) are the two L
+  items** with the broadest external-script compatibility payoff —
+  bash-completion files and `read -p/-s/-t` idioms are everywhere.
+- **C104 (invocation flags) is the login-shell gate** — until `-l`/`-i`
+  parse, rush can't be anyone's chsh target.

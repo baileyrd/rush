@@ -1399,6 +1399,26 @@ pub fn function_depth() -> usize {
     LOCAL_STACK.with(|s| s.borrow().len())
 }
 
+thread_local! {
+    // How many `source`/`.` calls are currently active — `return` is legal
+    // inside one (C88). Deliberately not `SOURCE_STACK`: that also holds
+    // the top-level script itself (for `${BASH_SOURCE[0]}`), where
+    // `return` is *not* legal.
+    static SOURCING_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub fn enter_sourcing() {
+    SOURCING_DEPTH.with(|d| d.set(d.get() + 1));
+}
+
+pub fn exit_sourcing() {
+    SOURCING_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+}
+
+pub fn sourcing_depth() -> usize {
+    SOURCING_DEPTH.with(std::cell::Cell::get)
+}
+
 pub fn push_local_frame() {
     LOCAL_STACK.with(|s| s.borrow_mut().push(Vec::new()));
 }

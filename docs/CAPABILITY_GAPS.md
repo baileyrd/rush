@@ -3239,13 +3239,13 @@ Extremely common default-value idiom produces wrong strings. **Effort: M**
 `[x1][2y]` (prefix glues to first element, suffix to last). Same for
 `"$@"`. **Effort: M**
 
-### C78 — Backslash-newline line continuation broken
+### C78 — Backslash-newline line continuation broken ✅ done
 `echo one \` + newline + `two` → rush passes a literal newline into the
 argument (`-c` mode) or runs `two` as a second command (stdin mode);
 bash deletes the `\<newline>` pair during tokenization. One of the most
 common script formatting conventions. **Effort: M**
 
-### C79 — Backslash handling inside double quotes: `` \` `` kept, `\<newline>` not a continuation
+### C79 — Backslash handling inside double quotes: `` \` `` kept, `\<newline>` not a continuation ✅ done
 `printf "%s" "\\\`"` → rush `` \` ``, bash `` ` ``. A backslash-newline
 inside `"..."` also produces a stray backslash + newline instead of
 joining the line. **Effort: S**
@@ -3289,12 +3289,12 @@ silent logic errors. **Effort: S**
 bash `b c`. `${#*}`/`${#@}` also error. (Named-array forms already
 work — only `@`/`*` fail.) **Effort: S**
 
-### C87 — A redirection with no command (`> file`) is an error instead of truncating
+### C87 — A redirection with no command (`> file`) is an error instead of truncating ✅ done
 `> f` → rush `empty command` (rc 1), file untouched; bash truncates/creates.
 The canonical truncate idiom fails and the error aborts the line.
 **Effort: S**
 
-### C88 — `return` at top level silently exits the whole script
+### C88 — `return` at top level silently exits the whole script ✅ done
 `return 5` outside any function/source → rush exits the script with
 rc 5; bash warns `can only return from a function or sourced script` and
 continues (rc 0 line status). Sourced-file behavior already matches.
@@ -3463,13 +3463,13 @@ high fds; this is `exec`'s persistent form.) **Effort: M**
 builtins. Needs a reserved word wrapping a full pipeline, rusage
 collection, and `TIMEFORMAT`/`-p` formatting. **Effort: M**
 
-### C113 — `function name { …; }` definition syntax unsupported
+### C113 — `function name { …; }` definition syntax unsupported ✅ done
 The ksh/bash form is a parse error — and `function name() { …; }`
 silently *misparses* (runs the body eagerly, then 127) rather than
 erroring cleanly. Add `function` to the parser's reserved words and
 accept both header shapes. **Effort: S**
 
-### C114 — `|&` pipe shorthand unsupported
+### C114 — `|&` pipe shorthand unsupported ✅ done
 `cmd |& cat` → `expected a command`. Desugar to `2>&1 |` at parse time.
 **Effort: S**
 

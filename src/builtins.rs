@@ -1170,6 +1170,12 @@ fn loop_ctl(argv: &[String], is_break: bool) -> i32 {
 /// `return [n]` — unwind the current function with status `n` (default `$?`).
 /// The executor's `call_function` consumes the request.
 fn return_cmd(argv: &[String]) -> i32 {
+    // Outside any function or sourced file, `return` is an error that the
+    // script survives — it used to silently exit the whole shell (C88).
+    if crate::vars::function_depth() == 0 && crate::vars::sourcing_depth() == 0 {
+        eprintln!("return: can only `return' from a function or sourced script");
+        return 1;
+    }
     let code = argv
         .get(1)
         .and_then(|s| s.parse().ok())

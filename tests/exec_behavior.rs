@@ -2989,3 +2989,99 @@ fn ansi_c_numeric_escapes() {
     let (out, _) = rush(r#"echo $'é' $'\q'"#);
     assert_eq!(out, "é \\q\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn function_keyword_definition_syntax() {
+    // C113: `function name { …; }` was a parse error, and
+    // `function name() { …; }` silently misparsed (ran the body eagerly).
+    let (out, code) = rush("function f { echo ok1; }; f; function g() { echo ok2; }; g");
+    assert_eq!(out, "ok1\nok2\n");
+    assert_eq!(code, 0);
+
+    // `function` in argument position is an ordinary word.
+    let (out, _) = rush("echo function");
+    assert_eq!(out, "function\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn pipe_both_shorthand() {
+    // C114: `|&` — stdout+stderr both piped — was `expected a command`.
+    let (out, code) = rush("{ echo out; echo err 1>&2; } |& sort");
+    assert_eq!(out, "err\nout\n");
+    assert_eq!(code, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_redirection_truncates() {
+    // C87: `> file` with no command errored (`empty command`) and left
+    // the file untouched; it must truncate/create with status 0.
+    let dir = std::env::temp_dir().join(format!("rush_bare_redir_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t");
+    let (out, code) = rush(&format!(
+        "echo data > {p}; > {p}; wc -c < {p}; >> {p}; > {d}/created; echo made=$?",
+        p = f.display(),
+        d = dir.display()
+    ));
+    assert_eq!(out, "0\nmade=0\n");
+    assert_eq!(code, 0);
+    assert!(dir.join("created").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn return_outside_function_warns_and_continues() {
+    // C88: top-level `return 5` silently exited the whole script with
+    // rc 5; bash warns, sets $? to 1, and keeps going.
+    let (out, code) = rush("return 5; echo alive rc=$?");
+    assert_eq!(out, "alive rc=1\n");
+    assert_eq!(code, 0);
+
+    // …but inside a sourced file it really returns, with its status.
+    let dir = std::env::temp_dir().join(format!("rush_return_src_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("s"), "return 3\necho unreachable\n").unwrap();
+    let (out, _) = rush(&format!(". {}/s; echo st=$?", dir.display()));
+    assert_eq!(out, "st=3\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn backslash_newline_continuation() {
+    // C78/C79: `\<newline>` must vanish during tokenization — unquoted
+    // and inside double quotes — instead of leaking a newline into the
+    // arguments (or, on stdin, running the fragments as two commands).
+    let (out, _) = rush("echo one \\\ntwo");
+    assert_eq!(out, "one two\n");
+    let (out, _) = rush("echo a\\\nb");
+    assert_eq!(out, "ab\n");
+    let (out, _) = rush("echo \"x\\\ny\"");
+    assert_eq!(out, "xy\n");
+
+    // An escaped backtick inside double quotes sheds its backslash.
+    let (out, _) = rush(r#"printf "%s\n" "\`""#);
+    assert_eq!(out, "`\n");
+
+    // Stdin mode: the continuation joins lines instead of running `b`.
+    let (out, code) = rush_stdin_script("echo a\\\nb\n");
+    assert_eq!(out, "ab\n");
+    assert_eq!(code, 0);
+}
+
+/// Feed a whole script on stdin with no `-c` (the piped-script path).
+fn rush_stdin_script(script: &str) -> (String, i32) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rush");
+    child.stdin.take().unwrap().write_all(script.as_bytes()).expect("write stdin");
+    let output = child.wait_with_output().expect("wait rush");
+    (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
+}

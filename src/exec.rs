@@ -1534,6 +1534,13 @@ fn dispatch_builtin(cmd: &Command) -> i32 {
         }
         Some("declare") | Some("typeset") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
         Some("readonly") => builtins::readonly_from_decls(&cmd.local_decls, cmd.decl_attrs),
+        // `export NAME=(...)` (C132): create the array, then mark exported
+        // (array export is a no-op in bash too, but the assignment runs).
+        // Only the array form populates `local_decls`; every other
+        // `export` (bare, `-n`, `-f`) falls through to the real builtin.
+        Some("export") if !cmd.local_decls.is_empty() => {
+            builtins::export_from_decls(&cmd.local_decls, cmd.decl_attrs)
+        }
         _ => builtins::try_run(&cmd.argv).unwrap_or(1),
     }
 }

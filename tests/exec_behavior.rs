@@ -4010,3 +4010,24 @@ fn kill_zero_checks_existence() {
     let (out, _) = rush("kill -0 $$; echo self=$?; kill -0 999999 2>/dev/null; echo dead=$?");
     assert_eq!(out, "self=0\ndead=1\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn expansion_transforms_and_export_array() {
+    // C132: ${x,,} unquoted leaked a stray `$` (brace expansion wrongly
+    // firing on ${...}).
+    let (out, _) = rush("x=hello; echo ${x,,}; x=HELLO; echo ${x,}; a=(FOO BAR); echo ${a[@],,}");
+    assert_eq!(out, "hello\nhELLO\nfoo bar\n");
+
+    // ${@@Q}/${*@Q}/${@@U} — @-transforms on the positional params.
+    let (out, _) = rush(r#"set -- ab cd; echo "${@@Q}"; echo "${*@Q}"; echo "${@@U}""#);
+    assert_eq!(out, "'ab' 'cd'\n'ab' 'cd'\nAB CD\n");
+
+    // Whole-array default/alternate family.
+    let (out, _) = rush(r#"a=(x y); echo "${a[@]:-DEF}"; b=(); echo "${b[@]:-DEF}"; echo "${a[@]:+SET}"; echo "${b[@]:+SET}""#);
+    assert_eq!(out, "x y\nDEF\nSET\n\n");
+
+    // export NAME=(...) creates the array.
+    let (out, _) = rush(r#"export a=(1 2 3); echo "${a[1]}"; export b=(x "y z"); echo "${b[@]}""#);
+    assert_eq!(out, "2\nx y z\n");
+}

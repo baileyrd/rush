@@ -26,7 +26,7 @@ source = "git+https://github.com/baileyrd/rusty_libc?branch=main#c00b6040ad50b36
 [[package]]
 name = "rusty_lines"
 version = "0.2.0"
-source = "git+https://github.com/baileyrd/rusty_lines?branch=main#cbd1f4f47b499d001363929e67db49a7a12f6c7f"
+source = "git+https://github.com/baileyrd/rusty_lines?branch=main#51f1dac9e5c18869913ad1a36ee5c1cc6eeda9b0"
 dependencies = [
  "libc",
  "rusty_libc",
@@ -36,7 +36,7 @@ dependencies = [
 [[package]]
 name = "rusty_regx"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_regx?branch=main#1249a62de68f68e821c13cecd3838d49e52e22b6"
+source = "git+https://github.com/baileyrd/rusty_regx?branch=main#aa07ea0be7123eaaf2b4b38aa2a9ebb56419c107"
 
 [[package]]
 name = "unicode-width"

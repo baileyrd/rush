@@ -352,8 +352,7 @@ descriptors), C120 (`nocaseglob`), C121 (`/dev/tcp` + the `<>` operator),
 and C129 (`COLUMNS`/`LINES`) all landed, along with the shopt remainders
 (`lastpipe`, `inherit_errexit`, `huponexit`), `GLOBIGNORE`,
 `patsub_replacement`, live `SHELLOPTS`/`BASHOPTS`, `PS0`, and the
-`IGNOREEOF` half of C130. **Only 2 remain, both blocked on the sibling
-crates** (see `HANDOFF_RUSTY_REGX.md` / `HANDOFF_RUSTY_LINES.md`): C128
+`IGNOREEOF` half of C130. **As of the sibling-crate integration, all but C128 are done** (see `HANDOFF_RUSTY_REGX.md` / `HANDOFF_RUSTY_LINES.md`): C128
 (`bind`/inputrc) needs a rusty_lines rebinding API, and the `=~` half of
 nocasematch (part of C120) needs a rusty_regx case-insensitive mode.
 The `TMOUT` half of C130 and `HISTTIMEFORMAT` (a C122 tail) are likewise
@@ -3523,7 +3522,7 @@ hard errors (only Q/E/a/A exist). `$"hello"` prints a stray `$`.
 produces literal backslash text. (`\n`/`\t`/`\e` already work.)
 **Effort: S**
 
-### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108) ✅ done (nocaseglob for filenames; the `=~` half stays open — see the rusty_regx handoff)
+### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108) ✅ done (nocaseglob for filenames; the `=~` half stays open — see the rusty_regx handoff) [=~ half now done]
 `shopt -s nocasematch; [[ ABC == abc ]]` unreachable — tracked with the
 shopt table in C108 but called out separately because it changes
 matching *semantics* in `[[ ]]`/`case`/globs, not just an option table

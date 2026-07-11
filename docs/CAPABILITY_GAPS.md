@@ -3701,6 +3701,14 @@ fixed across four PRs. Highlights:
     (`-e` before `-f`). TIMEFORMAT `%U`/`%S`/`%P` now measure the shell's
     own CPU time (in-process builtins/loops), not just reaped children, so
     `%P` reflects real CPU utilization.
+  - `local NAME` with no initializer re-declaring a name *already local in
+    the same frame* now preserves its value (bash), instead of blanking it;
+    a first-time `local NAME` from an outer scope still starts empty.
+
+The C132–C135 findings were produced by three independent 4th-pass review
+agents (control-flow/arithmetic, builtins, expansion), whose reports were
+then consolidated and each item re-verified against bash before landing.
+Every reported gap is fixed except the narrowings below.
 
 Remaining narrowings (documented, low-value or blocked on a sibling crate):
 
@@ -3708,7 +3716,13 @@ Remaining narrowings (documented, low-value or blocked on a sibling crate):
   `RLIMIT_RTTIME` (asm-generic id 15), which rusty_libc does not yet expose
   (it stops at `RLIMIT_RTPRIO`). `-p` (pipe size) is a bash pseudo-resource
   with no `RLIMIT_*` backing.
+- `time ( subshell ) 2>/dev/null` does not suppress the timing report: the
+  redirection is applied inside the forked subshell child, never in the
+  parent that writes the report. Simple/pipeline timed commands
+  (`time echo hi 2>/dev/null`) match bash — only the parenthesized-group
+  form diverges. Niche.
+- Arithmetic division/modulo-by-zero diagnostics echo the operands without
+  their original spacing (`5/0` vs bash's `5 / 0`); the `error token`
+  detail matches. Cosmetic.
 - `$-`'s exact `h`/`B`/`c`/`T` letters (the load-bearing `i` is already
   reported) remain cosmetic.
-- `local NAME` (no value) re-declaring an existing variable preserves its
-  value rather than blanking it — rare.

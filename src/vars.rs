@@ -1662,6 +1662,10 @@ pub fn pop_local_frame() {
 /// A bare `local -u v` (no initializer) removes only the value, keeping the
 /// just-declared attribute for later assignments in the call.
 pub fn declare_local_attrs(name: &str, value: Option<&str>, attrs: Attrs) -> bool {
+    // A bare `local x` (no initializer) re-declaring a name that is *already*
+    // local in this same frame preserves its value, matching bash — only a
+    // first-time `local` starts the binding empty (C135).
+    let already_local = is_local_in_current_frame(name);
     let declared = capture_for_local(name);
     if declared {
         // `-r` installs only *after* the initializer applies, so
@@ -1670,13 +1674,23 @@ pub fn declare_local_attrs(name: &str, value: Option<&str>, attrs: Attrs) -> boo
         reset_attrs(name, Attrs { readonly: false, ..attrs });
         match value {
             Some(v) => set(name, v),
-            None => remove_value(name),
+            None if !already_local => remove_value(name),
+            None => {}
         }
         if attrs.readonly {
             set_attrs(name, Attrs { readonly: true, ..Default::default() });
         }
     }
     declared
+}
+
+/// Is `name` already shadowed as a local in the current (innermost) frame?
+fn is_local_in_current_frame(name: &str) -> bool {
+    LOCAL_STACK.with(|s| {
+        s.borrow()
+            .last()
+            .is_some_and(|frame| frame.iter().any(|(n, ..)| n == name))
+    })
 }
 
 /// As [`declare_local_attrs`], but for `local arr=(a b c)` — the

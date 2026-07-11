@@ -4102,3 +4102,17 @@ fn return_trap_inheritance_follows_functrace() {
     // trap -p prints DEBUG/ERR/RETURN/EXIT bare, without a SIG prefix.
     assert_eq!(rush("trap 'echo e' ERR; trap -p ERR").0, "trap -- 'echo e' ERR\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn local_redeclare_preserves_same_frame_value() {
+    // C135: a bare `local x` re-declaring a name already local in the same
+    // frame preserves its value (bash); a first-time `local x` from an
+    // outer scope starts empty. Verified against bash.
+    assert_eq!(rush("f(){ local x=hi; local x; echo \"[$x]\"; }; f").0, "[hi]\n");
+    assert_eq!(rush("x=outer; f(){ local x; echo \"[$x]\"; }; f").0, "[]\n");
+    // A callee's own `local x` is fresh even when the caller made x local.
+    assert_eq!(rush("f(){ local x=hi; g; }; g(){ local x; echo \"[$x]\"; }; f").0, "[]\n");
+    // An array re-declared bare keeps its elements.
+    assert_eq!(rush("f(){ local -a a=(1 2); local a; echo \"[${a[@]}]\"; }; f").0, "[1 2]\n");
+}

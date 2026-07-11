@@ -3085,3 +3085,41 @@ fn rush_stdin_script(script: &str) -> (String, i32) {
     let output = child.wait_with_output().expect("wait rush");
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
 }
+
+#[cfg(unix)]
+#[test]
+fn arithmetic_literals_and_string_reeval() {
+    // C116: base#n / hex / octal literals, the empty expression, and
+    // recursive string evaluation were all hard errors.
+    let (out, _) = rush("echo $((2#101)) $((16#ff)) $((8#17)) $((36#z)) $((64#_@)) $((0xff)) $((010))");
+    assert_eq!(out, "5 255 15 35 4094 255 8\n");
+
+    let (out, _) = rush("echo $(()); e=; echo $(($e))");
+    assert_eq!(out, "0\n0\n");
+
+    // A variable's string value is itself an expression, recursively.
+    let (out, _) = rush("x=1+2; y=x*2; echo $((x)) $((y))");
+    assert_eq!(out, "3 6\n");
+
+    // A reference cycle errors instead of overflowing the native stack.
+    let (out, code) = rush("a=b; b=a; echo $((a))");
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+
+    // Bad digit for the base errors like bash.
+    let (_, code) = rush("echo $((2#19))");
+    assert_eq!(code, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn let_builtin() {
+    // C91: `let` was command-not-found, so scripts proceeded with empty
+    // variables.
+    let (out, _) = rush(r#"let x=3+4 y=x*2; echo $x $y; let i=5; let i++; echo $i; n=1; let "n = n + 41"; echo $n"#);
+    assert_eq!(out, "7 14\n6\n42\n");
+
+    // Status: 1 when the last expression is 0 — the (( )) rule.
+    let (out, _) = rush("let 0; echo st=$?; let 1; echo st=$?; let; echo st=$?");
+    assert_eq!(out, "st=1\nst=0\nst=1\n");
+}

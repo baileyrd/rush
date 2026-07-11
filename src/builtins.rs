@@ -50,6 +50,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "popd" => Some(popd_cmd(argv)),
         "dirs" => Some(dirs_cmd(argv)),
         "unabbr" => Some(unabbr_cmd(argv)),
+        "let" => Some(let_cmd(argv)),
         _ => other_builtin(argv),
     }
 }
@@ -61,7 +62,7 @@ pub const NAMES: &[&str] = &[
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
-    "readonly",
+    "readonly", "let",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1169,6 +1170,29 @@ fn loop_ctl(argv: &[String], is_break: bool) -> i32 {
 
 /// `return [n]` — unwind the current function with status `n` (default `$?`).
 /// The executor's `call_function` consumes the request.
+/// `let expr...` (C91) — each argument is a full arithmetic expression
+/// (assignments included, so `let i++` and `let "n = n + 1"` mutate the
+/// variable); status is 1 when the *last* expression evaluates to 0,
+/// 0 otherwise — the exact inverse-truth rule `(( ))` uses.
+fn let_cmd(argv: &[String]) -> i32 {
+    let exprs = &argv[1..];
+    if exprs.is_empty() {
+        eprintln!("let: expression expected");
+        return 1;
+    }
+    let mut last = 0;
+    for expr in exprs {
+        match crate::arith::eval(expr) {
+            Ok(n) => last = n,
+            Err(e) => {
+                eprintln!("let: {e}");
+                return 1;
+            }
+        }
+    }
+    i32::from(last == 0)
+}
+
 fn return_cmd(argv: &[String]) -> i32 {
     // Outside any function or sourced file, `return` is an error that the
     // script survives — it used to silently exit the whole shell (C88).

@@ -13,6 +13,19 @@ thread_local! {
     // Names currently being fired, so a trap body that itself exits (or
     // otherwise re-triggers the same trap) can't recurse forever.
     static FIRING: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    // The parent's traps as of subshell entry (C80): a subshell resets
+    // traps (they must not *fire* in it — an EXIT trap firing once per
+    // `( … )`/`$( … )` double-runs cleanup), but bash's documented rule
+    // keeps them *visible* to `trap`/`trap -p` until the subshell installs
+    // a trap of its own.
+    static SUBSHELL_SNAPSHOT: RefCell<Option<HashMap<String, String>>> = const { RefCell::new(None) };
+}
+
+/// Called in a freshly-forked child that will run shell code: reset all
+/// traps (C80), keeping a display-only snapshot for `trap -p`.
+pub fn enter_subshell() {
+    let entries = TRAPS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    SUBSHELL_SNAPSHOT.with(|s| *s.borrow_mut() = Some(entries));
 }
 
 /// The most recently received `TERM`/`HUP` signal number, or 0 for "none" —
@@ -160,12 +173,16 @@ pub fn signal_list() -> Vec<(&'static str, i32)> {
 }
 
 pub fn set(name: &str, command: &str) {
+    // Installing any trap ends the display-only view of the parent's
+    // traps (C80) — bash's own rule.
+    SUBSHELL_SNAPSHOT.with(|s| *s.borrow_mut() = None);
     TRAPS.with(|t| t.borrow_mut().insert(name.to_string(), command.to_string()));
     #[cfg(unix)]
     sync_signal_disposition(name, true);
 }
 
 pub fn unset(name: &str) {
+    SUBSHELL_SNAPSHOT.with(|s| *s.borrow_mut() = None);
     TRAPS.with(|t| {
         t.borrow_mut().remove(name);
     });
@@ -174,6 +191,13 @@ pub fn unset(name: &str) {
 }
 
 pub fn all() -> Vec<(String, String)> {
+    // Inside a subshell that hasn't set traps of its own, report the
+    // parent's (see `enter_subshell`).
+    if let Some(snapshot) =
+        SUBSHELL_SNAPSHOT.with(|s| s.borrow().as_ref().map(|m| m.clone()))
+    {
+        return snapshot.into_iter().collect();
+    }
     TRAPS.with(|t| t.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
 }
 

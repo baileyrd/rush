@@ -3248,3 +3248,55 @@ fn printf_v_time_and_char_codes() {
     let (out, _) = rush(r#"printf "%d %d\n" "'A" '"B'"#);
     assert_eq!(out, "65 66\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn exit_trap_reset_in_subshells() {
+    // C80: an inherited EXIT trap fired once per subshell/command
+    // substitution — double-running cleanup.
+    let (out, _) = rush(r#"trap "echo bye" EXIT; (echo sub)"#);
+    assert_eq!(out, "sub\nbye\n");
+    let (out, _) = rush(r#"trap "echo bye" EXIT; x=$(echo sub); echo "$x""#);
+    assert_eq!(out, "sub\nbye\n");
+
+    // …while bash's documented display rule keeps the parent's traps
+    // visible to `trap` until the subshell installs its own.
+    let (out, _) = rush(r#"trap "echo T" TERM; echo "$(trap)""#);
+    assert_eq!(out, "trap -- 'echo T' SIGTERM\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn errexit_suppressed_inside_functions_under_conditions() {
+    // C81: `set -e` fired inside a function even when the *call* sat in a
+    // suppressed context (`f || handler`, `if f`, `f && x`, `! f`).
+    let (out, code) = rush("set -e; f(){ false; echo in; }; f || echo caught; echo done");
+    assert_eq!(out, "in\ndone\n");
+    assert_eq!(code, 0);
+
+    let (out, _) = rush("set -e; f(){ false; echo in; }; if f; then echo yes; fi; echo done");
+    assert_eq!(out, "in\nyes\ndone\n");
+
+    let (out, _) = rush("set -e; f(){ false; }; ! f; echo done");
+    assert_eq!(out, "done\n");
+
+    // …but a bare failing call still exits, as it must.
+    let (out, code) = rush("set -e; f(){ false; }; f; echo unreachable");
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn funcnest_and_recursion_cap() {
+    // C83: runaway recursion crashed the whole process with a native
+    // stack overflow (SIGABRT); FUNCNEST was ignored.
+    let (out, code) = rush("FUNCNEST=3; f() { echo $1; f $(($1+1)); }; f 1");
+    assert_eq!(out, "1\n2\n3\n");
+    assert_eq!(code, 1);
+
+    // Unbounded recursion hits the internal cap as a shell error — the
+    // process must NOT die of SIGABRT (exit 134).
+    let (_, code) = rush("f() { f; }; f");
+    assert_eq!(code, 1);
+}

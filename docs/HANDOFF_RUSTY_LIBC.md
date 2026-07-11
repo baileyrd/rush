@@ -12,7 +12,13 @@ behind a backend-agnostic surface (the rusty-libc backend is the Linux
 default; a `libc`-crate backend covers other Unix and Linux-with-
 `libc-backend`). Everything below is one constant on the rusty-libc side.
 
-## 1. `RLIMIT_RTTIME` constant (blocks `ulimit -a`'s `-R` line)
+## 1. `RLIMIT_RTTIME` constant (blocks `ulimit -a`'s `-R` line) — ✅ DONE
+
+**Landed:** rusty_libc now ships `RLIMIT_RTTIME = 15` (rev `65f467f`), and
+the rush side is wired up — the pin is bumped, `sys.rs` re-exports the
+constant, and `ULIMIT_RESOURCES` has the leading `-R` row, so `ulimit -a`'s
+first line and `ulimit -R` get/set now match bash. The original write-up is
+kept below for reference.
 
 **Today:** `src/rlimit.rs` defines the `RLIMIT_*` identifiers up to
 `RLIMIT_RTPRIO = 14` and stops there. bash 5.2's `ulimit -a` lists one more

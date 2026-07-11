@@ -2905,3 +2905,87 @@ EOF
     assert_eq!(out.trim(), "45150", "got: {out:?}");
     assert_eq!(code, 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn negative_array_subscripts() {
+    // C85: `${a[-1]}` read empty and `a[-1]=Q` was silently dropped.
+    // Negative indices count back from the maximum assigned index plus
+    // one, matching bash (including on sparse arrays).
+    let (out, _) = rush(r#"a=(x y z); echo "${a[-1]}" "${a[-3]}"; a[-1]=Q; echo "${a[@]}"; unset "a[-1]"; echo "${a[@]}""#);
+    assert_eq!(out, "z x\nx y Q\nx y\n");
+
+    let (out, _) = rush(r#"a=(x); a[10]=far; echo "${a[-1]}""#);
+    assert_eq!(out, "far\n");
+
+    // Out of range stays "nothing there", same as an unset index.
+    let (out, _) = rush(r#"a=(x y); echo "[${a[-5]}]""#);
+    assert_eq!(out, "[]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn positional_parameter_slicing_and_count() {
+    // C86: `${@:off:len}`, `${*:off}`, `${#*}`, and `${#@}` were all hard
+    // "bad substitution" errors. Offset 0 starts at `$0`, offset 1 at
+    // `$1`; a negative offset counts from the end — all verified against
+    // bash.
+    let (out, code) = rush_argv(r#"echo "${@:2:2}"; echo "${@:3}"; echo "${#*} ${#@}"; echo "${@: -1}"; echo "${@:0:2}""#, &["zero", "a", "b", "c", "d"]);
+    assert_eq!(out, "b c\nc d\n4 4\nd\nzero a\n");
+    assert_eq!(code, 0);
+
+    // `${@:-x}` must still be the default operator, not a slice.
+    let (out, _) = rush(r#"echo "${@:-fallback}""#);
+    assert_eq!(out, "fallback\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn tilde_user_plus_minus() {
+    // C117: `~user`, `~+`, and `~-` passed through literally. `~root` is
+    // the one account whose home is stable everywhere; unknown users stay
+    // literal like bash.
+    let (out, _) = rush("echo ~root; echo ~nosuchuser42/x");
+    assert_eq!(out, "/root\n~nosuchuser42/x\n");
+
+    let (out, _) = rush("cd /tmp && echo ~+; cd / && echo ~-");
+    assert_eq!(out, "/tmp\n/tmp\n");
+
+    // Fixed alongside: `$PWD` itself used to go stale after `cd`.
+    let (out, _) = rush(r#"cd /tmp && echo "$PWD""#);
+    assert_eq!(out, "/tmp\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn at_transform_case_key_and_prompt_forms() {
+    // C118: only @Q/@E/@a/@A existed; @U/@u/@L (bash 5.1 case
+    // transforms), @K/@k (round-trippable key/value pairs), and the
+    // per-element array forms were "bad substitution" errors.
+    let (out, _) = rush(r#"v=abc; echo "${v@U}" "${v@u}" "${v@L}"; V="A B"; echo "${V@K}""#);
+    assert_eq!(out, "ABC Abc abc\n'A B'\n");
+
+    let (out, _) = rush(r#"a=(one two); echo "${a[@]@U}"; declare -A m=([x]=1); echo "${m[@]@k}"; echo "${m[@]@K}""#);
+    assert_eq!(out, "ONE TWO\nx 1\nx '1'\n");
+
+    // $"..." is plain "..." (no locale translation) — the `$` used to
+    // leak into the output.
+    let (out, _) = rush(r#"echo $"hello world""#);
+    assert_eq!(out, "hello world\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn ansi_c_numeric_escapes() {
+    // C119: `\xHH`, octal `\nnn`, `\uXXXX`, and `\cX` in `$'...'` came out
+    // as literal backslash text.
+    let (out, _) = rush(r#"echo $'\x41\x42' $'\101\102' $'A'"#);
+    assert_eq!(out, "AB AB A\n");
+
+    let (out, _) = rush(r#"[ $'\cA' = $'\x01' ] && [ $'\cj' = $'\n' ] && echo ctrl-ok"#);
+    assert_eq!(out, "ctrl-ok\n");
+
+    // Multibyte \u, and an unknown escape staying literal.
+    let (out, _) = rush(r#"echo $'é' $'\q'"#);
+    assert_eq!(out, "é \\q\n");
+}

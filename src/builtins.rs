@@ -661,6 +661,12 @@ fn cd(argv: &[String]) -> i32 {
     if let Some(dir) = previous {
         crate::vars::set("OLDPWD", &dir.display().to_string());
     }
+    // Keep `$PWD` current too — it arrives exported from the parent
+    // process, so without this every `cd` leaves it stale (found while
+    // wiring `~+`, which reads it).
+    if let Ok(dir) = std::env::current_dir() {
+        crate::vars::set("PWD", &dir.display().to_string());
+    }
     if going_back {
         println!("{target}");
     }

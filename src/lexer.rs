@@ -810,6 +810,13 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                     push_literal(&mut parts, &crate::expand::ansi_unescape(&raw));
                     continue;
                 }
+                // `$"..."` — bash's locale-translated string (C118). rush
+                // does no message translation, so it's exactly `"..."`:
+                // drop the `$` and let the ordinary double-quote branch
+                // handle the rest of it.
+                if chars.peek() == Some(&'"') {
+                    continue;
+                }
                 let mut s = String::from("$");
                 // `$(...)` and `${...}` may contain spaces and operators; swallow
                 // them whole so word-splitting doesn't tear them apart. A plain

@@ -332,7 +332,7 @@ was replaced with a hand-rolled line editor (`src/editor.rs`) — see
 C71's write-up.
 
 **Update (2026-07-11): a third review pass found 57 new gaps, C74–C130,
-all open** — see the "2026-07-11 review pass" section at the end of this
+see the "2026-07-11 review pass" section at the end of this
 document. New-pass counts by tier: Tier I (correctness) 15, Tier II
 (builtins) 15, Tier III (options/environment/job control) 8, Tier IV
 (language parity) 10, Tier V (interactive UX) 9. Grand total tracked:
@@ -3279,12 +3279,12 @@ degrades more gracefully. Needs a call-depth counter in `func.rs`, a
 `declare -A a; a["x y"]=1` → rush: `a[x y]=1: command not found`; bash
 assigns. Any assoc key containing spaces is unusable. **Effort: M**
 
-### C85 — Negative array subscripts silently wrong (read and write)
+### C85 — Negative array subscripts silently wrong (read and write) ✅ done
 `a=(x y z); echo "${a[-1]}"` → rush empty, bash `z`; `a[-1]=Q` is
 silently dropped. Returns empty / no-ops instead of last-element access —
 silent logic errors. **Effort: S**
 
-### C86 — Slicing/`#` on positional parameters is a hard error
+### C86 — Slicing/`#` on positional parameters is a hard error ✅ done
 `set -- a b c d; echo "${@:2:2}"` → rush `bad substitution` (exit 1),
 bash `b c`. `${#*}`/`${#@}` also error. (Named-array forms already
 work — only `@`/`*` fail.) **Effort: S**
@@ -3486,17 +3486,17 @@ Standard idiom for flock/lock-file and saved-stream management.
   string value as a sub-expression, recursively; needs a depth cap).
 **Effort: S + S + M**
 
-### C117 — Tilde expansion: `~user`, `~+`, `~-` unimplemented
+### C117 — Tilde expansion: `~user`, `~+`, `~-` unimplemented ✅ done
 All three pass through literally (bash: passwd lookup, `$PWD`,
 `$OLDPWD`). **Effort: S**
 
-### C118 — Remaining expansion operators: `@U @u @L @K @k @P` transforms; `$"…"`
+### C118 — Remaining expansion operators: `@U @u @L @K @k @P` transforms; `$"…"` ✅ done
 Case transforms (`${v@U}` etc., bash 5.1+), assoc round-tripping
 (`${a[@]@K}`), prompt expansion (`${PS1@P}`) are `bad substitution`
 hard errors (only Q/E/a/A exist). `$"hello"` prints a stray `$`.
 **Effort: S**
 
-### C119 — `$'…'` escape coverage: `\xHH`, octal `\nnn`, `\uXXXX`, `\cX` left literal
+### C119 — `$'…'` escape coverage: `\xHH`, octal `\nnn`, `\uXXXX`, `\cX` left literal ✅ done
 `echo $'\x41'` → `\x41` (bash: `A`). Byte-level string construction
 produces literal backslash text. (`\n`/`\t`/`\e` already work.)
 **Effort: S**

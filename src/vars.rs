@@ -1368,7 +1368,7 @@ pub fn key_set(name: &str, subscript: &str, value: &str) {
     let name = name.as_str();
     if is_assoc(name) {
         assoc_set(name, subscript, value);
-    } else if let Some(index) = crate::expand::eval_subscript(subscript) {
+    } else if let Some(index) = crate::expand::eval_index(name, subscript) {
         array_set(name, index, value);
     }
 }
@@ -1379,7 +1379,7 @@ pub fn key_append(name: &str, subscript: &str, value: &str) {
     let name = name.as_str();
     if is_assoc(name) {
         assoc_append_key(name, subscript, value);
-    } else if let Some(index) = crate::expand::eval_subscript(subscript) {
+    } else if let Some(index) = crate::expand::eval_index(name, subscript) {
         array_append_index(name, index, value);
     }
 }

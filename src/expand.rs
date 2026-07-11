@@ -1104,17 +1104,39 @@ fn parse_whole_array_at(s: &str) -> Option<WholeArrayAt> {
     }
 }
 
-/// `~` or `~/...` at the start of a string becomes `$HOME`. `~user` is not
-/// supported; it is left untouched.
+/// Tilde expansion at the start of a string (C117): `~` is `$HOME`, `~+`
+/// is `$PWD`, `~-` is `$OLDPWD`, and `~user` is that user's home directory
+/// from the password database. An unresolvable prefix (unknown user, unset
+/// `OLDPWD`) is left untouched, same as bash.
 fn tilde_expand(text: &str) -> String {
     if let Some(rest) = text.strip_prefix('~') {
-        if rest.is_empty() || rest.starts_with('/') {
-            if let Some(home) = home_dir() {
-                return format!("{home}{rest}");
-            }
+        let (prefix, tail) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, ""),
+        };
+        let expansion = match prefix {
+            "" => home_dir(),
+            "+" => crate::vars::get("PWD")
+                .or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string())),
+            "-" => crate::vars::get("OLDPWD"),
+            user => passwd_home(user),
+        };
+        if let Some(dir) = expansion {
+            return format!("{dir}{tail}");
         }
     }
     text.to_string()
+}
+
+/// `~user`'s home directory, read straight from `/etc/passwd` (field 6) —
+/// the shell carries no NSS dependency, so LDAP-style exotic setups fall
+/// back to the literal text, an accepted narrowing.
+fn passwd_home(user: &str) -> Option<String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next() == Some(user)).then(|| fields.nth(4).map(str::to_string))?
+    })
 }
 
 /// Scan a string for `$VAR`, `${VAR}`, and `$(...)`, expanding each in place.
@@ -1422,11 +1444,26 @@ fn resolve_subscript_text(expr: &str) -> Result<String, String> {
 /// Evaluate an already-`$`-expanded subscript as an arithmetic expression
 /// — `arith::eval` resolves a *bare* name directly too, so `${arr[i+1]}`
 /// needs no `$` either, verified directly against real bash. `None` for a
-/// negative result (negative, "from the end" indices are a documented,
-/// out-of-scope gap) or a genuine arithmetic error — both collapse to the
+/// negative result or a genuine arithmetic error — both collapse to the
 /// same "nothing there" outcome an ordinary out-of-range index already has.
+/// Callers that know which array the subscript belongs to should use
+/// [`eval_index`] instead, which resolves negative indices bash-style.
 pub(crate) fn eval_subscript(expr: &str) -> Option<usize> {
     usize::try_from(crate::arith::eval(expr).ok()?).ok()
+}
+
+/// As [`eval_subscript`], but resolves a negative result against `name`'s
+/// own indices, bash-style (C85): counting back from the maximum assigned
+/// index plus one, so `${a[-1]}` is the last element of `a=(x y z)` and
+/// `a[-1]=Q` overwrites it. Still-negative after that (out of range) is
+/// `None`, same as any other "nothing there".
+pub(crate) fn eval_index(name: &str, expr: &str) -> Option<usize> {
+    let v = crate::arith::eval(expr).ok()?;
+    if v >= 0 {
+        return usize::try_from(v).ok();
+    }
+    let n = crate::vars::array_indices(name).last().map_or(0, |m| m + 1) as i64;
+    usize::try_from(n + v).ok()
 }
 
 /// Resolve a single-element subscript's value for a read (`${arr[N]}`) —
@@ -1441,7 +1478,7 @@ fn read_subscript(name: &str, expr: &str) -> Result<Option<String>, String> {
     Ok(if crate::vars::is_assoc(name) {
         crate::vars::assoc_get(name, &resolved)
     } else {
-        eval_subscript(&resolved).and_then(|i| crate::vars::array_get(name, i))
+        eval_index(name, &resolved).and_then(|i| crate::vars::array_get(name, i))
     })
 }
 
@@ -1468,7 +1505,7 @@ pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<UnsetTarget>,
     Ok(if crate::vars::is_assoc(name) {
         Some(UnsetTarget::Key(name.to_string(), resolved))
     } else {
-        eval_subscript(&resolved).map(|i| UnsetTarget::Index(name.to_string(), i))
+        eval_index(name, &resolved).map(|i| UnsetTarget::Index(name.to_string(), i))
     })
 }
 
@@ -1552,9 +1589,83 @@ fn expand_braced(inner: &str) -> Result<String, String> {
         _ => {}
     }
 
+    // `${@:off[:len]}` / `${*:off[:len]}` — positional-parameter slicing
+    // (C86). The list is `$0` followed by the positional parameters, so
+    // offset 0 starts at the shell/script name and offset 1 at `$1`,
+    // matching bash. A `:` immediately followed by `-`/`+`/`=`/`?` is the
+    // default/alternate family instead, same disambiguation bash applies
+    // (`${@: -1}` slices, `${@:-x}` defaults).
+    // `${@:-word}` / `${*:-word}` and the rest of the default/alternate
+    // family on the positional parameters: the word substitutes when there
+    // are no positional parameters (or, with the `:` form, when they join
+    // to an empty string) — `=` can't assign to `$@` and errors like bash.
+    if let Some(first) = inner.chars().next()
+        && matches!(first, '@' | '*')
+        && let rest = &inner[1..]
+        && let Some(op) = rest
+            .strip_prefix(':')
+            .and_then(|r| r.chars().next())
+            .filter(|c| matches!(c, '-' | '+' | '?'))
+    {
+        let word = expand_dollars(&rest[1 + op.len_utf8()..])?;
+        let joined = if first == '*' {
+            crate::vars::args().join(&Ifs::current().star_sep)
+        } else {
+            crate::vars::args().join(" ")
+        };
+        let null = joined.is_empty();
+        return match op {
+            '-' => Ok(if null { word } else { joined }),
+            '+' => Ok(if null { String::new() } else { word }),
+            _ => {
+                if null {
+                    Err(if word.is_empty() {
+                        format!("{first}: parameter null or not set")
+                    } else {
+                        word
+                    })
+                } else {
+                    Ok(joined)
+                }
+            }
+        };
+    }
+
+    if let Some(first) = inner.chars().next()
+        && matches!(first, '@' | '*')
+        && let Some(spec) = inner[1..].strip_prefix(':')
+        && !matches!(spec.chars().next(), Some('-' | '+' | '=' | '?'))
+    {
+        let mut values = vec![arg_checked(0)?];
+        values.extend(crate::vars::args());
+        let (off_src, len_src) = match spec.find(':') {
+            Some(i) => (&spec[..i], Some(&spec[i + 1..])),
+            None => (spec, None),
+        };
+        let off = crate::arith::eval(&expand_dollars(off_src)?)?;
+        let n = values.len() as i64;
+        let start = if off < 0 { (n + off).max(0) } else { off.min(n) };
+        let end = match len_src {
+            None => n,
+            Some(src) => {
+                let len = crate::arith::eval(&expand_dollars(src)?)?;
+                if len < 0 {
+                    return Err(format!("{len}: substring expression < 0"));
+                }
+                (start + len).min(n)
+            }
+        };
+        let sep = if first == '*' { Ifs::current().star_sep.clone() } else { " ".to_string() };
+        return Ok(values[start as usize..end.max(start) as usize].join(&sep));
+    }
+
     // `${#name}` / `${#arr[@]}` (element count) / `${#arr[N]}` (that
-    // element's own string length).
+    // element's own string length). `${#*}`/`${#@}` are the positional
+    // count, same as `$#` (C86).
     if let Some(name_and_sub) = inner.strip_prefix('#') {
+        if matches!(name_and_sub, "*" | "@") {
+            return Ok(crate::vars::arg_count().to_string());
+        }
         if let Some((name, sub)) = parse_subscript(name_and_sub) {
             return Ok(match sub {
                 Subscript::At | Subscript::Star => crate::vars::array_len(name).to_string(),
@@ -1620,6 +1731,35 @@ fn expand_braced(inner: &str) -> Result<String, String> {
             let sep = if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
             return Ok(values[start as usize..end.max(start) as usize].join(&sep));
         }
+        // Per-element `@`-transforms (C118): `${a[@]@U}` etc., plus the
+        // whole-array `@K`/`@k` forms, which emit key/value *pairs* (their
+        // whole point is `declare -A b=( ${a[@]@K} )` round-tripping).
+        if let Some(op) = rest.strip_prefix('@') {
+            let sep =
+                if &inner[open + 1..close] == "*" { Ifs::current().star_sep.clone() } else { " ".to_string() };
+            if matches!(op, "K" | "k") {
+                let keys: Vec<String> = if crate::vars::is_assoc(name) {
+                    crate::vars::assoc_keys(name)
+                } else {
+                    crate::vars::array_indices(name).iter().map(usize::to_string).collect()
+                };
+                let pairs: Vec<String> = keys
+                    .iter()
+                    .zip(&values)
+                    .map(|(k, v)| {
+                        if op == "K" { format!("{k} {}", shell_quote(v)) } else { format!("{k} {v}") }
+                    })
+                    .collect();
+                return Ok(pairs.join(&sep));
+            }
+            let mut transformed = Vec::with_capacity(values.len());
+            for v in &values {
+                transformed.push(
+                    at_transform(v, op).ok_or_else(|| format!("${{{inner}}}: bad substitution"))?,
+                );
+            }
+            return Ok(transformed.join(&sep));
+        }
         let mut transformed = Vec::with_capacity(values.len());
         for v in &values {
             transformed.push(if is_transform_op(rest) {
@@ -1674,14 +1814,15 @@ fn expand_braced(inner: &str) -> Result<String, String> {
 
     // `${v@Q}` / `@E` / `@a` / `@A` — bash 4.4's parameter transformations
     // (C60): shell-requote, ANSI-C unescape, attribute letters, and
-    // reconstruct-as-assignment.
+    // reconstruct-as-assignment — plus the case transforms `@U`/`@u`/`@L`
+    // (bash 5.1), `@K`/`@k` quoted round-tripping, and `@P` prompt
+    // expansion (C118).
     if let Some(op) = rest.strip_prefix('@') {
         return match op {
-            "Q" => Ok(shell_quote(&var_lookup_checked(name)?)),
-            "E" => Ok(ansi_unescape(&var_lookup_checked(name)?)),
             "a" => Ok(attr_letters(name)),
             "A" => Ok(reconstruct_assignment(name)),
-            _ => Err(format!("${{{inner}}}: bad substitution")),
+            _ => at_transform(&var_lookup_checked(name)?, op)
+                .ok_or_else(|| format!("${{{inner}}}: bad substitution")),
         };
     }
 
@@ -1736,6 +1877,28 @@ fn expand_braced(inner: &str) -> Result<String, String> {
     }
 }
 
+/// The value-based `@`-transform operators, shared between the scalar
+/// (`${v@U}`) and per-element array (`${a[@]@U}`) forms (C118). `None` for
+/// an unknown operator — the caller owns the "bad substitution" error, so
+/// name-based operators (`@a`/`@A`) can be handled before dispatching here.
+fn at_transform(value: &str, op: &str) -> Option<String> {
+    Some(match op {
+        "Q" | "K" | "k" => shell_quote(value),
+        "E" => ansi_unescape(value),
+        "U" => value.to_uppercase(),
+        "L" => value.to_lowercase(),
+        "u" => {
+            let mut chars = value.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+        "P" => crate::expand_ps1(value),
+        _ => return None,
+    })
+}
+
 /// `${v@Q}` (C60): re-quote a value so it can be reused as shell input —
 /// single quotes normally (with the `'\''` dance for embedded quotes),
 /// or bash's `$'...'` form when control characters are present, matching
@@ -1763,27 +1926,82 @@ fn shell_quote(value: &str) -> String {
 /// `${v@E}` (C60): interpret backslash escapes the way `$'...'` would.
 /// Also used by the lexer for `$'...'` ANSI-C quoting itself.
 pub(crate) fn ansi_unescape(value: &str) -> String {
+    // Consume up to `max` characters matching `pred` and parse them in
+    // `radix` — the shared shape of `\xHH`, `\nnn`, `\uXXXX`, `\UXXXXXXXX`.
+    fn take_number(
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        max: usize,
+        radix: u32,
+    ) -> Option<u32> {
+        let mut digits = String::new();
+        while digits.len() < max
+            && let Some(&c) = chars.peek()
+            && c.is_digit(radix)
+        {
+            digits.push(c);
+            chars.next();
+        }
+        if digits.is_empty() { None } else { u32::from_str_radix(&digits, radix).ok() }
+    }
     let mut out = String::new();
-    let mut chars = value.chars();
+    let mut chars = value.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '\\' {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('a') => out.push('\x07'),
-            Some('b') => out.push('\x08'),
-            Some('f') => out.push('\x0c'),
-            Some('v') => out.push('\x0b'),
-            Some('e') | Some('E') => out.push('\x1b'),
-            Some('0') => out.push('\0'),
-            Some('\\') => out.push('\\'),
-            Some('\'') => out.push('\''),
-            Some('"') => out.push('"'),
+        match chars.peek().copied() {
+            Some('n') => { chars.next(); out.push('\n'); }
+            Some('t') => { chars.next(); out.push('\t'); }
+            Some('r') => { chars.next(); out.push('\r'); }
+            Some('a') => { chars.next(); out.push('\x07'); }
+            Some('b') => { chars.next(); out.push('\x08'); }
+            Some('f') => { chars.next(); out.push('\x0c'); }
+            Some('v') => { chars.next(); out.push('\x0b'); }
+            Some('e' | 'E') => { chars.next(); out.push('\x1b'); }
+            Some('\\') => { chars.next(); out.push('\\'); }
+            Some('\'') => { chars.next(); out.push('\''); }
+            Some('"') => { chars.next(); out.push('"'); }
+            // `\nnn` — one to three octal digits (C119). `\0` alone still
+            // yields NUL as the degenerate one-digit case.
+            Some('0'..='7') => {
+                let n = take_number(&mut chars, 3, 8).unwrap_or(0);
+                out.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+            }
+            // `\xHH` — one or two hex digits (C119).
+            Some('x') => {
+                chars.next();
+                match take_number(&mut chars, 2, 16) {
+                    Some(n) => out.push(char::from_u32(n).unwrap_or('\u{fffd}')),
+                    None => out.push_str("\\x"),
+                }
+            }
+            // `\uXXXX` / `\UXXXXXXXX` — up to four/eight hex digits of a
+            // Unicode scalar value (C119).
+            Some(u @ ('u' | 'U')) => {
+                chars.next();
+                match take_number(&mut chars, if u == 'u' { 4 } else { 8 }, 16) {
+                    Some(n) => out.push(char::from_u32(n).unwrap_or('\u{fffd}')),
+                    None => {
+                        out.push('\\');
+                        out.push(u);
+                    }
+                }
+            }
+            // `\cX` — the control character for X (C119): X's uppercase
+            // form masked to the low five bits, bash's own rule.
+            Some('c') => {
+                chars.next();
+                match chars.next() {
+                    Some(x) => {
+                        let x = if x == '\\' { chars.next().unwrap_or('\\') } else { x };
+                        out.push(((x.to_ascii_uppercase() as u8) & 0x1f) as char);
+                    }
+                    None => out.push_str("\\c"),
+                }
+            }
             Some(other) => {
+                chars.next();
                 out.push('\\');
                 out.push(other);
             }

@@ -3791,3 +3791,41 @@ fn dev_tcp_pseudo_device() {
     assert_eq!(code, 0);
     handle.join().unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn programmable_completion() {
+    // C93: complete/compgen/compopt and the COMPREPLY protocol.
+    // compgen -W with $-expansion and prefix filtering.
+    let (out, _) = rush(r#"x=dynamic; compgen -W "static $x demo" d"#);
+    assert_eq!(out, "dynamic\ndemo\n");
+
+    // Action letters: -A function, -b builtin.
+    let (out, _) = rush("f1(){ :; }; f2(){ :; }; compgen -A function f");
+    assert_eq!(out, "f1\nf2\n");
+    let (out, _) = rush("compgen -b echo");
+    assert_eq!(out, "echo\n");
+
+    // -P/-S decorate every candidate.
+    let (out, _) = rush(r#"compgen -P "pre-" -S "-post" -W "a b" a"#);
+    assert_eq!(out, "pre-a-post\n");
+
+    // -F function protocol: the function fills COMPREPLY, compgen -F
+    // reads it back.
+    let (out, _) = rush("_c() { COMPREPLY=(alpha beta); }; compgen -F _c ''");
+    assert_eq!(out, "alpha\nbeta\n");
+
+    // A realistic COMP_WORDS/COMP_CWORD-driven completion.
+    let (out, _) = rush(
+        r#"_svc() { local cur="${COMP_WORDS[COMP_CWORD]}"; COMPREPLY=($(compgen -W "start stop restart" "$cur")); }; COMP_WORDS=(svc st); COMP_CWORD=1; _svc; printf "%s\n" "${COMPREPLY[@]}""#,
+    );
+    assert_eq!(out, "start\nstop\n");
+
+    // complete registers, lists, and -r removes.
+    let (out, _) = rush("complete -W x foo; complete | grep -c foo; complete -r foo; complete | grep -c foo");
+    assert_eq!(out, "1\n0\n");
+
+    // compgen with no match is status 1.
+    let (_, code) = rush(r#"compgen -W "a b c" zzz"#);
+    assert_eq!(code, 1);
+}

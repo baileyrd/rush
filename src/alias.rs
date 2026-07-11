@@ -53,6 +53,14 @@ pub fn unset_all() {
 }
 
 /// All aliases, name-sorted (a `BTreeMap` iterates in key order already).
+pub fn names() -> Vec<String> {
+    ALIASES.with(|a| {
+        let mut names: Vec<String> = a.borrow().keys().cloned().collect();
+        names.sort();
+        names
+    })
+}
+
 pub fn all() -> Vec<(String, String)> {
     ALIASES.with(|a| a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect())
 }

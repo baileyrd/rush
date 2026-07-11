@@ -53,6 +53,9 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "let" => Some(let_cmd(argv)),
         "history" => Some(history_cmd(argv)),
         "fc" => Some(fc_cmd(argv)),
+        "complete" => Some(complete_cmd(argv)),
+        "compgen" => Some(compgen_cmd(argv)),
+        "compopt" => Some(compopt_cmd(argv)),
         "times" => Some(times_cmd()),
         "help" => Some(help_cmd(argv)),
         "caller" => Some(caller_cmd()),
@@ -80,7 +83,7 @@ pub const NAMES: &[&str] = &[
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
     "readonly", "let", "builtin", "history", "times", "help", "caller", "enable", "suspend",
-    "fc",
+    "fc", "complete", "compgen", "compopt",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -2585,6 +2588,123 @@ pub fn import_functions() {
             crate::func::define(parsed, body.clone());
         }
     }
+}
+
+/// Parse the shared `complete`/`compgen` option set into a `Spec` (C93),
+/// returning `(spec, operands)`.
+fn parse_comp_spec(args: &[String]) -> Result<(crate::completion::programmable::Spec, Vec<String>), String> {
+    use crate::completion::programmable::Spec;
+    let mut spec = Spec::default();
+    let mut operands = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut take = || it.next().cloned().ok_or_else(|| "option requires an argument".to_string());
+        match arg.as_str() {
+            "-F" => spec.function = Some(take()?),
+            "-C" => spec.command = Some(take()?),
+            "-W" => spec.wordlist = Some(take()?),
+            "-P" => spec.prefix = Some(take()?),
+            "-S" => spec.suffix = Some(take()?),
+            "-A" => spec.actions.push(take()?),
+            "-o" => spec.options.push(take()?),
+            "-a" => spec.actions.push("alias".into()),
+            "-b" => spec.actions.push("builtin".into()),
+            "-c" => spec.actions.push("command".into()),
+            "-d" => spec.actions.push("directory".into()),
+            "-e" => spec.actions.push("export".into()),
+            "-f" => spec.actions.push("file".into()),
+            "-j" => spec.actions.push("job".into()),
+            "-k" => spec.actions.push("keyword".into()),
+            "-v" => spec.actions.push("variable".into()),
+            "-u" => spec.actions.push("user".into()),
+            "-g" => spec.actions.push("group".into()),
+            "-s" => spec.actions.push("signal".into()),
+            other if other.starts_with('-') => {
+                return Err(format!("{other}: unsupported option"));
+            }
+            _ => operands.push(arg.clone()),
+        }
+    }
+    Ok((spec, operands))
+}
+
+/// `complete [options] name...` (C93): register (or, with `-r`, remove) a
+/// completion spec per command; `-D` sets the default; bare `complete`
+/// lists registrations re-runnably.
+fn complete_cmd(argv: &[String]) -> i32 {
+    use crate::completion::programmable as pc;
+    match argv.get(1).map(String::as_str) {
+        None => {
+            for name in pc::registered_names() {
+                println!("complete {name}");
+            }
+            return 0;
+        }
+        Some("-r") => {
+            if argv.len() == 2 {
+                pc::clear();
+            } else {
+                for name in &argv[2..] {
+                    pc::remove(name);
+                }
+            }
+            return 0;
+        }
+        _ => {}
+    }
+    // `-D` (default) / `-E` (empty line) consume no name.
+    let default = argv.iter().any(|a| a == "-D" || a == "-E");
+    let filtered: Vec<String> = argv[1..].iter().filter(|a| *a != "-D" && *a != "-E").cloned().collect();
+    let (spec, names) = match parse_comp_spec(&filtered) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("complete: {e}");
+            return 2;
+        }
+    };
+    if default {
+        pc::register_default(spec);
+        return 0;
+    }
+    if names.is_empty() {
+        eprintln!("complete: usage: complete [-abcdefgjksuv] [-o option] [-A action] [-F function] [-C command] [-W wordlist] [-P prefix] [-S suffix] name...");
+        return 2;
+    }
+    for name in &names {
+        pc::register(name, spec.clone());
+    }
+    0
+}
+
+/// `compgen [options] [word]` (C93): print the candidates a matching
+/// `complete` spec would produce, one per line — the piece scripts call
+/// directly.
+fn compgen_cmd(argv: &[String]) -> i32 {
+    let (spec, operands) = match parse_comp_spec(&argv[1..]) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("compgen: {e}");
+            return 2;
+        }
+    };
+    let word = operands.first().cloned().unwrap_or_default();
+    let words = vec![word.clone()];
+    let candidates = crate::completion::programmable::generate(&spec, &word, &words, 0, &word);
+    if candidates.is_empty() {
+        return 1;
+    }
+    for c in candidates {
+        println!("{c}");
+    }
+    0
+}
+
+/// `compopt [-o opt] [+o opt] [name...]` (C93): adjust a spec's `-o`
+/// options after the fact. Accepted; the option set rush acts on is
+/// small (`nospace`/`filenames` affect display only), so this is mostly
+/// a compatibility shim that doesn't error.
+fn compopt_cmd(_argv: &[String]) -> i32 {
+    0
 }
 
 /// `fc` (C102) — POSIX's history fix command, over the same mirror the

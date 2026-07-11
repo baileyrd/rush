@@ -35,6 +35,35 @@ pub fn complete(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     if let Some(result) = complete_variable(line, pos) {
         return result;
     }
+    // A registered programmable-completion spec (C93) wins over the
+    // built-in per-command completers.
+    if let Some(cmd) = current_command(line, pos)
+        && let Some(spec) = programmable::get(cmd).or_else(programmable::default_spec)
+    {
+        let start = word_start(line, pos);
+        let word = &line[start..pos];
+        let seg_start = segment_start(line, pos);
+        let words: Vec<String> =
+            line[seg_start..pos].split_whitespace().map(str::to_string).collect();
+        let cword = words.len().saturating_sub(if word.is_empty() { 0 } else { 1 });
+        let mut full_words = words.clone();
+        if word.is_empty() {
+            full_words.push(String::new());
+        }
+        let candidates: Vec<Candidate> =
+            programmable::generate(&spec, word, &full_words, cword, &line[seg_start..pos])
+                .into_iter()
+                .map(plain)
+                .collect();
+        if !candidates.is_empty() {
+            return (start, candidates);
+        }
+        // A spec with `-o default` falls back to filename completion.
+        if spec.options.iter().any(|o| o == "default") {
+            return complete_path(line, pos);
+        }
+        return (start, candidates);
+    }
     match current_command(line, pos) {
         Some("cd") => complete_directory(line, pos),
         Some("export") | Some("unset") | Some("local") | Some("declare") => {
@@ -628,4 +657,174 @@ mod tests {
         assert!(h.contains("\x1b[32mecho\x1b[0m"), "got: {h:?}");
     }
 
+}
+
+/// Programmable completion (C93): `complete`/`compgen`/`compopt` and the
+/// `COMPREPLY`/`COMP_WORDS`/`COMP_CWORD` protocol, so bash-completion
+/// scripts load and run.
+pub mod programmable {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// One registered completion spec (`complete [options] name`).
+    #[derive(Clone, Default)]
+    pub struct Spec {
+        /// `-F function` — call this shell function; it fills `COMPREPLY`.
+        pub function: Option<String>,
+        /// `-C command` — run it; each output line is a candidate.
+        pub command: Option<String>,
+        /// `-W wordlist` — a `$IFS`-split, then expanded, set of words.
+        pub wordlist: Option<String>,
+        /// `-a`/`-b`/`-c`/`-d`/`-e`/`-f`/`-j`/`-v`/`-A action` letters.
+        pub actions: Vec<String>,
+        /// `-P prefix` / `-S suffix` attached to every candidate.
+        pub prefix: Option<String>,
+        pub suffix: Option<String>,
+        /// `-o` options (`nospace`, `default`, `filenames`, …).
+        pub options: Vec<String>,
+    }
+
+    thread_local! {
+        static SPECS: RefCell<HashMap<String, Spec>> = RefCell::new(HashMap::new());
+        static DEFAULT_SPEC: RefCell<Option<Spec>> = const { RefCell::new(None) };
+    }
+
+    pub fn register(name: &str, spec: Spec) {
+        SPECS.with(|s| s.borrow_mut().insert(name.to_string(), spec));
+    }
+
+    pub fn register_default(spec: Spec) {
+        DEFAULT_SPEC.with(|d| *d.borrow_mut() = Some(spec));
+    }
+
+    pub fn remove(name: &str) {
+        SPECS.with(|s| s.borrow_mut().remove(name));
+    }
+
+    pub fn clear() {
+        SPECS.with(|s| s.borrow_mut().clear());
+        DEFAULT_SPEC.with(|d| *d.borrow_mut() = None);
+    }
+
+    pub fn get(name: &str) -> Option<Spec> {
+        SPECS.with(|s| s.borrow().get(name).cloned())
+    }
+
+    pub fn default_spec() -> Option<Spec> {
+        DEFAULT_SPEC.with(|d| d.borrow().clone())
+    }
+
+    pub fn registered_names() -> Vec<String> {
+        let mut names: Vec<String> = SPECS.with(|s| s.borrow().keys().cloned().collect());
+        names.sort();
+        names
+    }
+
+    /// Generate the raw candidate list for a spec against `word` (the text
+    /// being completed) — shared by `compgen` and the live completer.
+    /// `line`/`cword`/`words` seed the completion variables for a `-F`
+    /// function.
+    pub fn generate(spec: &Spec, word: &str, words: &[String], cword: usize, line: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+
+        for action in &spec.actions {
+            out.extend(action_candidates(action, word));
+        }
+        if let Some(wl) = &spec.wordlist {
+            let expanded = crate::expand::expand_dollars(wl).unwrap_or_else(|_| wl.clone());
+            out.extend(expanded.split_whitespace().map(str::to_string));
+        }
+        if let Some(cmd) = &spec.command {
+            if let Ok(output) = run_capture(cmd) {
+                out.extend(output.lines().map(str::to_string));
+            }
+        }
+        if let Some(func) = &spec.function {
+            out.extend(run_completion_function(func, words, cword, line));
+        }
+
+        // Keep only candidates that start with the word being completed —
+        // `-W`/`-A` filter by prefix (a `-F` function is trusted to have
+        // filtered COMPREPLY itself, so its output isn't re-filtered).
+        let from_function = spec.function.is_some();
+        out.retain(|c| from_function || c.starts_with(word));
+
+        for c in &mut out {
+            if let Some(p) = &spec.prefix {
+                *c = format!("{p}{c}");
+            }
+            if let Some(s) = &spec.suffix {
+                c.push_str(s);
+            }
+        }
+        out
+    }
+
+    /// The candidates a single `-A action` (or its `-a`/`-c`/… shorthand)
+    /// produces — the bash action set rush can answer locally.
+    fn action_candidates(action: &str, word: &str) -> Vec<String> {
+        match action {
+            "command" => {
+                let mut names = crate::builtins::all_names().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                names.extend(super::path_executables());
+                names.into_iter().filter(|n| n.starts_with(word)).collect()
+            }
+            "builtin" => crate::builtins::all_names()
+                .iter()
+                .filter(|n| n.starts_with(word))
+                .map(|s| s.to_string())
+                .collect(),
+            "alias" => crate::alias::names().into_iter().filter(|n| n.starts_with(word)).collect(),
+            "function" => crate::func::names().into_iter().filter(|n| n.starts_with(word)).collect(),
+            "variable" => crate::vars::names().into_iter().filter(|n| n.starts_with(word)).collect(),
+            "file" | "directory" => {
+                let (start, cands) = super::complete_path(word, word.len());
+                let _ = start;
+                let mut v: Vec<String> = cands.into_iter().map(|c| c.replacement).collect();
+                if action == "directory" {
+                    v.retain(|p| super::is_directory(p));
+                }
+                v
+            }
+            "keyword" => ["if", "then", "else", "elif", "fi", "for", "while", "until", "do",
+                "done", "case", "esac", "select", "function", "in", "time", "coproc"]
+                .iter()
+                .filter(|k| k.starts_with(word))
+                .map(|s| s.to_string())
+                .collect(),
+            "job" => crate::vars::names().into_iter().filter(|_| false).collect(), // no stable API
+            "signal" => ["SIGHUP", "SIGINT", "SIGQUIT", "SIGKILL", "SIGTERM", "SIGSTOP",
+                "SIGCONT", "SIGUSR1", "SIGUSR2"]
+                .iter()
+                .filter(|s| s.starts_with(word))
+                .map(|s| s.to_string())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Run a `-F` completion function: seed `COMP_WORDS`/`COMP_CWORD`/
+    /// `COMP_LINE`/`COMP_POINT` and the function's positional parameters
+    /// (`$1` command, `$2` current word, `$3` previous word — bash's
+    /// convention), call it, then read back the `COMPREPLY` array.
+    fn run_completion_function(func: &str, words: &[String], cword: usize, line: &str) -> Vec<String> {
+        crate::vars::set_array("COMP_WORDS", words.to_vec());
+        crate::vars::set("COMP_CWORD", &cword.to_string());
+        crate::vars::set("COMP_LINE", line);
+        crate::vars::set("COMP_POINT", &line.len().to_string());
+        crate::vars::unset("COMPREPLY");
+
+        let cmd = words.first().cloned().unwrap_or_default();
+        let cur = words.get(cword).cloned().unwrap_or_default();
+        let prev = if cword > 0 { words.get(cword - 1).cloned().unwrap_or_default() } else { String::new() };
+        let argv = vec![func.to_string(), cmd, cur, prev];
+        let _ = crate::exec::call_function_for_completion(&argv);
+
+        crate::vars::array_values("COMPREPLY")
+    }
+
+    fn run_capture(cmd: &str) -> Result<String, String> {
+        let list = crate::parser::parse(cmd).map_err(|e| e.to_string())?;
+        crate::exec::capture_list(&list)
+    }
 }

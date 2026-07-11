@@ -726,6 +726,12 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
 /// restore the previous positional parameters and pop the `local` frame —
 /// restoring whatever any `local name` in the body shadowed back to the
 /// caller's own value (or removing it, if it didn't have one).
+/// Call a shell function for a `-F` completion (C93) — same machinery as
+/// an ordinary call, exposed to `completion::programmable`.
+pub fn call_function_for_completion(argv: &[String]) -> Result<i32, String> {
+    call_function(argv)
+}
+
 fn call_function(argv: &[String]) -> Result<i32, String> {
     // `FUNCNEST` (C83), plus a hard internal cap well below the native
     // stack limit (~2700 frames aborts the whole process with SIGABRT) —

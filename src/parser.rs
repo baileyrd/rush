@@ -108,6 +108,9 @@ pub enum RawRedirect {
     /// `fd>&$word` / `fd<&"${arr[N]}"` — the target fd number comes from
     /// a word, resolved at expansion time (C66).
     DupWord { fd: u32, word: Word },
+    /// `{name}>file` (C115): perform `inner` on a freshly-allocated fd
+    /// (>= 10) and assign that fd's number to `name`.
+    VarFd { name: String, inner: Box<RawRedirect> },
     /// `<<DELIM` here-document; `body` is the collected text, expanded unless the
     /// delimiter was quoted.
     Heredoc { body: String, expand: bool },
@@ -585,7 +588,7 @@ impl Parser {
     /// Turn one already-consumed `Redir` token into a `RawRedirect`, reading
     /// its filename word (if any) from the stream.
     fn redirect_from_token(&mut self, r: lexer::Redir) -> Result<RawRedirect, ParseError> {
-        Ok(match r.op {
+        let raw = match r.op {
             RedirOp::Read => {
                 RawRedirect::File { fd: r.fd, file: self.expect_word("<")?, mode: RedirMode::Read }
             }
@@ -605,6 +608,11 @@ impl Parser {
             RedirOp::DupWord => RawRedirect::DupWord { fd: r.fd, word: self.expect_word(">&")? },
             RedirOp::Heredoc { body, expand } => RawRedirect::Heredoc { body, expand },
             RedirOp::HereString => RawRedirect::HereString(self.expect_word("<<<")?),
+        };
+        // `{name}>…` (C115) wraps whatever operator followed it.
+        Ok(match r.varfd {
+            Some(name) => RawRedirect::VarFd { name, inner: Box::new(raw) },
+            None => raw,
         })
     }
 

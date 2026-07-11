@@ -52,6 +52,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "unabbr" => Some(unabbr_cmd(argv)),
         "let" => Some(let_cmd(argv)),
         "history" => Some(history_cmd(argv)),
+        "fc" => Some(fc_cmd(argv)),
         "times" => Some(times_cmd()),
         "help" => Some(help_cmd(argv)),
         "caller" => Some(caller_cmd()),
@@ -79,6 +80,7 @@ pub const NAMES: &[&str] = &[
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
     "readonly", "let", "builtin", "history", "times", "help", "caller", "enable", "suspend",
+    "fc",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -2576,6 +2578,164 @@ pub fn import_functions() {
             && let crate::parser::Compound::FuncDef { name: parsed, body } = rc.compound.as_ref()
         {
             crate::func::define(parsed, body.clone());
+        }
+    }
+}
+
+/// `fc` (C102) — POSIX's history fix command, over the same mirror the
+/// `history` builtin uses. `-l` lists a range (`-n` no numbers, `-r`
+/// reversed), `-s [pat=rep] [spec]` re-executes (printing first, like
+/// bash), and the default form edits the range in `$FCEDIT`/`$EDITOR`
+/// (falling back to `vi`) then runs the result.
+fn fc_cmd(argv: &[String]) -> i32 {
+    // The fc invocation itself is the newest entry when running
+    // interactively — every mode operates on what *preceded* it.
+    let mut entries = history_entries();
+    if entries.last().is_some_and(|e| e.starts_with("fc")) {
+        entries.pop();
+    }
+    if entries.is_empty() {
+        eprintln!("fc: history is empty");
+        return 1;
+    }
+
+    // Resolve a spec to a 0-based index: positive = 1-based position,
+    // negative = from the end, text = most recent entry with that prefix.
+    let resolve = |spec: &str| -> Option<usize> {
+        if let Ok(n) = spec.parse::<i64>() {
+            let idx = if n < 0 { entries.len() as i64 + n } else { n - 1 };
+            return usize::try_from(idx).ok().filter(|&i| i < entries.len());
+        }
+        entries.iter().rposition(|e| e.starts_with(spec))
+    };
+
+    let mut list = false;
+    let mut no_numbers = false;
+    let mut reverse = false;
+    let mut substitute = false;
+    let mut editor: Option<String> = None;
+    let mut operands: Vec<&String> = Vec::new();
+    let mut args = argv[1..].iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-e" => match args.next() {
+                Some(e) => editor = Some(e.clone()),
+                None => {
+                    eprintln!("fc: -e: option requires an argument");
+                    return 2;
+                }
+            },
+            // Flag letters cluster (`fc -lr`), but a negative-number spec
+            // (`fc -l -2 -1`) is an operand — only all-letter words count.
+            flags
+                if flags.len() > 1
+                    && flags.starts_with('-')
+                    && flags[1..].chars().all(|c| matches!(c, 'l' | 'n' | 'r' | 's')) =>
+            {
+                for c in flags[1..].chars() {
+                    match c {
+                        'l' => list = true,
+                        'n' => no_numbers = true,
+                        'r' => reverse = true,
+                        's' => substitute = true,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ => operands.push(arg),
+        }
+    }
+
+    if substitute {
+        // `fc -s [pat=rep] [spec]`.
+        let (replace, spec) = match operands.first() {
+            Some(op) if op.contains('=') && resolve(op).is_none() => {
+                (op.split_once('=').map(|(p, r)| (p.to_string(), r.to_string())), operands.get(1))
+            }
+            first => (None, first),
+        };
+        let Some(idx) = spec.map_or(Some(entries.len() - 1), |s| resolve(s)) else {
+            eprintln!("fc: no command found");
+            return 1;
+        };
+        let mut cmd = entries[idx].clone();
+        if let Some((pat, rep)) = replace {
+            cmd = cmd.replacen(&pat, &rep, 1);
+        }
+        println!("{cmd}");
+        history_record(&cmd);
+        HISTORY_RESET.with(|f| f.set(true));
+        return run_fc_source(&cmd);
+    }
+
+    let first = operands.first().map_or_else(
+        || if list { entries.len().saturating_sub(16) } else { entries.len() - 1 },
+        |s| resolve(s).unwrap_or(0),
+    );
+    let last = operands.get(1).and_then(|s| resolve(s)).unwrap_or(if list {
+        entries.len() - 1
+    } else {
+        first
+    });
+    let (lo, hi) = (first.min(last), first.max(last));
+    let mut range: Vec<(usize, &String)> = entries[lo..=hi].iter().enumerate().map(|(i, e)| (lo + i, e)).collect();
+    if reverse != (first > last) {
+        range.reverse();
+    }
+
+    if list {
+        for (i, e) in range {
+            if no_numbers {
+                println!("	 {e}");
+            } else {
+                println!("{}	 {e}", i + 1);
+            }
+        }
+        return 0;
+    }
+
+    // Edit-and-execute: range into a temp file, `$FCEDIT`/`$EDITOR`/vi,
+    // then run whatever came back (recorded as history).
+    let editor = editor
+        .or_else(|| crate::vars::get("FCEDIT").filter(|e| !e.is_empty()))
+        .or_else(|| crate::vars::get("EDITOR").filter(|e| !e.is_empty()))
+        .unwrap_or_else(|| "vi".to_string());
+    let path = std::env::temp_dir().join(format!("rush-fc-{}", std::process::id()));
+    let body: String = range.iter().map(|(_, e)| format!("{e}
+")).collect();
+    if let Err(e) = std::fs::write(&path, &body) {
+        eprintln!("fc: {e}");
+        return 1;
+    }
+    let edit_status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} {}", path.display()))
+        .status();
+    if !edit_status.is_ok_and(|s| s.success()) {
+        let _ = std::fs::remove_file(&path);
+        eprintln!("fc: editor failed");
+        return 1;
+    }
+    let edited = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    for line in edited.lines().filter(|l| !l.trim().is_empty()) {
+        println!("{line}");
+        history_record(line);
+    }
+    HISTORY_RESET.with(|f| f.set(true));
+    run_fc_source(&edited)
+}
+
+/// Run `fc`-produced source in the current shell.
+fn run_fc_source(src: &str) -> i32 {
+    match crate::parser::parse(src) {
+        Ok(list) => crate::exec::run_list(&list).unwrap_or_else(|e| {
+            eprintln!("rush: {e}");
+            1
+        }),
+        Err(e) => {
+            eprintln!("fc: {e}");
+            1
         }
     }
 }

@@ -87,6 +87,10 @@ pub enum CondTok {
 pub struct Redir {
     pub fd: u32,
     pub op: RedirOp,
+    /// `{name}>file` (C115): allocate a fresh fd (>= 10) for the
+    /// redirection and assign its number to the named variable, instead
+    /// of using `fd`.
+    pub varfd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,7 +167,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     // desugared right here to exactly `2>&1 |`, its
                     // documented meaning.
                     chars.next();
-                    tokens.push(Token::Redirect(Redir { fd: 2, op: RedirOp::Dup(1) }));
+                    tokens.push(Token::Redirect(Redir { fd: 2, op: RedirOp::Dup(1), varfd: None }));
                     tokens.push(Token::Pipe);
                 } else {
                     tokens.push(Token::Pipe);
@@ -185,7 +189,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                         } else {
                             RedirOp::Both
                         };
-                        tokens.push(Token::Redirect(Redir { fd: 1, op }));
+                        tokens.push(Token::Redirect(Redir { fd: 1, op, varfd: None }));
                     }
                     _ => tokens.push(Token::Amp),
                 }
@@ -245,7 +249,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                         // read by the parser same as any other redirect's
                         // filename, not here in the lexer.
                         chars.next();
-                        tokens.push(Token::Redirect(Redir { fd: 0, op: RedirOp::HereString }));
+                        tokens.push(Token::Redirect(Redir { fd: 0, op: RedirOp::HereString, varfd: None }));
                         continue;
                     }
                     // `<<` / `<<-` here-document.
@@ -259,12 +263,13 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     let (delim, expand) = read_heredoc_delim(&mut chars)?;
                     let idx = tokens.len();
                     tokens.push(Token::Redirect(Redir {
+                        varfd: None,
                         fd: 0,
                         op: RedirOp::Heredoc { body: String::new(), expand },
                     }));
                     pending.push(Pending { idx, delim, strip });
                 } else {
-                    tokens.push(Token::Redirect(Redir { fd: 0, op: lex_lt_op(&mut chars)? }));
+                    tokens.push(Token::Redirect(Redir { fd: 0, op: lex_lt_op(&mut chars)?, varfd: None }));
                 }
             }
             '>' => {
@@ -277,7 +282,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     tokens.push(Token::Word(word));
                     continue;
                 }
-                tokens.push(Token::Redirect(Redir { fd: 1, op: lex_gt_op(&mut chars)? }));
+                tokens.push(Token::Redirect(Redir { fd: 1, op: lex_gt_op(&mut chars)?, varfd: None }));
             }
             // A digit run immediately before `<`/`>` is an explicit fd (`2>`);
             // otherwise it's the start of a word.
@@ -300,6 +305,40 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                     let word = lex_word(&mut chars, Some(digits))?;
                     tokens.push(Token::Word(word));
                 }
+            }
+            // `{name}>file` / `{name}<file` (C115): a brace-wrapped
+            // variable name glued to a redirect operator allocates a
+            // fresh fd and stores its number in the variable. Probed on a
+            // cloned cursor so `{` in every other position (brace groups,
+            // brace expansion) still lexes as word text.
+            '{' => {
+                let mut probe = chars.clone();
+                probe.next(); // `{`
+                let mut name = String::new();
+                while let Some(&c) = probe.peek() {
+                    if c == '_' || c.is_ascii_alphanumeric() {
+                        name.push(c);
+                        probe.next();
+                    } else {
+                        break;
+                    }
+                }
+                let valid_name = name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
+                if valid_name && probe.peek() == Some(&'}') {
+                    probe.next(); // `}`
+                    if matches!(probe.peek(), Some('<') | Some('>')) {
+                        chars = probe;
+                        let mut redir = lex_redirect(&mut chars, None)?;
+                        redir.varfd = Some(name);
+                        tokens.push(Token::Redirect(redir));
+                        continue;
+                    }
+                }
+                let word = lex_word(&mut chars, None)?;
+                tokens.push(Token::Word(word));
             }
             _ => {
                 let word = lex_word(&mut chars, None)?;
@@ -574,8 +613,8 @@ fn read_line(chars: &mut Peekable<Chars>) -> Option<String> {
 /// a leading file-descriptor number (`2>`), if one was lexed.
 fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result<Redir, LexError> {
     match chars.next() {
-        Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: lex_lt_op(chars)? }),
-        Some('>') => Ok(Redir { fd: explicit_fd.unwrap_or(1), op: lex_gt_op(chars)? }),
+        Some('<') => Ok(Redir { fd: explicit_fd.unwrap_or(0), op: lex_lt_op(chars)?, varfd: None }),
+        Some('>') => Ok(Redir { fd: explicit_fd.unwrap_or(1), op: lex_gt_op(chars)?, varfd: None }),
         _ => unreachable!("lex_redirect called off a redirection"),
     }
 }
@@ -1173,7 +1212,7 @@ mod tests {
                 Token::Pipe,
                 bare("grep"),
                 bare("x"),
-                Token::Redirect(Redir { fd: 1, op: RedirOp::Write }),
+                Token::Redirect(Redir { fd: 1, op: RedirOp::Write, varfd: None }),
                 bare("out"),
             ]
         );
@@ -1182,7 +1221,7 @@ mod tests {
     #[test]
     fn fd_aware_redirects() {
         use RedirOp::*;
-        let r = |fd, op| Token::Redirect(Redir { fd, op });
+        let r = |fd, op| Token::Redirect(Redir { fd, op, varfd: None });
         assert_eq!(lex("> f").unwrap(), vec![r(1, Write), bare("f")]);
         assert_eq!(lex(">> f").unwrap(), vec![r(1, Append), bare("f")]);
         assert_eq!(lex("< f").unwrap(), vec![r(0, Read), bare("f")]);
@@ -1203,7 +1242,7 @@ mod tests {
     #[test]
     fn fd_dup_read_side_parses_too() {
         use RedirOp::*;
-        let r = |fd, op| Token::Redirect(Redir { fd, op });
+        let r = |fd, op| Token::Redirect(Redir { fd, op, varfd: None });
         assert_eq!(lex("<&5").unwrap(), vec![r(0, Dup(5))]);
         assert_eq!(lex("4<&5").unwrap(), vec![r(4, Dup(5))]);
         // Still a plain read when there's no `&`.

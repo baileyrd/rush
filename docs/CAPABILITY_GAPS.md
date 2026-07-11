@@ -3395,7 +3395,7 @@ Each breaks a real pattern; all reproduced:
   entry 1.
 **Effort: S each (cd/pwd logical paths M)**
 
-### C102 — `fc` builtin missing entirely (POSIX-mandated)
+### C102 — `fc` builtin missing entirely (POSIX-mandated) ✅ done
 No `fc -l` (numbered listing), `fc -s old=new` (quick re-run), or
 `fc [-e editor] range` (edit-and-execute past commands). The editor's
 Ctrl-X Ctrl-E only covers the *current* line. **Effort: M**
@@ -3485,7 +3485,7 @@ accept both header shapes. **Effort: S**
 `cmd |& cat` → `expected a command`. Desugar to `2>&1 |` at parse time.
 **Effort: S**
 
-### C115 — `{varname}>file` variable-fd redirection unsupported
+### C115 — `{varname}>file` variable-fd redirection unsupported ✅ done
 `exec {x}>/dev/null; echo $x` should allocate fd ≥10 and set `$x`;
 rush treats `{x}` as a filename (or a command name in prefix position).
 Standard idiom for flock/lock-file and saved-stream management.

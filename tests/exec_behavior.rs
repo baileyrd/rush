@@ -3672,3 +3672,37 @@ fn ignoreeof_and_ps0() {
     let out = rush_session(std::path::Path::new("/tmp"), "PS0='[ps0]'\necho hi\n");
     assert!(out.contains("[ps0]hi"), "got: {out:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn varfd_named_descriptors() {
+    // C115: `{name}>file` allocates a fresh fd (>= 10) and stores its
+    // number; the fd persists past the command, bash's rule.
+    let (out, _) = rush(r#"exec {x}>/dev/null; [ "$x" -ge 10 ] && echo alloc-ok; echo hi >&$x; exec {y}>&1; echo "via-y" >&$y"#);
+    assert_eq!(out, "alloc-ok\nvia-y\n");
+
+    let (out, _) = rush(r#"{fd}>/dev/null echo hi; [ -n "$fd" ] && echo fd-set"#);
+    assert_eq!(out, "hi\nfd-set\n");
+
+    // `{` everywhere else still lexes as word text.
+    let (out, _) = rush("echo {notafd}; echo {x}y");
+    assert_eq!(out, "{notafd}\n{x}y\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn fc_builtin() {
+    // C102: fc -l listing (ranges, reverse, -n), -s re-execution with
+    // substitution, and the edit form (FCEDIT=true = run unchanged).
+    let (out, _) = rush(r#"history -s "echo a"; history -s "echo b"; history -s "echo c"; fc -l 2 3; fc -lr 2 3; fc -ln 3 3; fc -l -2 -1"#);
+    assert_eq!(out, "2\t echo b\n3\t echo c\n3\t echo c\n2\t echo b\n\t echo c\n2\t echo b\n3\t echo c\n");
+
+    let (out, _) = rush(r#"history -s "echo hello"; fc -s hello=world"#);
+    assert_eq!(out, "echo world\nworld\n");
+
+    let (out, _) = rush(r#"history -s "echo aaa"; history -s "true"; fc -s echo"#);
+    assert_eq!(out, "echo aaa\naaa\n");
+
+    let (out, _) = rush(r#"history -s "echo edited-run"; FCEDIT=true fc"#);
+    assert_eq!(out, "echo edited-run\nedited-run\n");
+}

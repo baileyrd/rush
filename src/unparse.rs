@@ -198,6 +198,11 @@ impl Printer {
                     }
                     self.pending_heredocs.push((body.clone(), delim.to_string(), !expand));
                 }
+                RawRedirect::VarFd { name, inner } => {
+                    self.stmt(&format!("{{{name}}}"));
+                    // Re-emit the wrapped operator without a leading space.
+                    self.redirects(std::slice::from_ref(inner), false);
+                }
                 RawRedirect::HereString(word) => {
                     self.stmt("<<< ");
                     self.stmt(&unparse_word(word));

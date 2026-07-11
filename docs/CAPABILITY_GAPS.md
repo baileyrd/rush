@@ -3720,8 +3720,8 @@ Remaining narrowings (documented, low-value or blocked on a sibling crate):
 
 - `ulimit -a`'s `-R` (real-time non-blocking time) line needs
   `RLIMIT_RTTIME` (asm-generic id 15), which rusty_libc does not yet expose
-  (it stops at `RLIMIT_RTPRIO`). `-p` (pipe size) is a bash pseudo-resource
-  with no `RLIMIT_*` backing.
+  (it stops at `RLIMIT_RTPRIO`) — see `docs/HANDOFF_RUSTY_LIBC.md`. `-p`
+  (pipe size) is a bash pseudo-resource with no `RLIMIT_*` backing.
 - `time ( subshell ) 2>/dev/null` does not suppress the timing report: the
   redirection is applied inside the forked subshell child, never in the
   parent that writes the report. Simple/pipeline timed commands

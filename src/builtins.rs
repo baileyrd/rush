@@ -56,6 +56,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "complete" => Some(complete_cmd(argv)),
         "compgen" => Some(compgen_cmd(argv)),
         "compopt" => Some(compopt_cmd(argv)),
+        "bind" => Some(bind_cmd(argv)),
         "times" => Some(times_cmd()),
         "help" => Some(help_cmd(argv)),
         "caller" => Some(caller_cmd()),
@@ -83,7 +84,7 @@ pub const NAMES: &[&str] = &[
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
     "readonly", "let", "builtin", "history", "times", "help", "caller", "enable", "suspend",
-    "fc", "complete", "compgen", "compopt",
+    "fc", "complete", "compgen", "compopt", "bind",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -1103,17 +1104,16 @@ fn read_cmd(argv: &[String]) -> i32 {
     {
         eprint!("{prompt}");
     }
-    // `-s` on a terminal: shell out to `stty` to stop echo — rush carries
-    // no termios binding of its own (documented approximation).
-    let silenced = opts.silent && tty && opts.fd == 0
-        && std::process::Command::new("stty").arg("-echo").status().is_ok_and(|s| s.success());
-
-    let (line, protected, status) = read_logical_line(&opts);
-
-    if silenced {
-        let _ = std::process::Command::new("stty").arg("echo").status();
+    // `-s` on a terminal: disable echo through rusty_lines' termios
+    // wrapper (C89 — the stty shell-out is gone now that the crate
+    // exposes it), restored on drop even if the read errors.
+    let (line, protected, status) = if opts.silent && tty && opts.fd == 0 {
+        let result = rusty_lines::with_echo_disabled(|| read_logical_line(&opts));
         eprintln!();
-    }
+        result.unwrap_or_else(|_| read_logical_line(&opts))
+    } else {
+        read_logical_line(&opts)
+    };
 
     if let Some(array) = &opts.array {
         let fields = split_read_fields(&line, &protected);
@@ -2429,11 +2429,23 @@ thread_local! {
     // `HISTORY_RESET` tells the loop to rebuild the editor from this
     // mirror after `history -c`/`-d`/`-r`.
     static SHELL_HISTORY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    // Epoch seconds per entry, for `$HISTTIMEFORMAT` (C122) — kept parallel
+    // to SHELL_HISTORY.
+    static SHELL_HISTORY_TIMES: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
     static HISTORY_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub fn history_record(line: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     SHELL_HISTORY.with(|h| h.borrow_mut().push(line.to_string()));
+    SHELL_HISTORY_TIMES.with(|t| t.borrow_mut().push(now));
+}
+
+fn history_time(index: usize) -> i64 {
+    SHELL_HISTORY_TIMES.with(|t| t.borrow().get(index).copied().unwrap_or(0))
 }
 
 pub fn history_entries() -> Vec<String> {
@@ -2626,6 +2638,173 @@ fn parse_comp_spec(args: &[String]) -> Result<(crate::completion::programmable::
         }
     }
     Ok((spec, operands))
+}
+
+/// A pending line-editor rebinding requested by the `bind` builtin (C128)
+/// — the REPL drains these into the live `Editor` before the next prompt
+/// (the editor isn't reachable from builtin dispatch directly, same
+/// pattern as the history mirror). `spec` is a readline key spec; `bind`
+/// carries the resolved action name, `bind -x` a shell command tag,
+/// `unbind` neither.
+#[derive(Clone)]
+pub enum PendingBind {
+    Action(String, String),
+    Host(String, String),
+    Unbind(String),
+}
+
+thread_local! {
+    static PENDING_BINDS: std::cell::RefCell<Vec<PendingBind>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    // `bind -x` command bodies, keyed by the tag the editor calls back with.
+    static HOST_BINDINGS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub fn take_pending_binds() -> Vec<PendingBind> {
+    PENDING_BINDS.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+pub fn host_binding_command(tag: &str) -> Option<String> {
+    HOST_BINDINGS.with(|h| h.borrow().get(tag).cloned())
+}
+
+/// readline function name → the editor action name rush passes to
+/// `Editor::bind`. Names match bash/readline so real inputrc snippets and
+/// `bind` invocations map across.
+fn readline_action(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "beginning-of-line" => "BeginningOfLine",
+        "end-of-line" => "EndOfLine",
+        "forward-char" => "ForwardChar",
+        "backward-char" => "BackwardChar",
+        "forward-word" => "ForwardWord",
+        "backward-word" => "BackwardWord",
+        "kill-line" => "KillLine",
+        "unix-line-discard" => "UnixLineDiscard",
+        "unix-word-rubout" => "UnixWordRubout",
+        "kill-word" => "KillWord",
+        "backward-kill-word" => "BackwardKillWord",
+        "delete-char" => "DeleteChar",
+        "backward-delete-char" => "BackwardDeleteChar",
+        "yank" => "Yank",
+        "yank-pop" => "YankPop",
+        "transpose-chars" => "TransposeChars",
+        "transpose-words" => "TransposeWords",
+        "upcase-word" => "UpcaseWord",
+        "downcase-word" => "DowncaseWord",
+        "capitalize-word" => "CapitalizeWord",
+        "undo" => "Undo",
+        "revert-line" => "RevertLine",
+        "insert-last-argument" | "yank-last-arg" => "InsertLastArgument",
+        "previous-history" => "PreviousHistory",
+        "next-history" => "NextHistory",
+        "beginning-of-history" => "BeginningOfHistory",
+        "end-of-history" => "EndOfHistory",
+        "history-search-backward" => "HistorySearchBackward",
+        "history-search-forward" => "HistorySearchForward",
+        "reverse-search-history" => "ReverseSearchHistory",
+        "forward-search-history" => "ForwardSearchHistory",
+        "clear-screen" => "ClearScreen",
+        "complete" => "Complete",
+        "menu-complete" => "MenuComplete",
+        "quoted-insert" => "QuotedInsert",
+        "edit-and-execute-command" => "EditAndExecuteCommand",
+        "accept-line" => "AcceptLine",
+        _ => return None,
+    })
+}
+
+/// `bind` (C128): `bind '"\C-x": name'` rebinds a key to a readline
+/// function; `bind -x '"\C-t": cmd'` runs a shell command; `bind -r keys`
+/// unbinds; `bind -P`/`-p` list; `set var value` (via `bind`) sets a
+/// readline variable. The rebindings queue for the REPL to apply.
+fn bind_cmd(argv: &[String]) -> i32 {
+    let mut idx = 1;
+    while let Some(arg) = argv.get(idx) {
+        match arg.as_str() {
+            "-P" | "-p" => {
+                for (spec, name) in editor_bindings_snapshot() {
+                    println!("{name} can be found on \"{spec}\".");
+                }
+                return 0;
+            }
+            "-x" => {
+                idx += 1;
+                let Some(spec) = argv.get(idx) else {
+                    eprintln!("bind: -x: option requires an argument");
+                    return 2;
+                };
+                let Some((keys, cmd)) = parse_bind_assignment(spec) else {
+                    eprintln!("bind: {spec}: missing colon separator");
+                    return 1;
+                };
+                HOST_BINDINGS.with(|h| h.borrow_mut().insert(keys.clone(), cmd.clone()));
+                PENDING_BINDS.with(|b| b.borrow_mut().push(PendingBind::Host(keys, cmd)));
+            }
+            "-r" => {
+                idx += 1;
+                let Some(keys) = argv.get(idx) else {
+                    eprintln!("bind: -r: option requires an argument");
+                    return 2;
+                };
+                PENDING_BINDS.with(|b| b.borrow_mut().push(PendingBind::Unbind(keys.clone())));
+            }
+            "-m" | "-f" => {
+                idx += 1; // keymap / inputrc file: accepted, skipped
+            }
+            other if other.starts_with('-') => {
+                eprintln!("bind: {other}: unsupported option");
+                return 2;
+            }
+            spec => {
+                // `keys: action` (rebind) or `set var value` (readline var).
+                if let Some(rest) = spec.strip_prefix("set ") {
+                    let _ = crate::completion::apply_readline_variable(rest.trim());
+                    idx += 1;
+                    continue;
+                }
+                let Some((keys, action)) = parse_bind_assignment(spec) else {
+                    eprintln!("bind: {spec}: missing colon separator");
+                    return 1;
+                };
+                match readline_action(&action) {
+                    Some(mapped) => PENDING_BINDS
+                        .with(|b| b.borrow_mut().push(PendingBind::Action(keys, mapped.to_string()))),
+                    None => {
+                        eprintln!("bind: {action}: unknown function name");
+                        return 1;
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+    0
+}
+
+/// Split a `bind` assignment `"\C-x": target` (quotes optional) into
+/// `(keys, target)`.
+fn parse_bind_assignment(spec: &str) -> Option<(String, String)> {
+    let (keys, target) = spec.split_once(':')?;
+    let keys = keys.trim().trim_matches('"').to_string();
+    Some((keys, target.trim().trim_matches('"').to_string()))
+}
+
+thread_local! {
+    // A snapshot of the editor's current bindings, refreshed by the REPL
+    // each prompt so `bind -P` (which runs in builtin context, without the
+    // editor handle) can print them.
+    static BINDINGS_SNAPSHOT: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub fn set_bindings_snapshot(pairs: Vec<(String, String)>) {
+    BINDINGS_SNAPSHOT.with(|b| *b.borrow_mut() = pairs);
+}
+
+fn editor_bindings_snapshot() -> Vec<(String, String)> {
+    BINDINGS_SNAPSHOT.with(|b| b.borrow().clone())
 }
 
 /// `complete [options] name...` (C93): register (or, with `-r`, remove) a
@@ -2878,6 +3057,7 @@ fn history_cmd(argv: &[String]) -> i32 {
     match argv.get(1).map(String::as_str) {
         Some("-c") => {
             SHELL_HISTORY.with(|h| h.borrow_mut().clear());
+            SHELL_HISTORY_TIMES.with(|t| t.borrow_mut().clear());
             HISTORY_RESET.with(|f| f.set(true));
             0
         }
@@ -2895,6 +3075,12 @@ fn history_cmd(argv: &[String]) -> i32 {
                 eprintln!("history: {n}: history position out of range");
                 return 1;
             }
+            SHELL_HISTORY_TIMES.with(|t| {
+                let mut t = t.borrow_mut();
+                if n <= t.len() {
+                    t.remove(n - 1);
+                }
+            });
             HISTORY_RESET.with(|f| f.set(true));
             0
         }
@@ -2933,8 +3119,19 @@ fn history_cmd(argv: &[String]) -> i32 {
             let Some(path) = histfile() else { return 1 };
             match std::fs::read_to_string(&path) {
                 Ok(body) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
                     SHELL_HISTORY.with(|h| {
-                        h.borrow_mut().extend(body.lines().map(str::to_string));
+                        let mut h = h.borrow_mut();
+                        SHELL_HISTORY_TIMES.with(|t| {
+                            let mut t = t.borrow_mut();
+                            for line in body.lines() {
+                                h.push(line.to_string());
+                                t.push(now);
+                            }
+                        });
                     });
                     HISTORY_RESET.with(|f| f.set(true));
                     0
@@ -2951,13 +3148,19 @@ fn history_cmd(argv: &[String]) -> i32 {
             2
         }
         tail => {
-            // `history [n]` — the whole list, or just the last n.
+            // `history [n]` — the whole list, or just the last n. With
+            // `$HISTTIMEFORMAT` set, each entry is prefixed by its
+            // strftime-rendered timestamp (C122).
             let entries = history_entries();
+            let time_fmt = crate::vars::get("HISTTIMEFORMAT").filter(|f| !f.is_empty());
             let skip = tail
                 .and_then(|n| n.parse::<usize>().ok())
                 .map_or(0, |n| entries.len().saturating_sub(n));
             for (i, e) in entries.iter().enumerate().skip(skip) {
-                println!("{:5}  {e}", i + 1);
+                match &time_fmt {
+                    Some(fmt) => println!("{:5}  {}{e}", i + 1, strftime_utc(fmt, history_time(i))),
+                    None => println!("{:5}  {e}", i + 1),
+                }
             }
             0
         }

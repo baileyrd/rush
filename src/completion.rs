@@ -101,7 +101,13 @@ fn complete_path(line: &str, pos: usize) -> (usize, Vec<Candidate>) {
     if let Ok(entries) = std::fs::read_dir(&scan_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(name_prefix) || (name.starts_with('.') && !name_prefix.starts_with('.')) {
+            // `completion-ignore-case` (C128): fold the prefix compare.
+            let prefix_ok = if readline_flag("completion-ignore-case") {
+                name.to_lowercase().starts_with(&name_prefix.to_lowercase())
+            } else {
+                name.starts_with(name_prefix)
+            };
+            if !prefix_ok || (name.starts_with('.') && !name_prefix.starts_with('.')) {
                 continue;
             }
             let is_dir = entry.path().is_dir();
@@ -657,6 +663,32 @@ mod tests {
         assert!(h.contains("\x1b[32mecho\x1b[0m"), "got: {h:?}");
     }
 
+}
+
+thread_local! {
+    // readline variables set via `bind 'set var value'` (C128) — a small
+    // set rush's completer can act on.
+    static READLINE_VARS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// `bind 'set name value'` (C128): store a readline variable. Returns
+/// whether the name is one rush recognizes (others are accepted silently,
+/// like bash).
+pub fn apply_readline_variable(assignment: &str) -> bool {
+    let (name, value) = match assignment.split_once(char::is_whitespace) {
+        Some((n, v)) => (n.trim(), v.trim()),
+        None => (assignment.trim(), "on"),
+    };
+    READLINE_VARS.with(|v| v.borrow_mut().insert(name.to_string(), value.to_string()));
+    matches!(name, "completion-ignore-case" | "show-all-if-ambiguous" | "menu-complete-display-prefix")
+}
+
+/// Whether a readline boolean variable is on (`on`/`1`/`true`).
+pub fn readline_flag(name: &str) -> bool {
+    READLINE_VARS.with(|v| {
+        v.borrow().get(name).map(|s| matches!(s.as_str(), "on" | "1" | "true")).unwrap_or(false)
+    })
 }
 
 /// Programmable completion (C93): `complete`/`compgen`/`compopt` and the

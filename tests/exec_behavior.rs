@@ -3746,3 +3746,48 @@ fn invocation_flags() {
     assert_eq!(String::from_utf8_lossy(&o.stdout), "");
     assert_eq!(o.status.code(), Some(0));
 }
+
+#[cfg(unix)]
+#[test]
+fn nocaseglob_and_shopt_behaviors() {
+    // C120: case-insensitive filename globbing (distinct from nocasematch).
+    let dir = std::env::temp_dir().join(format!("rush_ncg_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["Foo.TXT", "bar.txt"] {
+        std::fs::write(dir.join(f), "").unwrap();
+    }
+    let (out, _) = rush(&format!("cd {}; shopt -s nocaseglob; echo *.txt", dir.display()));
+    assert_eq!(out, "Foo.TXT bar.txt\n");
+    let (out, _) = rush(&format!("cd {}; echo *.txt", dir.display()));
+    assert_eq!(out, "bar.txt\n");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // C108 remainders: inherit_errexit and lastpipe.
+    let (out, code) = rush("set -e; shopt -s inherit_errexit; x=$(false; echo hi); echo alive");
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+    let (out, _) = rush("shopt -s lastpipe; echo new | read x; echo \"$x\"");
+    assert_eq!(out, "new\n");
+}
+
+#[test]
+fn dev_tcp_pseudo_device() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    // C121: /dev/tcp/host/port backed by std::net.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 5];
+        sock.read_exact(&mut buf).unwrap();
+        sock.write_all(b"pong:").unwrap();
+        sock.write_all(&buf).unwrap();
+    });
+    let (out, code) = rush(&format!(
+        "exec 3<>/dev/tcp/127.0.0.1/{port}; echo ping >&3; head -c 9 <&3; echo"
+    ));
+    assert_eq!(out, "pong:ping\n");
+    assert_eq!(code, 0);
+    handle.join().unwrap();
+}

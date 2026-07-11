@@ -250,6 +250,15 @@ pub fn fire_err(status: i32) {
 /// registered `EXIT` trap reliably fires exactly once.
 pub fn exit_shell(code: i32) -> ! {
     fire("EXIT");
+    // `huponexit` (C108): an exiting interactive login shell HUPs its
+    // jobs, so they don't outlive the session.
+    #[cfg(unix)]
+    if crate::vars::interactive()
+        && crate::vars::shopt("huponexit")
+        && crate::vars::shopt("login_shell")
+    {
+        crate::job::hup_all_jobs();
+    }
     std::process::exit(code);
 }
 

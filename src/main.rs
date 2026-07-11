@@ -414,6 +414,10 @@ fn main() -> std::io::Result<()> {
     // Functions exported by a parent shell (`BASH_FUNC_name%%` entries,
     // C98) become defined functions.
     builtins::import_functions();
+    // `$COLUMNS`/`$LINES` (C129): seed from the terminal via `stty size`
+    // (rush has no termios binding of its own — see the rusty_lines
+    // handoff; `checkwinsize` refresh happens in the REPL loop).
+    update_winsize();
     // `$IFS` is always *set* in bash (space-tab-newline default) — rush's
     // splitter already treated unset-IFS as that default, but `"$IFS"`
     // itself expanded empty, and a prefix-assignment restore (C75) needs a
@@ -555,6 +559,25 @@ fn main() -> std::io::Result<()> {
     }
 }
 
+/// Refresh `$COLUMNS`/`$LINES` from `stty size` (C129) — a portable
+/// stopgap until rusty_lines exposes `TIOCGWINSZ` (see the handoff doc).
+/// No-op when stdin isn't a terminal or `stty` isn't available.
+fn update_winsize() {
+    // `.output()` nulls stdin by default; `stty` reads the winsize from
+    // its controlling terminal on fd 0, so stdin must be inherited.
+    if let Ok(out) = std::process::Command::new("stty")
+        .arg("size")
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        && out.status.success()
+        && let Ok(text) = String::from_utf8(out.stdout)
+        && let Some((rows, cols)) = text.trim().split_once(' ')
+    {
+        vars::set("LINES", rows);
+        vars::set("COLUMNS", cols);
+    }
+}
+
 /// `$BASH_ENV` (C105): a non-interactive shell sources the named file
 /// before running anything — CI/wrapper-injected setup. Errors are
 /// non-fatal, same as bash's own behavior for an unreadable file.
@@ -630,6 +653,9 @@ fn interactive() -> std::io::Result<()> {
         trap::check_pending();
 
         if buffer.is_empty() {
+            if vars::shopt("checkwinsize") {
+                update_winsize(); // C129 — bash 5's default
+            }
             run_prompt_command(); // C126
         }
         let prompt = if buffer.is_empty() { prompt() } else { prompt_ps2() };

@@ -94,7 +94,15 @@ fn walk(dir: &Path, segs: &[&str], i: usize, prefix: &str, out: &mut Vec<String>
         if name.starts_with('.') && !pattern_is_dotted && !dotglob {
             continue;
         }
-        if !match_component(seg, &name) {
+        // `nocaseglob` (C120): fold both pattern and name for filename
+        // matching only (distinct from `nocasematch`, which is `case`/
+        // `[[ == ]]`).
+        let matched = if crate::vars::shopt("nocaseglob") {
+            match_component(&seg.to_lowercase(), &name.to_lowercase())
+        } else {
+            match_component(seg, &name)
+        };
+        if !matched {
             continue;
         }
         let display = format!("{prefix}{name}");

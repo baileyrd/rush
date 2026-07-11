@@ -3311,7 +3311,7 @@ per-char, prompted, and array reads all silently produce empty
 variables. **Effort: L** (flag pass is easy; `-t`/`-n` need
 termios/timeout plumbing)
 
-### C90 — `echo -e` / `-E` / combined flags printed as literal text
+### C90 — `echo -e` / `-E` / combined flags printed as literal text ✅ done
 `echo -e "a\tb"` → rush prints `-e a\tb`; only a lone `-n` is
 recognized. Scripts emit garbage flag text into their output.
 **Effort: S**
@@ -3321,7 +3321,7 @@ recognized. Scripts emit garbage flag text into their output.
 proceed with empty variables. Thin wrapper over the existing `(( ))`
 arithmetic (C28/C29). **Effort: S**
 
-### C92 — `builtin` builtin missing
+### C92 — `builtin` builtin missing ✅ done
 `cd(){ builtin cd "$@" && ls; }` — the standard shadow-a-builtin wrapper
 pattern — recurses or fails (`builtin: command not found`). **Effort: S**
 
@@ -3336,7 +3336,7 @@ Each returns 127 where bash returns a proper result/status — and 127
 breaks feature-detection (`if help foo >/dev/null …`). **Effort: S each
 (help M)**
 
-### C95 — `test`/`[` missing operators: `-v`, `-o`, string `<`/`>`, `-R`
+### C95 — `test`/`[` missing operators: `-v`, `-o`, string `<`/`>`, `-R` ✅ done
 `x=1; test -v x` → rush `too many arguments` rc 2; bash rc 0. Exit code
 2-instead-of-0/1 actively flips conditionals. `test -v` is the standard
 "is variable set" check. **Effort: S–M**
@@ -3348,7 +3348,7 @@ breaks feature-detection (`if help foo >/dev/null …`). **Effort: S each
 results — worse than an error because nothing fails visibly.
 **Effort: M**
 
-### C97 — `unset -f` doesn't remove functions
+### C97 — `unset -f` doesn't remove functions ✅ done
 `f(){ :; }; unset -f f; type f` → still `f is a function`. Functions
 cannot be undefined at all. **Effort: S**
 
@@ -3363,11 +3363,11 @@ Exported functions are load-bearing for xargs/parallel/make recipes.
 unset); `printf "%(%Y)T" 0` → invalid conversion (bash: `1970`);
 `printf "%d" '"A'` → invalid number (bash: `65`). **Effort: M**
 
-### C100 — `type -p`/`-P` and `hash -t`/`-d`/`-p` flags unrecognized
+### C100 — `type -p`/`-P` and `hash -t`/`-d`/`-p` flags unrecognized ✅ done
 `type -p ls` errors + prints the wrong format (breaks `$(type -p x)`
 captures); `hash -p /path name` can't seed the table. **Effort: S**
 
-### C101 — Assorted verified flag gaps (batch)
+### C101 — Assorted verified flag gaps (batch) ✅ done
 Each breaks a real pattern; all reproduced:
 - `kill -s TERM pid` → `invalid signal specification` (signal-by-name).
 - `kill -l 143` → error; bash prints `TERM` (decode `$?` of a

@@ -3205,3 +3205,46 @@ fn assorted_flag_batch() {
     let (out, _) = rush("cd /; pushd /tmp >/dev/null; pushd /usr >/dev/null; dirs -v; popd +1 >/dev/null; dirs");
     assert_eq!(out, " 0  /usr\n 1  /tmp\n 2  /\n/usr /\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn declare_p_and_function_introspection() {
+    // C96: declare -p/-F/-f silently printed nothing with status 0.
+    let (out, _) = rush(r#"x=5; declare -p x; declare -i n=3; export e=v; declare -p n e"#);
+    assert_eq!(out, "declare -- x=\"5\"\ndeclare -i n=\"3\"\ndeclare -x e=\"v\"\n");
+
+    let (out, _) = rush(r#"a=(x "y z"); declare -p a; declare -A m; m[k]=1; declare -p m"#);
+    assert_eq!(out, "declare -a a=([0]=\"x\" [1]=\"y z\")\ndeclare -A m=([k]=\"1\" )\n");
+
+    // The round-trip that motivates the format.
+    let (out, _) = rush(r#"v=abc; eval "$(declare -p v)"; echo $v"#);
+    assert_eq!(out, "abc\n");
+
+    let (out, _) = rush("declare -p nosuch 2>/dev/null; echo st=$?");
+    assert_eq!(out, "st=1\n");
+
+    let (out, _) = rush("f(){ :; }; g(){ :; }; declare -F; declare -F f; echo st=$?; declare -F nosuch; echo st=$?; declare -f f >/dev/null; echo st=$?; declare -f nosuch >/dev/null; echo st=$?");
+    assert_eq!(out, "declare -f f\ndeclare -f g\nf\nst=0\nst=1\nst=0\nst=1\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn export_n_unexports() {
+    // C98: `export -n` left the variable exported.
+    let (out, _) = rush(r#"export FOO=bar; export -n FOO; sh -c 'echo "x${FOO}x"'; echo "still=$FOO""#);
+    assert_eq!(out, "xx\nstill=bar\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn printf_v_time_and_char_codes() {
+    // C99: printf -v treated `-v` as the format; %(fmt)T and '"c errored.
+    let (out, _) = rush(r#"printf -v x "%03d" 7; echo "$x"; printf -v "a[2]" hi; echo "${a[2]}""#);
+    assert_eq!(out, "007\nhi\n");
+
+    let (out, _) = rush(r#"printf "%(%Y)T\n" 0; printf "%(%F %T)T\n" 86399"#);
+    assert_eq!(out, "1970\n1970-01-01 23:59:59\n");
+
+    let (out, _) = rush(r#"printf "%d %d\n" "'A" '"B'"#);
+    assert_eq!(out, "65 66\n");
+}

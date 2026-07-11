@@ -3341,7 +3341,7 @@ breaks feature-detection (`if help foo >/dev/null …`). **Effort: S each
 2-instead-of-0/1 actively flips conditionals. `test -v` is the standard
 "is variable set" check. **Effort: S–M**
 
-### C96 — `declare -p` / `-f` / `-F` silently print nothing (rc 0)
+### C96 — `declare -p` / `-f` / `-F` silently print nothing (rc 0) ✅ done (`-f` source printing pending an AST unparser)
 `declare -p x` → no output, rc 0; bash prints `declare -- x="5"`.
 `declare -F nosuch` returns 0 instead of 1. Round-tripping
 (`eval "$(declare -p a)"`) and function-existence tests give wrong
@@ -3352,13 +3352,13 @@ results — worse than an error because nothing fails visibly.
 `f(){ :; }; unset -f f; type f` → still `f is a function`. Functions
 cannot be undefined at all. **Effort: S**
 
-### C98 — `export -f` (functions) and `export -n` (un-export) unsupported
+### C98 — `export -f` (functions) and `export -n` (un-export) unsupported ✅ `-n` done (`-f` pending function-source serialization; warns loudly)
 `export -f f; bash -c f` → child gets `command not found` (needs the
 `BASH_FUNC_name%%=` env encoding); `export -n FOO` leaves FOO exported.
 Exported functions are load-bearing for xargs/parallel/make recipes.
 **Effort: M (`-n` is S)**
 
-### C99 — `printf` gaps: `-v var`, `%(fmt)T`, leading-quote char codes
+### C99 — `printf` gaps: `-v var`, `%(fmt)T`, leading-quote char codes ✅ done
 `printf -v x "%03d" 7` treats `-v` as the format (pollutes stdout, var
 unset); `printf "%(%Y)T" 0` → invalid conversion (bash: `1970`);
 `printf "%d" '"A'` → invalid number (bash: `65`). **Effort: M**

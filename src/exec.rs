@@ -1270,6 +1270,11 @@ fn dispatch_builtin(cmd: &Command) -> i32 {
         Some("local") => builtins::local_from_decls(&cmd.local_decls, cmd.decl_attrs),
         // `typeset` is ksh/zsh's own spelling of `declare` (C49) — ksh93
         // has *only* typeset; bash and zsh accept both as synonyms.
+        Some("declare") | Some("typeset")
+            if matches!(cmd.argv.get(1).map(String::as_str), Some("-p" | "-f" | "-F")) =>
+        {
+            builtins::declare_print(&cmd.argv)
+        }
         Some("declare") | Some("typeset") => builtins::declare_from_decls(&cmd.local_decls, cmd.decl_attrs),
         Some("readonly") => builtins::readonly_from_decls(&cmd.local_decls, cmd.decl_attrs),
         _ => builtins::try_run(&cmd.argv).unwrap_or(1),

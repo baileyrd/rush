@@ -3732,3 +3732,31 @@ Remaining narrowings (documented, low-value or blocked on a sibling crate):
   detail matches. Cosmetic.
 - `$-`'s exact `h`/`B`/`c`/`T` letters (the load-bearing `i` is already
   reported) remain cosmetic.
+
+---
+
+# 2026-07-11 fifth differential probe — legacy backtick substitution + small builtin gaps
+
+A fresh probe over glob/redirection/arithmetic/quoting/read/builtin corners
+(most already matched bash) surfaced a major omission and a few minor ones:
+
+- **Legacy backtick command substitution (`` `cmd` ``) was entirely
+  unimplemented** — backticks were kept as literal text, so `` echo `date` ``
+  and `` "`echo x`" `` printed the backticks verbatim. Now translated at lex
+  time to the equivalent `$(...)`, so the existing command-substitution path
+  (which re-lexes the interior) handles it — unquoted, inside double quotes,
+  composed with `$(...)`, multi-command bodies, and nested via `` \` ``. The
+  backtick backslash rules (`` \` ``/`\\`/`\$` drop the backslash) are
+  applied. This is the highest-value gap found across all five passes —
+  backticks are ubiquitous in real-world scripts.
+- Fixed earlier in this pass: `declare -x`/`local -x` export (was dropped);
+  `compgen … --` end-of-options.
+
+Minor, still-open (documented, low-value):
+
+- `read -t 0` returns 1 on an at-EOF fd where bash returns 0 (the
+  "input available?" poll semantics differ at EOF).
+- `read -d ''` (NUL delimiter) keeps a trailing newline bash strips.
+- A quoted string inside `$(( ))` (`$(( x ? "a" : "b" ))`) errors instead
+  of treating the quotes as bash does (the quoted token as a bare
+  identifier → 0). Rare.

@@ -829,6 +829,15 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                         }
                         continue;
                     }
+                    // Legacy backtick substitution inside double quotes —
+                    // translated to `$(...)`, which the quoted string is
+                    // later re-scanned for (the opening backtick is already
+                    // consumed as `qc`).
+                    if qc == '`' {
+                        let cmd = read_backtick_body(chars)?;
+                        s.push_str(&format!("$({cmd})"));
+                        continue;
+                    }
                     s.push(qc);
                 }
                 if !closed {
@@ -906,6 +915,13 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                     _ => {}
                 }
                 push_unquoted(&mut parts, &s);
+            }
+            // Legacy backtick command substitution — translated to the
+            // equivalent `$(...)` so the existing machinery handles it.
+            Some(&'`') => {
+                chars.next();
+                let cmd = read_backtick_body(chars)?;
+                push_unquoted(&mut parts, &format!("$({cmd})"));
             }
             Some(&other) => {
                 push_unquoted(&mut parts, &other.to_string());
@@ -1013,6 +1029,31 @@ fn take_double_paren(chars: &mut Peekable<Chars>) -> Result<String, LexError> {
 /// Append a balanced `(...)` region (including the parens) to `out`, starting
 /// at the opening `(` under the cursor. Tracks nesting and skips quoted spans
 /// so that `$(echo ")")` is captured correctly.
+/// Read a legacy backtick command substitution's body, cursor just *past*
+/// the opening backtick, stopping at the next unescaped backtick (which it
+/// consumes). Backtick backslash rules apply: `\``, `\\`, and `\$` drop
+/// their backslash; any other backslash sequence is kept verbatim. The
+/// caller wraps the result as `$(...)` so the normal command-substitution
+/// path (which re-lexes the interior, so nested backticks work too) runs.
+fn read_backtick_body(chars: &mut Peekable<Chars>) -> Result<String, LexError> {
+    let mut cmd = String::new();
+    loop {
+        match chars.next() {
+            None => return Err(LexError::Incomplete),
+            Some('`') => return Ok(cmd),
+            Some('\\') => match chars.next() {
+                None => return Err(LexError::Incomplete),
+                Some(c @ ('`' | '\\' | '$')) => cmd.push(c),
+                Some(c) => {
+                    cmd.push('\\');
+                    cmd.push(c);
+                }
+            },
+            Some(c) => cmd.push(c),
+        }
+    }
+}
+
 fn consume_balanced_paren(chars: &mut Peekable<Chars>, out: &mut String) -> Result<(), LexError> {
     // Cursor is on the opening '('.
     chars.next();

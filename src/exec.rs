@@ -104,7 +104,12 @@ fn exec_list(list: &CommandList) -> Result<i32, String> {
 /// conditions, which bash explicitly exempts (a failing condition is the
 /// normal, expected way to end a loop or skip a branch, not a script error).
 fn exec_cond(list: &CommandList) -> Result<i32, String> {
-    exec_list_impl(list, false)
+    // The suppression must reach *into* whatever the condition calls —
+    // a function body's own exec_list re-checks errexit (C81).
+    crate::vars::enter_errexit_suppress();
+    let result = exec_list_impl(list, false);
+    crate::vars::exit_errexit_suppress();
+    result
 }
 
 /// Matches bash's actual `errexit` rule: a failing pipeline is exempt unless
@@ -129,7 +134,7 @@ fn exec_list_impl(list: &CommandList, check_errexit: bool) -> Result<i32, String
         if crate::vars::flow_pending() {
             break;
         }
-        if check_errexit && status != 0 && last_ran {
+        if check_errexit && status != 0 && last_ran && !crate::vars::errexit_suppressed() {
             // `trap 'cmd' ERR` (C53) fires on exactly the condition
             // errexit checks — a reached, non-negated final command
             // failing outside an `if`/`while` condition — whether or not
@@ -188,7 +193,10 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
     crate::trap::fire_preserving("DEBUG");
     // Update `$?` after every pipeline, so a later one in the same line can read
     // it (e.g. `false || echo $?`).
-    let mut status = run_pipeline_node(&list.first)?;
+    // A non-final `&&`/`||` element and a `!`-negated pipeline run with
+    // errexit suppressed (C81) — reaching into any function bodies they
+    // call, which is exactly the `myfunc || handler` interop pattern.
+    let mut status = run_pipeline_suppressible(&list.first, !list.rest.is_empty() || list.first.negated)?;
     crate::vars::set_last_status(status);
     // If there's no `rest`, `first` *is* the last pipeline, and it just ran.
     // A `!`-negated pipeline reports `last_ran = false` even when it did
@@ -204,7 +212,7 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
         if should_run(*connector, status) {
             crate::vars::set_current_line(raw.line);
             crate::trap::fire_preserving("DEBUG");
-            status = run_pipeline_node(raw)?;
+            status = run_pipeline_suppressible(raw, i != final_idx || raw.negated)?;
             crate::vars::set_last_status(status);
             last_ran = i == final_idx && !raw.negated;
             if crate::vars::flow_pending() {
@@ -217,6 +225,17 @@ fn run_andor(list: &AndOrList) -> Result<(i32, bool), String> {
         }
     }
     Ok((status, last_ran))
+}
+
+/// As [`run_pipeline_node`], optionally under errexit suppression (C81).
+fn run_pipeline_suppressible(raw: &RawPipeline, suppress: bool) -> Result<i32, String> {
+    if !suppress {
+        return run_pipeline_node(raw);
+    }
+    crate::vars::enter_errexit_suppress();
+    let result = run_pipeline_node(raw);
+    crate::vars::exit_errexit_suppress();
+    result
 }
 
 /// A pipeline that is a single compound command (`if`/`while`/`for`) is run
@@ -562,9 +581,10 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
     match unsafe { crate::sys::fork() } {
         -1 => Err(crate::sys::last_os_error().to_string()),
         0 => {
-            // Child: run the body, then exit with its status — firing its own
-            // (forked, independent) copy of any EXIT trap. The `exit`
-            // builtin's `trap::exit_shell` now only ends this child.
+            // Child: traps reset on subshell entry (C80) — an inherited
+            // EXIT trap must not fire again here — then run the body and
+            // exit with its status.
+            crate::trap::enter_subshell();
             let status = exec_list(list).unwrap_or(1);
             crate::trap::exit_shell(status);
         }
@@ -589,6 +609,15 @@ fn run_subshell_forked(list: &CommandList) -> Result<i32, String> {
 /// restoring whatever any `local name` in the body shadowed back to the
 /// caller's own value (or removing it, if it didn't have one).
 fn call_function(argv: &[String]) -> Result<i32, String> {
+    // `FUNCNEST` (C83), plus a hard internal cap well below the native
+    // stack limit (~2700 frames aborts the whole process with SIGABRT) —
+    // a runaway recursion must be a recoverable shell error, not a crash.
+    let depth = crate::vars::function_depth();
+    let funcnest = crate::vars::get("FUNCNEST").and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0);
+    let cap = funcnest.unwrap_or(1000).min(1000);
+    if depth >= cap {
+        return Err(format!("{}: maximum function nesting level exceeded ({cap})", argv[0]));
+    }
     let body = crate::func::get(&argv[0]).expect("function is defined");
 
     let name0 = crate::vars::arg(0).unwrap_or_else(|| "rush".to_string());
@@ -943,6 +972,7 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             drop(from_child_read);
             drop(from_child_write);
             let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false, line: 0 };
+            crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = run_foreground(&pipeline).unwrap_or(1);
             crate::trap::exit_shell(status);
         }
@@ -1593,6 +1623,7 @@ fn capture_compound(rc: &RawCompound) -> Result<(i32, String), String> {
                     crate::trap::exit_shell(1);
                 }
             }
+            crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = run_compound(&rc.compound).unwrap_or(1);
             crate::trap::exit_shell(status);
         }
@@ -1647,6 +1678,7 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
             }
             drop(write);
             drop(read);
+            crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
                 call_function(&cmd.argv).unwrap_or(1)
             } else {
@@ -1724,6 +1756,7 @@ pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, 
             }
             drop(read);
             drop(write);
+            crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = run_list(&list).unwrap_or(1);
             crate::trap::exit_shell(status);
         }

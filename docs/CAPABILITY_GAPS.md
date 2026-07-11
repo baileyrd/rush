@@ -3250,12 +3250,12 @@ common script formatting conventions. **Effort: M**
 inside `"..."` also produces a stray backslash + newline instead of
 joining the line. **Effort: S**
 
-### C80 — EXIT trap not reset in subshells — cleanup runs twice
+### C80 — EXIT trap not reset in subshells — cleanup runs twice ✅ done
 `trap "echo bye" EXIT; (echo sub)` → rush prints `bye` twice, bash once.
 Every `( … )` or `$( … )` under an EXIT trap double-runs tempfile
 deletion / unlock / kill-children cleanup. **Effort: S–M**
 
-### C81 — `set -e` not suppressed inside functions called under `||`/`&&`/`if`
+### C81 — `set -e` not suppressed inside functions called under `||`/`&&`/`if` ✅ done
 `set -e; f(){ false; echo in; }; f || echo caught` → rush exits at the
 inner `false` (no output, rc 1); bash prints `in`, rc 0. The single most
 common errexit interop pattern aborts the whole script. (Plain
@@ -3268,7 +3268,7 @@ each works in rush *without* the pipe. The pipeline stage builder in
 `exec.rs` doesn't route builtins/declaration-words through builtin
 dispatch. **Effort: M**
 
-### C83 — Deep function recursion aborts the whole process; `FUNCNEST` ignored
+### C83 — Deep function recursion aborts the whole process; `FUNCNEST` ignored ✅ done (rush aborts the script on cap-exceeded rather than bash's continue-after-unwind — documented)
 Runaway recursion hits a native Rust stack overflow (`SIGABRT`, rc 134)
 at ~2700 frames; bash honors `FUNCNEST=n` with a recoverable error and
 degrades more gracefully. Needs a call-depth counter in `func.rs`, a

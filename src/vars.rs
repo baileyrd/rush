@@ -1436,6 +1436,27 @@ pub fn sourcing_depth() -> usize {
     SOURCING_DEPTH.with(std::cell::Cell::get)
 }
 
+thread_local! {
+    // Depth of "errexit suppressed" contexts (C81): while any part of an
+    // `if`/`while` condition, a non-final `&&`/`||` element, or a
+    // `!`-negated pipeline runs — function bodies included, which is the
+    // part rush used to get wrong — `set -e` (and the ERR trap) must not
+    // fire, bash's rule.
+    static ERREXIT_SUPPRESS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub fn enter_errexit_suppress() {
+    ERREXIT_SUPPRESS.with(|d| d.set(d.get() + 1));
+}
+
+pub fn exit_errexit_suppress() {
+    ERREXIT_SUPPRESS.with(|d| d.set(d.get().saturating_sub(1)));
+}
+
+pub fn errexit_suppressed() -> bool {
+    ERREXIT_SUPPRESS.with(std::cell::Cell::get) > 0
+}
+
 pub fn push_local_frame() {
     LOCAL_STACK.with(|s| s.borrow_mut().push(Vec::new()));
 }

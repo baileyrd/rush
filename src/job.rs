@@ -259,6 +259,7 @@ fn spawn_compound_stage(
                     crate::trap::exit_shell(1);
                 }
             }
+            crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = crate::exec::run_compound(&stage.compound).unwrap_or(1);
             crate::trap::exit_shell(status);
         }

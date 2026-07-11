@@ -331,12 +331,24 @@ dependency-blocked on rustyline's architecture until rustyline itself
 was replaced with a hand-rolled line editor (`src/editor.rs`) — see
 C71's write-up.
 
-**Update (2026-07-11): a third review pass found 57 new gaps, C74–C130,
-see the "2026-07-11 review pass" section at the end of this
-document. New-pass counts by tier: Tier I (correctness) 15, Tier II
-(builtins) 15, Tier III (options/environment/job control) 8, Tier IV
-(language parity) 10, Tier V (interactive UX) 9. Grand total tracked:
-130 items, 73 done, 57 open.
+**Update (2026-07-11): a third review pass found 57 new gaps, C74–C130**
+— see the "2026-07-11 review pass" section at the end of this document.
+New-pass counts by tier: Tier I (correctness) 15, Tier II (builtins) 15,
+Tier III (options/environment/job control) 8, Tier IV (language parity)
+10, Tier V (interactive UX) 9.
+
+**Update (same day, after twelve implementation batches, PRs #105–#116):
+46 of the 57 are done** — every Tier I correctness item, the trap/errexit
+and IFS/quoting clusters, the history and prompt clusters, `time`, full
+`read` flags, and the builtin/flag batches. Still open (11): C84 (assoc
+keys with spaces), C93 (programmable completion), C94
+(times/help/caller/enable/suspend), C102 (`fc`), C104 (invocation
+flags), C115 (`{fd}` named descriptors), C120 (nocaseglob for filename
+globbing), C121 (/dev/tcp), C128 (`bind`/inputrc), C129
+(COLUMNS/LINES), C130 (IGNOREEOF/TMOUT) — plus documented partials
+(`declare -f` source printing and `export -f` await an AST unparser;
+HISTTIMEFORMAT; GLOBIGNORE; SHELLOPTS reflection). Grand total tracked:
+130 items, 119 done, 11 open.
 
 ---
 

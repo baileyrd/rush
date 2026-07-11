@@ -3706,3 +3706,43 @@ fn fc_builtin() {
     let (out, _) = rush(r#"history -s "echo edited-run"; FCEDIT=true fc"#);
     assert_eq!(out, "echo edited-run\nedited-run\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn invocation_flags() {
+    // C104: every flag used to be treated as a script filename.
+    // -s: stdin with positional args (the `curl | sh -s -- args` shape).
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .args(["-s", "x", "y"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn rush");
+    child.stdin.take().unwrap().write_all(b"echo \"1=$1 2=$2\"\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1=x 2=y\n");
+
+    // -r: restricted shell — cd, PATH, slash commands, output redirects.
+    let run = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_rush")).args(args).output().unwrap();
+        (String::from_utf8_lossy(&o.stderr).into_owned(), o.status.code().unwrap_or(-1))
+    };
+    let (err, code) = run(&["-r", "-c", "cd /tmp"]);
+    assert!(err.contains("cd: restricted"), "got: {err:?}");
+    assert_eq!(code, 1);
+    let (err, _) = run(&["-r", "-c", "/bin/ls"]);
+    assert!(err.contains("restricted: cannot specify"), "got: {err:?}");
+    let (err, _) = run(&["-r", "-c", "echo hi > /tmp/rush_r_test"]);
+    assert!(err.contains("restricted: cannot redirect"), "got: {err:?}");
+
+    // -O shopt-at-startup, and clustered -lc marking login_shell.
+    let o = Command::new(env!("CARGO_BIN_EXE_rush")).args(["-O", "nullglob", "-c", "shopt nullglob"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).contains("on"));
+    let o = Command::new(env!("CARGO_BIN_EXE_rush")).args(["-lc", "shopt login_shell"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).contains("on"));
+
+    // -n lint mode still composes.
+    let o = Command::new(env!("CARGO_BIN_EXE_rush")).args(["-n", "-c", "echo never"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "");
+    assert_eq!(o.status.code(), Some(0));
+}

@@ -1538,6 +1538,10 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
     for r in redirects {
         match r {
             Redirect::File { fd, file, mode } => {
+                // Restricted shell (C104): no output redirections.
+                if crate::vars::restricted() && !matches!(mode, RedirMode::Read) {
+                    return Err(format!("{file}: restricted: cannot redirect output"));
+                }
                 let f = match mode {
                     RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
                     RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
@@ -2212,6 +2216,10 @@ pub(crate) fn build_stage(
         .argv
         .first()
         .ok_or_else(|| "empty command".to_string())?;
+    // Restricted shell (C104): no `/` in command names.
+    if crate::vars::restricted() && program.contains('/') {
+        return Err(format!("{program}: restricted: cannot specify `/' in command names"));
+    }
     let mut command = OsCommand::new(resolve_program(program));
     command.args(&cmd.argv[1..]);
 

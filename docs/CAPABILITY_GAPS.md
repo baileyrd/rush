@@ -3704,6 +3704,12 @@ fixed across four PRs. Highlights:
   - `local NAME` with no initializer re-declaring a name *already local in
     the same frame* now preserves its value (bash), instead of blanking it;
     a first-time `local NAME` from an outer scope still starts empty.
+  - `declare -x`/`local -x` now actually mark a name exported — the `-x`
+    flag was previously dropped entirely (so `declare -x FOO=bar` did not
+    reach a child's environment, and `${FOO@a}` showed no `x`). Works
+    clustered (`declare -rx`, `declare -ix`) too.
+  - `compgen … -- WORD` now treats `--` as end-of-options, so the word
+    being completed can itself look like an option.
 
 The C132–C135 findings were produced by three independent 4th-pass review
 agents (control-flow/arithmetic, builtins, expansion), whose reports were

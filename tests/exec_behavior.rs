@@ -3407,3 +3407,83 @@ fn read_flag_coverage() {
     let (out, _) = rush(r#"printf "a:b:c" | { mapfile -t -d : m; echo "${m[2]}-${#m[@]}"; }"#);
     assert_eq!(out, "c-3\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn standard_variables_seeded() {
+    // C106: UID/EUID/HOSTNAME/OSTYPE/HOSTTYPE/MACHTYPE were all unset,
+    // UID was writable, and SHLVL never incremented.
+    let (out, _) = rush("echo ${UID:+u} ${EUID:+e} ${OSTYPE:+o} ${HOSTTYPE:+t} ${MACHTYPE:+m} ${RUSH_VERSION:+v}");
+    assert_eq!(out, "u e o t m v\n");
+
+    let (out, code) = rush("UID=5; echo unreachable");
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg("echo $SHLVL")
+        .env("SHLVL", "5")
+        .output()
+        .expect("spawn rush");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "6\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_env_startup_file() {
+    // C105: $BASH_ENV was never sourced in non-interactive mode.
+    let dir = std::env::temp_dir().join(format!("rush_bashenv_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("e"), "echo from-env-file\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg("echo main")
+        .env("BASH_ENV", dir.join("e"))
+        .output()
+        .expect("spawn rush");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "from-env-file\nmain\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn set_allexport_noglob_and_accepted_flags() {
+    // C107: set -a and set -f now real; -E/-b/-h/etc accepted.
+    let (out, _) = rush("set -a; foo_ax=1; env | grep -c ^foo_ax=");
+    assert_eq!(out, "1\n");
+    let (out, _) = rush("set -f; echo *.nomatchxyz; set +f");
+    assert_eq!(out, "*.nomatchxyz\n");
+    let (out, code) = rush("set -euEo pipefail; echo ok");
+    assert_eq!(out, "ok\n");
+    assert_eq!(code, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn shopt_xpg_echo_and_nocasematch() {
+    // C108: the shopt table knew only 5 glob options.
+    let (out, _) = rush(r#"shopt -s xpg_echo; echo "a\tb""#);
+    assert_eq!(out, "a\tb\n");
+    let (out, _) = rush("shopt -s nocasematch; [[ ABC == abc ]] && echo yes; case FOO in foo) echo case-yes;; esac");
+    assert_eq!(out, "yes\ncase-yes\n");
+    // Formerly-unknown options are settable without a hard error.
+    let (_, code) = rush("shopt -s inherit_errexit lastpipe histappend checkwinsize");
+    assert_eq!(code, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn ps4_expansion_and_wait_jobs_flags() {
+    // C109: $PS4 wasn't expanded for xtrace.
+    let (err, _) = rush_stderr(r#"PS4="+${LINENO}: "; set -x; echo hi"#);
+    assert!(err.contains(": echo hi"), "got: {err:?}");
+
+    // C110: wait -f / wait -n -p var / jobs -r.
+    let (out, _) = rush("sleep 0.1 & wait -f $!; echo st=$?");
+    assert_eq!(out, "st=0\n");
+    let (out, _) = rush(r#"sleep 0.1 & wait -n -p who; echo "st=$? pid-set=${who:+yes}""#);
+    assert_eq!(out, "st=0 pid-set=yes\n");
+    let (out, _) = rush("sleep 5 & jobs -r | grep -c sleep; kill %1");
+    assert_eq!(out, "1\n");
+}

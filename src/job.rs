@@ -493,25 +493,52 @@ pub fn builtin(argv: &[String]) -> Option<i32> {
 /// the interactive prompt's own background polling — still reports its
 /// remembered status (`REAPED`) rather than erroring.
 fn wait_cmd(argv: &[String]) -> i32 {
-    if argv.len() == 1 {
+    // `-n` (C64) waits for whichever child finishes next; `-f` (C110)
+    // waits for full termination — rush's plain wait already does, so
+    // it's accepted and folded in; `-p var` (C110) stores the pid of
+    // what was waited for.
+    let mut next = false;
+    let mut pid_var: Option<String> = None;
+    let mut targets: Vec<&String> = Vec::new();
+    let mut args = argv[1..].iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-n" => next = true,
+            "-f" => {}
+            "-p" => match args.next() {
+                Some(name) => pid_var = Some(name.clone()),
+                None => {
+                    eprintln!("wait: -p: option requires an argument");
+                    return 2;
+                }
+            },
+            _ => targets.push(arg),
+        }
+    }
+    if let Some(name) = &pid_var {
+        crate::vars::unset(name); // bash: unset until something is reaped
+    }
+    if next {
+        let (pid, status) = wait_next();
+        if let (Some(name), Some(pid)) = (&pid_var, pid) {
+            crate::vars::set(name, &pid.to_string());
+        }
+        return status;
+    }
+    if targets.is_empty() {
         wait_all();
         return 0;
     }
-    // `wait -n` (C64): block until whichever child finishes *next* —
-    // the bounded-parallelism worker-pool idiom — reporting its status.
-    if argv.get(1).map(String::as_str) == Some("-n") {
-        return wait_next();
-    }
     let mut status = 0;
-    for target in &argv[1..] {
+    for target in &targets {
         status = wait_one(target);
     }
     status
 }
 
-/// `wait -n`: block until any child exits, record it, and return its
-/// exit status; 127 when there are no children left to wait for.
-fn wait_next() -> i32 {
+/// `wait -n`: block until any child exits, record it, and return its pid
+/// and exit status; 127 when there are no children left to wait for.
+fn wait_next() -> (Option<pid_t>, i32) {
     loop {
         let mut status: c_int = 0;
         let wpid = unsafe { crate::sys::waitpid(-1, &mut status, 0) };
@@ -519,17 +546,17 @@ fn wait_next() -> i32 {
             if retry_after_interrupt() {
                 continue;
             }
-            return 127; // ECHILD: nothing to wait for
+            return (None, 127); // ECHILD: nothing to wait for
         }
         if wpid == 0 {
-            return 127;
+            return (None, 127);
         }
         if wifstopped(status) || wifcontinued(status) {
             update_by_pid(wpid, status);
             continue;
         }
         update_by_pid(wpid, status);
-        return exit_code(status);
+        return (Some(wpid), exit_code(status));
     }
 }
 
@@ -758,23 +785,44 @@ fn parse_signal(name: &str) -> Option<c_int> {
 /// `-p` prints just the pgids — both pure formatting over data the job
 /// table already tracks.
 fn jobs_cmd(argv: &[String]) -> i32 {
-    let (long, pids_only) = match argv.get(1).map(String::as_str) {
-        Some("-l") => (true, false),
-        Some("-p") => (false, true),
-        Some(other) => {
-            eprintln!("jobs: {other}: invalid option");
-            return 2;
+    // `-r` running only / `-s` stopped only / `-n` changed-since-last-
+    // notification only (C110), alongside the existing `-l`/`-p` forms.
+    let mut long = false;
+    let mut pids_only = false;
+    let mut filter: Option<JobState> = None;
+    let mut changed_only = false;
+    for arg in &argv[1..] {
+        match arg.as_str() {
+            "-l" => long = true,
+            "-p" => pids_only = true,
+            "-r" => filter = Some(JobState::Running),
+            "-s" => filter = Some(JobState::Stopped),
+            "-n" => changed_only = true,
+            other => {
+                eprintln!("jobs: {other}: invalid option");
+                return 2;
+            }
         }
-        None => (false, false),
-    };
+    }
     STATE.with(|s| {
-        for j in &s.borrow().jobs {
+        for j in &mut s.borrow_mut().jobs {
+            if let Some(want) = filter
+                && j.state != want
+            {
+                continue;
+            }
+            if changed_only && j.notified {
+                continue;
+            }
             if pids_only {
                 println!("{}", j.pgid);
             } else if long {
                 println!("[{}]  {} {}\t{}", j.id, j.pgid, state_label(j.state), j.cmd);
             } else {
                 println!("[{}]  {}\t{}", j.id, state_label(j.state), j.cmd);
+            }
+            if changed_only {
+                j.notified = true;
             }
         }
     });

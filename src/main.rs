@@ -208,6 +208,45 @@ fn main() -> std::io::Result<()> {
     #[cfg(unix)]
     vars::set("PPID", &unsafe { crate::sys::getppid() }.to_string());
 
+    // The standard identity/platform variables (C106), seeded like PPID
+    // (after the environment loop, so stale inherited copies can't shadow
+    // the real values). `UID`/`EUID` are readonly, same as bash.
+    #[cfg(unix)]
+    {
+        let uid = unsafe { crate::sys::getuid() }.to_string();
+        vars::set("UID", &uid);
+        vars::set("EUID", &uid); // sys carries no geteuid; same value
+        for name in ["UID", "EUID"] {
+            vars::set_attrs(name, vars::Attrs { readonly: true, ..Default::default() });
+        }
+    }
+    if vars::get("HOSTNAME").is_none()
+        && let Some(host) = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+    {
+        vars::set("HOSTNAME", &host);
+    }
+    vars::set("HOSTTYPE", std::env::consts::ARCH);
+    vars::set(
+        "OSTYPE",
+        if cfg!(target_os = "linux") { "linux-gnu" } else { std::env::consts::OS },
+    );
+    vars::set(
+        "MACHTYPE",
+        &if cfg!(target_os = "linux") {
+            format!("{}-pc-linux-gnu", std::env::consts::ARCH)
+        } else {
+            format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+        },
+    );
+    vars::set("RUSH_VERSION", env!("CARGO_PKG_VERSION"));
+    // `$SHLVL` increments per nested shell (C106) and stays exported.
+    let shlvl = vars::get("SHLVL").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
+    vars::set_exported("SHLVL", &shlvl.to_string());
+
     let args: Vec<String> = std::env::args().collect();
 
     // `rush -n …` (C51): the standard `sh -n script.sh` linting idiom —
@@ -231,11 +270,13 @@ fn main() -> std::io::Result<()> {
             let cmd = args.get(2).cloned().unwrap_or_default();
             let name = args.get(3).cloned().unwrap_or_else(|| "rush".to_string());
             vars::set_args(name, args.get(4..).unwrap_or(&[]).to_vec());
+            source_bash_env();
             trap::exit_shell(run_source(&cmd));
         }
         Some(file) => {
             vars::set_args(file.to_string(), args.get(2..).unwrap_or(&[]).to_vec());
             vars::push_source(file); // `${BASH_SOURCE[0]}` (C67); empty under `-c`, same as bash
+            source_bash_env();
             match std::fs::read_to_string(file) {
                 Ok(src) => trap::exit_shell(run_source(&src)),
                 Err(e) => {
@@ -245,6 +286,15 @@ fn main() -> std::io::Result<()> {
             }
         }
         None => interactive(),
+    }
+}
+
+/// `$BASH_ENV` (C105): a non-interactive shell sources the named file
+/// before running anything — CI/wrapper-injected setup. Errors are
+/// non-fatal, same as bash's own behavior for an unreadable file.
+fn source_bash_env() {
+    if let Some(file) = vars::get("BASH_ENV").filter(|f| !f.is_empty()) {
+        let _ = exec::source_file(&file, &[]);
     }
 }
 

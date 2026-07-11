@@ -244,6 +244,17 @@ fn run_pipeline_suppressible(raw: &RawPipeline, suppress: bool) -> Result<i32, S
 
 /// A pipeline that is a single compound command (`if`/`while`/`for`) is run
 /// directly; everything else goes through the simple-command path.
+/// Pattern matching for `case` and `[[ == ]]`, honoring `nocasematch`
+/// (C108): both sides case-fold when the option is on. (Filename
+/// globbing has its own separate `nocaseglob` — deliberately not this.)
+fn match_nocase_aware(pattern: &str, subject: &str) -> bool {
+    if crate::vars::shopt("nocasematch") {
+        crate::glob::match_component(&pattern.to_lowercase(), &subject.to_lowercase())
+    } else {
+        crate::glob::match_component(pattern, subject)
+    }
+}
+
 fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
     if raw.timed {
         return time_pipeline(raw);
@@ -668,7 +679,7 @@ fn print_select_menu(values: &[String]) {
 /// through `items`.
 fn case_patterns_match(patterns: &[crate::lexer::Word], subject: &str) -> Result<bool, String> {
     for pat in patterns {
-        if crate::glob::match_component(&crate::expand::expand_pattern(pat)?, subject) {
+        if match_nocase_aware(&crate::expand::expand_pattern(pat)?, subject) {
             return Ok(true);
         }
     }
@@ -979,8 +990,11 @@ fn trace_pipeline(pipeline: &Pipeline) {
 /// of `$(...)` command substitution currently being expanded — matching
 /// real bash's own nesting-depth indicator, verified directly.
 fn trace_prefix() -> String {
-    // `vars::get` alone — no `std::env` fallback (C36/C40).
+    // `vars::get` alone — no `std::env` fallback (C36/C40). `$PS4` gets
+    // ordinary `$`-expansion (C109) — `PS4='+${LINENO}: '` is the
+    // standard debugging idiom — after the first-char repetition below.
     let ps4 = crate::vars::get("PS4").unwrap_or_else(|| "+ ".to_string());
+    let ps4 = crate::expand::expand_dollars(&ps4).unwrap_or(ps4);
     let mut chars = ps4.chars();
     match chars.next() {
         Some(c) => {
@@ -1126,8 +1140,8 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                 // where) it's unquoted — `[[ $x = "a"* ]]` matches anything
                 // starting with a literal `a` (verified against bash);
                 // `expand_cond_pattern` backslash-escapes the quoted parts.
-                "=" | "==" => Ok(crate::glob::match_component(&crate::expand::expand_cond_pattern(rhs)?, &l)),
-                "!=" => Ok(!crate::glob::match_component(&crate::expand::expand_cond_pattern(rhs)?, &l)),
+                "=" | "==" => Ok(match_nocase_aware(&crate::expand::expand_cond_pattern(rhs)?, &l)),
+                "!=" => Ok(!match_nocase_aware(&crate::expand::expand_cond_pattern(rhs)?, &l)),
                 // Lexicographic string comparison — `<`/`>` never
                 // redirect inside `[[` (that misparse was C55's own
                 // headline repro).
@@ -1350,6 +1364,21 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
         }
         if cmd.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
             return run_builtin_foreground(cmd);
+        }
+        // `autocd` (C108): a lone directory name that isn't a command
+        // becomes `cd` to it, echoed like bash does — interactive shells
+        // only, bash's own rule.
+        if cmd.argv.len() == 1
+            && crate::vars::interactive()
+            && crate::vars::shopt("autocd")
+            && std::path::Path::new(&cmd.argv[0]).is_dir()
+            && (cmd.argv[0].contains('/')
+                || crate::builtins::resolve_in_path(&cmd.argv[0]).is_none())
+        {
+            println!("cd -- {}", cmd.argv[0]);
+            let mut cd = cmd.clone();
+            cd.argv = vec!["cd".to_string(), cmd.argv[0].clone()];
+            return run_builtin_foreground(&cd);
         }
     }
 

@@ -245,6 +245,105 @@ fn run_pipeline_suppressible(raw: &RawPipeline, suppress: bool) -> Result<i32, S
 /// A pipeline that is a single compound command (`if`/`while`/`for`) is run
 /// directly; everything else goes through the simple-command path.
 fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
+    if raw.timed {
+        return time_pipeline(raw);
+    }
+    run_pipeline_node_untimed(raw)
+}
+
+/// `time pipeline` (C112): wall time from a monotonic clock; user/sys
+/// from the kernel's children CPU accounting (`/proc/self/stat`'s
+/// cutime/cstime delta — Linux, where the default backend lives; zeros
+/// elsewhere). Output goes to stderr like bash: `TIMEFORMAT` when set
+/// (`%R`/`%U`/`%S` with optional precision, `%%`), otherwise bash's
+/// default `real/user/sys` block; `-p` forces the POSIX format.
+fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
+    fn child_cpu_seconds() -> (f64, f64) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(stat) = std::fs::read_to_string("/proc/self/stat")
+                && let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r)
+            {
+                let fields: Vec<&str> = rest.split_whitespace().collect();
+                // After the comm field: state=0 …, cutime=13, cstime=14.
+                let ticks = 100.0; // Linux USER_HZ
+                let cu = fields.get(13).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                let cs = fields.get(14).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                return (cu / ticks, cs / ticks);
+            }
+        }
+        (0.0, 0.0)
+    }
+    fn minutes(seconds: f64, precision: usize) -> String {
+        format!("{}m{:.*}s", (seconds / 60.0) as u64, precision, seconds % 60.0)
+    }
+
+    let (cu0, cs0) = child_cpu_seconds();
+    let start = std::time::Instant::now();
+    let status = run_pipeline_node_untimed(raw);
+    let real = start.elapsed().as_secs_f64();
+    let (cu1, cs1) = child_cpu_seconds();
+    let (user, sys) = (cu1 - cu0, cs1 - cs0);
+
+    if raw.time_posix {
+        eprintln!("real {real:.2}
+user {user:.2}
+sys {sys:.2}");
+        return status;
+    }
+    match crate::vars::get("TIMEFORMAT") {
+        None => eprintln!(
+            "
+real	{}
+user	{}
+sys	{}",
+            minutes(real, 3),
+            minutes(user, 3),
+            minutes(sys, 3)
+        ),
+        Some(fmt) => {
+            let mut out = String::new();
+            let mut chars = fmt.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c != '%' {
+                    out.push(c);
+                    continue;
+                }
+                let mut precision = 3usize;
+                if let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+                    precision = d.min(3) as usize;
+                    chars.next();
+                }
+                let long = chars.peek() == Some(&'l');
+                if long {
+                    chars.next();
+                }
+                let value = |v: f64| {
+                    if long { minutes(v, precision) } else { format!("{v:.precision$}") }
+                };
+                match chars.next() {
+                    Some('R') => out.push_str(&value(real)),
+                    Some('U') => out.push_str(&value(user)),
+                    Some('S') => out.push_str(&value(sys)),
+                    Some('P') => out.push_str(&format!(
+                        "{:.2}",
+                        if real > 0.0 { (user + sys) / real * 100.0 } else { 0.0 }
+                    )),
+                    Some('%') => out.push('%'),
+                    Some(other) => {
+                        out.push('%');
+                        out.push(other);
+                    }
+                    None => out.push('%'),
+                }
+            }
+            eprintln!("{out}");
+        }
+    }
+    status
+}
+
+fn run_pipeline_node_untimed(raw: &RawPipeline) -> Result<i32, String> {
     let status = if let [RawCommand::Compound(rc)] = raw.commands.as_slice() {
         run_compound_with_redirects(rc)?
     } else {
@@ -975,7 +1074,7 @@ fn run_coproc(name: &str, cmd: &crate::parser::RawCommand) -> Result<i32, String
             drop(to_child_write);
             drop(from_child_read);
             drop(from_child_write);
-            let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false, line: 0 };
+            let pipeline = crate::parser::RawPipeline { commands: vec![cmd.clone()], negated: false, line: 0, timed: false, time_posix: false };
             crate::trap::enter_subshell(); // C80: traps reset in the child
             let status = run_foreground(&pipeline).unwrap_or(1);
             crate::trap::exit_shell(status);

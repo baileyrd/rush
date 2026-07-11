@@ -3353,3 +3353,57 @@ fn exec_persistent_fd_redirections() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn time_reserved_word() {
+    // C112: `time` was command-not-found. Timing goes to stderr; the
+    // pipeline's own status is preserved.
+    let (err, code) = rush_stderr("time true");
+    assert!(err.contains("real\t0m") && err.contains("user\t0m") && err.contains("sys\t0m"), "got: {err:?}");
+    assert_eq!(code, 0);
+
+    let (err, code) = rush_stderr("time false");
+    assert!(err.contains("real\t0m"), "got: {err:?}");
+    assert_eq!(code, 1);
+
+    // POSIX -p format and TIMEFORMAT.
+    let (err, _) = rush_stderr("time -p true");
+    assert!(err.starts_with("real 0.0"), "got: {err:?}");
+    let (err, _) = rush_stderr(r#"TIMEFORMAT="X%R"; time true"#);
+    assert!(err.starts_with("X0.0"), "got: {err:?}");
+
+    // Not a reserved word outside command position.
+    let (out, _) = rush("echo time");
+    assert_eq!(out, "time\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn read_flag_coverage() {
+    // C89: every read option flag printed "invalid option" and left the
+    // variable empty.
+    let (out, _) = rush(r#"echo abcdef | { read -n 3 x; echo "[$x]"; }"#);
+    assert_eq!(out, "[abc]\n");
+
+    let (out, _) = rush(r#"printf "xy" | { read -N 2 v; echo "[$v]"; }"#);
+    assert_eq!(out, "[xy]\n");
+
+    let (out, _) = rush(r#"printf "1:2:3" | { IFS=: read -d : x; echo "[$x]"; }"#);
+    assert_eq!(out, "[1]\n");
+
+    let (out, _) = rush(r#"echo "a b c" | { read -a arr; echo "${arr[1]}-${#arr[@]}"; }"#);
+    assert_eq!(out, "b-3\n");
+
+    let (out, _) = rush(r#"echo viafd3 | { read -u 0 v; echo "$v"; }"#);
+    assert_eq!(out, "viafd3\n");
+
+    // -t on an fd that never produces input: status 142 (128+ALRM),
+    // same as bash.
+    let (out, _) = rush("read -t 0.2 x < /dev/ptmx 2>/dev/null; echo st=$?");
+    assert_eq!(out, "st=142\n");
+
+    // mapfile -d.
+    let (out, _) = rush(r#"printf "a:b:c" | { mapfile -t -d : m; echo "${m[2]}-${#m[@]}"; }"#);
+    assert_eq!(out, "c-3\n");
+}

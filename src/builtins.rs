@@ -51,6 +51,7 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "dirs" => Some(dirs_cmd(argv)),
         "unabbr" => Some(unabbr_cmd(argv)),
         "let" => Some(let_cmd(argv)),
+        "history" => Some(history_cmd(argv)),
         // `builtin name [args...]` (C92): run the builtin directly, so a
         // wrapper function can call the thing it shadows without recursing.
         "builtin" => Some(match argv.get(1) {
@@ -72,7 +73,7 @@ pub const NAMES: &[&str] = &[
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
-    "readonly", "let", "builtin",
+    "readonly", "let", "builtin", "history",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -2375,6 +2376,128 @@ fn type_cmd(argv: &[String]) -> i32 {
         }
     }
     status
+}
+
+thread_local! {
+    // The shell history's authoritative mirror (C103/C122–C124): the
+    // interactive loop records accepted commands here (alongside the line
+    // editor's own list) so the `history` builtin can list and mutate it;
+    // `HISTORY_RESET` tells the loop to rebuild the editor from this
+    // mirror after `history -c`/`-d`/`-r`.
+    static SHELL_HISTORY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static HISTORY_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn history_record(line: &str) {
+    SHELL_HISTORY.with(|h| h.borrow_mut().push(line.to_string()));
+}
+
+pub fn history_entries() -> Vec<String> {
+    SHELL_HISTORY.with(|h| h.borrow().clone())
+}
+
+/// Take (and clear) the "editor must rebuild its history" flag.
+pub fn history_reset_pending() -> bool {
+    HISTORY_RESET.with(|f| f.replace(false))
+}
+
+/// `history` (C103): list numbered entries; `-c` clear, `-d N` delete,
+/// `-s line` record without executing, `-p args...` expand-and-print,
+/// `-w`/`-r` write/read `$HISTFILE`, `-a`/`-n` accepted (the interactive
+/// loop already appends incrementally — C123).
+fn history_cmd(argv: &[String]) -> i32 {
+    let histfile = || {
+        crate::vars::get("HISTFILE").filter(|f| !f.is_empty()).or_else(|| {
+            crate::vars::get("HOME").map(|h| format!("{h}/.rush_history"))
+        })
+    };
+    match argv.get(1).map(String::as_str) {
+        Some("-c") => {
+            SHELL_HISTORY.with(|h| h.borrow_mut().clear());
+            HISTORY_RESET.with(|f| f.set(true));
+            0
+        }
+        Some("-d") => {
+            let Some(n) = argv.get(2).and_then(|v| v.parse::<usize>().ok()).filter(|&n| n >= 1)
+            else {
+                eprintln!("history: -d: history position required");
+                return 2;
+            };
+            let ok = SHELL_HISTORY.with(|h| {
+                let mut h = h.borrow_mut();
+                (n <= h.len()).then(|| h.remove(n - 1)).is_some()
+            });
+            if !ok {
+                eprintln!("history: {n}: history position out of range");
+                return 1;
+            }
+            HISTORY_RESET.with(|f| f.set(true));
+            0
+        }
+        Some("-s") => {
+            history_record(&argv[2..].join(" "));
+            HISTORY_RESET.with(|f| f.set(true));
+            0
+        }
+        Some("-p") => {
+            let entries = history_entries();
+            let mut status = 0;
+            for arg in &argv[2..] {
+                match crate::history_expand::expand(arg, &entries) {
+                    Ok(Some(e)) => println!("{e}"),
+                    Ok(None) => println!("{arg}"),
+                    Err(e) => {
+                        eprintln!("history: {e}");
+                        status = 1;
+                    }
+                }
+            }
+            status
+        }
+        Some("-w") => {
+            let Some(path) = histfile() else { return 1 };
+            let body = history_entries().join("\n");
+            match std::fs::write(&path, body + "\n") {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("history: {path}: {e}");
+                    1
+                }
+            }
+        }
+        Some("-r") => {
+            let Some(path) = histfile() else { return 1 };
+            match std::fs::read_to_string(&path) {
+                Ok(body) => {
+                    SHELL_HISTORY.with(|h| {
+                        h.borrow_mut().extend(body.lines().map(str::to_string));
+                    });
+                    HISTORY_RESET.with(|f| f.set(true));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("history: {path}: {e}");
+                    1
+                }
+            }
+        }
+        Some("-a") | Some("-n") => 0, // the loop appends incrementally (C123)
+        Some(other) if other.starts_with('-') && other.parse::<i32>().is_err() => {
+            eprintln!("history: {other}: invalid option");
+            2
+        }
+        tail => {
+            // `history [n]` — the whole list, or just the last n.
+            let entries = history_entries();
+            let skip = tail
+                .and_then(|n| n.parse::<usize>().ok())
+                .map_or(0, |n| entries.len().saturating_sub(n));
+            for (i, e) in entries.iter().enumerate().skip(skip) {
+                println!("{:5}  {e}", i + 1);
+            }
+            0
+        }
+    }
 }
 
 thread_local! {

@@ -3536,3 +3536,51 @@ fn quoted_array_expansion_with_adjacent_text() {
     let (out, _) = rush(r#"a=(only); printf "[%s]" "x${a[@]}y"; echo; a=(1 2); printf "[%s]" "L${!a[@]}R"; echo"#);
     assert_eq!(out, "[xonlyy]\n[L0][1R]\n");
 }
+
+/// Run a whole interactive-style session (stdin piped, no -c) with HOME
+/// pointed at a scratch dir so history I/O is isolated.
+#[cfg(unix)]
+fn rush_session(home: &std::path::Path, script: &str) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .env("HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rush");
+    child.stdin.take().unwrap().write_all(script.as_bytes()).expect("write stdin");
+    let output = child.wait_with_output().expect("wait rush");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn history_builtin_and_hist_variables() {
+    // C103/C122/C123/C124.
+    let home = std::env::temp_dir().join(format!("rush_hist_{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+
+    // Numbered listing; incremental append persists without a clean-exit
+    // save (and without duplicating entries).
+    let out = rush_session(&home, "echo one\nhistory\n");
+    assert!(out.contains("    1  echo one\n"), "got: {out:?}");
+    let file = std::fs::read_to_string(home.join(".rush_history")).unwrap();
+    assert_eq!(file, "echo one\nhistory\n");
+
+    // cmdhist (C124): a multi-line compound recalls as one entry.
+    std::fs::remove_file(home.join(".rush_history")).unwrap();
+    let out = rush_session(&home, "for i in 1 2; do\necho $i\ndone\nhistory\n");
+    assert!(out.contains("1  for i in 1 2; do; echo $i; done\n"), "got: {out:?}");
+
+    // HISTCONTROL=ignorespace (C122): the leading-space privacy idiom.
+    std::fs::remove_file(home.join(".rush_history")).unwrap();
+    let out = rush_session(&home, "HISTCONTROL=ignorespace\n secret-cmd 2>/dev/null\nhistory\n");
+    assert!(!out.contains("secret-cmd"), "got: {out:?}");
+
+    // history -d renumbers; -c empties.
+    std::fs::remove_file(home.join(".rush_history")).unwrap();
+    let out = rush_session(&home, "echo a\necho b\nhistory -d 1\nhistory\n");
+    assert!(out.contains("    1  echo b\n") && !out.contains("echo a\n    "), "got: {out:?}");
+
+    let _ = std::fs::remove_dir_all(&home);
+}

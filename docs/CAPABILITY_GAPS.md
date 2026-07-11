@@ -3337,7 +3337,7 @@ arithmetic (C28/C29). **Effort: S**
 `cd(){ builtin cd "$@" && ls; }` — the standard shadow-a-builtin wrapper
 pattern — recurses or fails (`builtin: command not found`). **Effort: S**
 
-### C93 — Programmable completion builtins: `complete` / `compgen` / `compopt`
+### C93 — Programmable completion builtins: `complete` / `compgen` / `compopt` ✅ done (complete/compgen/compopt + COMPREPLY/COMP_WORDS/COMP_CWORD; the action set rush can answer locally — user/group actions are the documented narrowing)
 All three are `command not found`, so every bash-completion script fails
 to load. rush has a real completion engine (`completion.rs`, C34) but no
 programmable interface (`COMP_WORDS`/`COMP_CWORD`/`COMPREPLY` protocol).

@@ -639,7 +639,9 @@ pub fn source_file(name: &str, args: &[String]) -> Result<i32, String> {
     }
 
     crate::vars::push_source(&path.to_string_lossy()); // `${BASH_SOURCE[@]}` (C67)
+    crate::vars::enter_sourcing(); // `return` is legal while this runs (C88)
     let result = exec_list(&list);
+    crate::vars::exit_sourcing();
     crate::vars::pop_source();
 
     let returned = crate::vars::returning();
@@ -1127,6 +1129,21 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
     crate::vars::reset_last_subst_status();
     let pipeline = crate::expand::expand(raw)?;
     trace_pipeline(&pipeline);
+
+    // A redirection with no command words (`> file`, `< file`) performs
+    // its redirections — opening/creating/truncating the targets — and
+    // succeeds (C87). The canonical `> logfile` truncate idiom.
+    if let [Stage::Simple(cmd)] = pipeline.commands.as_slice()
+        && cmd.argv.is_empty()
+        && !cmd.redirects.is_empty()
+    {
+        apply_assignments(&pipeline)?; // `x=1 > f` applies both effects
+        #[cfg(unix)]
+        {
+            let _guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
+        }
+        return Ok(0);
+    }
 
     if assignment_only(&pipeline) {
         apply_assignments(&pipeline)?;

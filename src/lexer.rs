@@ -157,6 +157,13 @@ pub fn lex(input: &str) -> Result<Vec<Token>, LexError> {
                 if chars.peek() == Some(&'|') {
                     chars.next();
                     tokens.push(Token::Or);
+                } else if chars.peek() == Some(&'&') {
+                    // `|&` (C114) — bash's stdout+stderr pipe shorthand;
+                    // desugared right here to exactly `2>&1 |`, its
+                    // documented meaning.
+                    chars.next();
+                    tokens.push(Token::Redirect(Redir { fd: 2, op: RedirOp::Dup(1) }));
+                    tokens.push(Token::Pipe);
                 } else {
                     tokens.push(Token::Pipe);
                 }
@@ -742,8 +749,15 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
                                 push_literal(&mut parts, "$");
                                 continue;
                             }
-                            if matches!(next, '"' | '\\') {
+                            if matches!(next, '"' | '\\' | '`') {
                                 s.push(chars.next().unwrap());
+                                continue;
+                            }
+                            // Backslash-newline is a line continuation even
+                            // inside double quotes (POSIX; C79): both
+                            // characters vanish.
+                            if next == '\n' {
+                                chars.next();
                                 continue;
                             }
                         }
@@ -774,8 +788,16 @@ fn lex_word(chars: &mut Peekable<Chars>, seed: Option<String>) -> Result<Word, L
             }
             Some(&'\\') => {
                 chars.next();
-                if let Some(esc) = chars.next() {
-                    push_literal(&mut parts, &esc.to_string());
+                match chars.next() {
+                    // Backslash-newline: line continuation — both
+                    // characters are deleted outright (C78).
+                    Some('\n') => {}
+                    Some(esc) => push_literal(&mut parts, &esc.to_string()),
+                    // A backslash at the very end of the input is an
+                    // unfinished continuation: ask the reader for the next
+                    // line, same as an open quote (C78 — the REPL/stdin
+                    // path used to silently drop it and run the fragment).
+                    None => return Err(LexError::Incomplete),
                 }
             }
             Some(&'$') => {

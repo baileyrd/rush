@@ -484,6 +484,10 @@ impl Parser {
         // `name ( )` in command position is a function definition.
         let compound = if self.is_funcdef_ahead() {
             self.parse_funcdef()?
+        // `function name { …; }` / `function name() { …; }` — the ksh/bash
+        // keyword spelling of a function definition (C113).
+        } else if self.is_function_keyword_ahead() {
+            self.parse_function_keyword()?
         // `((expr))` — an arithmetic command, always (see `Token::DblParen`'s
         // own doc comment on why this never falls back to nested subshells).
         } else if let Some(Token::DblParen(_)) = self.peek() {
@@ -590,6 +594,33 @@ impl Parser {
     fn parse_funcdef(&mut self) -> Result<Compound, ParseError> {
         let name = self.expect_name()?;
         self.pos += 2; // `(` `)` — guaranteed by is_funcdef_ahead
+        self.skip_newlines();
+        let body = self.parse_brace_body()?;
+        Ok(Compound::FuncDef { name, body })
+    }
+
+    /// True if the cursor is at the word `function` followed by a valid
+    /// name — the ksh/bash keyword form of a definition (C113). Requiring
+    /// the name keeps a plain `function` argv word (`echo function` never
+    /// gets here — that's argument position) from misparsing.
+    fn is_function_keyword_ahead(&self) -> bool {
+        let is_kw = matches!(self.toks.get(self.pos),
+            Some(Token::Word(parts)) if matches!(parts.as_slice(), [WordPart::Unquoted(s)] if s == "function"));
+        is_kw
+            && matches!(self.toks.get(self.pos + 1),
+                Some(Token::Word(parts)) if matches!(parts.as_slice(), [WordPart::Unquoted(s)] if is_name(s)))
+    }
+
+    /// Parse `function name { …; }`, with bash's optional `()` after the
+    /// name also accepted (`function name() { …; }`).
+    fn parse_function_keyword(&mut self) -> Result<Compound, ParseError> {
+        self.pos += 1; // `function`
+        let name = self.expect_name()?;
+        if matches!(self.toks.get(self.pos), Some(Token::LParen))
+            && matches!(self.toks.get(self.pos + 1), Some(Token::RParen))
+        {
+            self.pos += 2;
+        }
         self.skip_newlines();
         let body = self.parse_brace_body()?;
         Ok(Compound::FuncDef { name, body })

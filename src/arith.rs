@@ -28,7 +28,7 @@ pub fn eval(src: &str) -> Result<i64, String> {
     }
     let tokens = tokenize(src)?;
     let mut parser = Parser { tokens, pos: 0 };
-    let expr = parser.parse_assign()?;
+    let expr = parser.parse_comma()?;
     if parser.pos != parser.tokens.len() {
         return Err("syntax error in arithmetic expression".into());
     }
@@ -201,6 +201,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 '~' => "~",
                 '?' => "?",
                 ':' => ":",
+                ',' => ",",
                 _ => return Err(format!("unexpected character `{c}` in arithmetic")),
             };
             toks.push(Tok::Op(op1));
@@ -244,6 +245,8 @@ enum Expr {
     /// `name OP= expr` — `OP` is the bare underlying operator (`"+"` for
     /// `+=`, etc.), not the compound token itself.
     CompoundAssign(&'static str, String, Box<Expr>),
+    /// `a, b` — the comma operator (C132): evaluate both, yield the right.
+    Comma(Box<Expr>, Box<Expr>),
 }
 
 struct Parser {
@@ -277,6 +280,19 @@ impl Parser {
     /// expression (falls through to [`Self::parse_ternary`]) — so `a + 1`
     /// or a bare `a == b` (not an assignment operator) never takes this
     /// branch.
+    /// The comma operator (C132): `a, b, c` evaluates each left-to-right
+    /// (side effects and all) and yields the last — the lowest-precedence
+    /// arithmetic operator, so `$((a,b))`, `$((x=5, x+=3))`, and
+    /// `for ((i=0,j=10; …))` all work.
+    fn parse_comma(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_assign()?;
+        while self.eat(&[","]).is_some() {
+            let rhs = self.parse_assign()?;
+            expr = Expr::Comma(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
     fn parse_assign(&mut self) -> Result<Expr, String> {
         if let Some(Tok::Ident(name)) = self.tokens.get(self.pos).cloned() {
             let assign_op = match self.tokens.get(self.pos + 1) {
@@ -469,9 +485,9 @@ impl Parser {
             }
             Some(Tok::Op("(")) => {
                 self.pos += 1;
-                // A full expression, including assignment — `(i = 5) + 1`
-                // is a real, if unusual, thing to write.
-                let v = self.parse_assign()?;
+                // A full expression, including assignment and comma —
+                // `(i = 5) + 1` and `(a, b)` are both real.
+                let v = self.parse_comma()?;
                 if self.eat(&[")"]).is_none() {
                     return Err("missing `)` in arithmetic".into());
                 }
@@ -500,7 +516,7 @@ fn eval_expr(e: &Expr) -> Result<i64, String> {
         Expr::Unary(op, v) => {
             let val = eval_expr(v)?;
             Ok(match *op {
-                "-" => -val,
+                "-" => val.wrapping_neg(),
                 "+" => val,
                 "!" => bool_int(val == 0),
                 "~" => !val,
@@ -554,6 +570,11 @@ fn eval_expr(e: &Expr) -> Result<i64, String> {
             crate::vars::set(name, &new.to_string());
             Ok(new)
         }
+        // The comma operator (C132): both sides run; the right is the value.
+        Expr::Comma(l, r) => {
+            eval_expr(l)?;
+            eval_expr(r)
+        }
     }
 }
 
@@ -562,29 +583,35 @@ fn eval_expr(e: &Expr) -> Result<i64, String> {
 /// the old value it already captured instead.
 fn apply_delta(name: &str, op: &str) -> Result<i64, String> {
     let cur = var_value(name)?;
-    let new = if op == "++" { cur + 1 } else { cur - 1 };
+    let new = if op == "++" { cur.wrapping_add(1) } else { cur.wrapping_sub(1) };
     crate::vars::set(name, &new.to_string());
     Ok(new)
 }
 
 fn binary_op(op: &str, l: i64, r: i64) -> Result<i64, String> {
     Ok(match op {
-        "+" => l + r,
-        "-" => l - r,
-        "*" => l * r,
-        "/" if r == 0 => return Err("division by zero".into()),
-        "/" => l / r,
-        "%" if r == 0 => return Err("division by zero".into()),
-        "%" => l % r,
+        // 2's-complement wrapping on overflow, matching bash/C (C132) —
+        // an unchecked `l + r` etc. would panic and crash the shell.
+        "+" => l.wrapping_add(r),
+        "-" => l.wrapping_sub(r),
+        "*" => l.wrapping_mul(r),
+        // bash's message wording for division/modulo by zero (C132).
+        "/" if r == 0 => return Err(format!("{l}/{r}: division by 0 (error token is \"{r}\")")),
+        "/" => l.wrapping_div(r),
+        "%" if r == 0 => return Err(format!("{l}%{r}: division by 0 (error token is \"{r}\")")),
+        "%" => l.wrapping_rem(r),
         "**" => {
             if r < 0 {
                 return Err("exponent less than 0".into());
             }
             let exp = u32::try_from(r).map_err(|_| "exponent too large".to_string())?;
-            l.checked_pow(exp).ok_or("arithmetic overflow")?
+            // bash wraps on `**` overflow too (verified).
+            l.wrapping_pow(exp)
         }
-        "<<" => l << r,
-        ">>" => l >> r,
+        // Shift counts are masked to 0..=63, C's rule (C132) — `1 << 64`
+        // is 1 in bash, not a panic.
+        "<<" => l.wrapping_shl(r as u32),
+        ">>" => l.wrapping_shr(r as u32),
         "&" => l & r,
         "^" => l ^ r,
         "|" => l | r,

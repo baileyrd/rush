@@ -249,11 +249,16 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
                 Some((_, RawAssign::Index(..))) | None => {
                     for name in expand_argv_word(word)? {
                         // A bare `local -A arr`/`declare -A arr` (no
-                        // initializer) still needs to become an *empty*
-                        // associative/indexed array right away — that's
-                        // what lets a later `arr[k]=v` see it as one at
-                        // all (see `vars::is_assoc`).
-                        let init = if assoc {
+                        // initializer) makes an *empty* array right away —
+                        // but only when the name doesn't already hold one
+                        // (C132): re-declaring an existing array without a
+                        // value must NOT wipe it, matching bash.
+                        let already = crate::vars::is_assoc(&name)
+                            || crate::vars::is_indexed_array(&name)
+                            || crate::vars::get(&name).is_some();
+                        let init = if already {
+                            None
+                        } else if assoc {
                             Some(AssignOp::Set(AssignValue::Assoc(Vec::new())))
                         } else if array {
                             Some(AssignOp::Set(AssignValue::Array(Vec::new())))
@@ -1445,7 +1450,7 @@ fn expand_dollars_chunks(text: &str, allow_process_sub: bool) -> Result<Vec<(Str
             // likewise the *parent* shell's pid even inside `(...)`/`$(...)`.
             Some('$') => {
                 chars.next();
-                out.exp(&std::process::id().to_string());
+                out.exp(&crate::vars::shell_pid().to_string());
             }
             // `$-` — the currently-set single-letter options (C41).
             Some('-') => {
@@ -1805,7 +1810,7 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
         "*" => return Ok(crate::vars::args().join(&Ifs::current().star_sep)),
         // `${$}` and `${-}` — braced spellings of `$$`/`$-` (C41), same as
         // real bash.
-        "$" => return Ok(std::process::id().to_string()),
+        "$" => return Ok(crate::vars::shell_pid().to_string()),
         "-" => return Ok(crate::vars::option_flags()),
         _ if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) => {
             let n: usize = inner.parse().map_err(|_| format!("${{{inner}}}: bad substitution"))?;
@@ -1913,6 +1918,11 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
             Subscript::Star => Ok(crate::vars::array_values(name).join(&Ifs::current().star_sep)),
             Subscript::Index(expr) => match read_subscript(name, expr)? {
                 Some(v) => Ok(v),
+                // `set -u` (C132): a missing element is an error, same as
+                // a missing scalar — bash aborts with `a[i]: unbound`.
+                None if crate::vars::nounset() => {
+                    Err(format!("{name}[{expr}]: unbound variable"))
+                }
                 None => Ok(String::new()),
             },
         };

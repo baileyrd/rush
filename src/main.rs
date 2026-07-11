@@ -389,6 +389,10 @@ fn main() -> std::io::Result<()> {
         vars::set_exported(&name, &value);
     }
 
+    // `$$` — capture the original shell pid before any subshell fork, so
+    // it stays stable in `( )` (C132; `$BASHPID` tracks the live pid).
+    vars::set_shell_pid();
+
     // `$PPID` (C41): the invoking process's pid, seeded once at startup as
     // an ordinary (non-exported, same as bash) shell variable — after the
     // environment loop above, so a stale inherited `PPID` from a parent

@@ -3513,13 +3513,13 @@ hard errors (only Q/E/a/A exist). `$"hello"` prints a stray `$`.
 produces literal backslash text. (`\n`/`\t`/`\e` already work.)
 **Effort: S**
 
-### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108)
+### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108) ✅ done (nocaseglob for filenames; the `=~` half stays open — see the rusty_regx handoff)
 `shopt -s nocasematch; [[ ABC == abc ]]` unreachable — tracked with the
 shopt table in C108 but called out separately because it changes
 matching *semantics* in `[[ ]]`/`case`/globs, not just an option table
 entry. **Effort: M** (glob and pattern matchers need a case-fold mode)
 
-### C121 — `/dev/tcp/host/port` and `/dev/udp` pseudo-devices not intercepted
+### C121 — `/dev/tcp/host/port` and `/dev/udp` pseudo-devices not intercepted ✅ done (via std::net; the `<>` read-write operator too)
 Redirections to them hit the kernel (ENOENT) instead of opening a
 socket. Niche but distinctive bash capability (port probes, minimal
 clients). **Effort: M**
@@ -3577,7 +3577,7 @@ no `~/.inputrc` analog. Hard blocker for users with muscle-memory
 bindings. **Effort: L** (needs a rusty_lines rebinding API; a
 S-sized subset: expose completion case-folding etc. as shopt options)
 
-### C129 — `COLUMNS`/`LINES` never set or updated (no `checkwinsize`)
+### C129 — `COLUMNS`/`LINES` never set or updated (no `checkwinsize`) ✅ done (via `stty size`; a native TIOCGWINSZ is on the rusty_lines handoff)
 The editor queries winsize internally but the shell vars are never
 written — `exec.rs`'s own `select` implementation reads `$COLUMNS`,
 which is always empty. Set at startup + after each foreground job

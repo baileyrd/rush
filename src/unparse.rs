@@ -168,6 +168,7 @@ impl Printer {
                 RawRedirect::File { fd, file, mode } => {
                     let (op, default_fd) = match mode {
                         RedirMode::Read => ("<", 0),
+                        RedirMode::ReadWrite => ("<>", 0),
                         RedirMode::Write => (">", 1),
                         RedirMode::Clobber => (">|", 1),
                         RedirMode::Append => (">>", 1),

@@ -128,6 +128,9 @@ pub enum RedirMode {
     /// `>|` — like `Write`, but exempt from `set -C` (noclobber, C50).
     Clobber,
     Append,
+    /// `<>` — open read-write, creating if needed (the `/dev/tcp` socket
+    /// idiom `exec 3<>/dev/tcp/host/port`, C121).
+    ReadWrite,
 }
 
 /// A compound command. Each body is itself a list, run by the executor.
@@ -589,6 +592,11 @@ impl Parser {
     /// its filename word (if any) from the stream.
     fn redirect_from_token(&mut self, r: lexer::Redir) -> Result<RawRedirect, ParseError> {
         let raw = match r.op {
+            RedirOp::ReadWrite => RawRedirect::File {
+                fd: r.fd,
+                file: self.expect_word("<>")?,
+                mode: RedirMode::ReadWrite,
+            },
             RedirOp::Read => {
                 RawRedirect::File { fd: r.fd, file: self.expect_word("<")?, mode: RedirMode::Read }
             }

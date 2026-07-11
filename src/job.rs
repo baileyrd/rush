@@ -784,6 +784,17 @@ fn parse_signal(name: &str) -> Option<c_int> {
 /// `jobs [-l|-p]` (C64): `-l` adds the process-group id to each line,
 /// `-p` prints just the pgids — both pure formatting over data the job
 /// table already tracks.
+/// SIGHUP every tracked job (`huponexit`, C108).
+pub fn hup_all_jobs() {
+    STATE.with(|s| {
+        for j in &s.borrow().jobs {
+            unsafe {
+                crate::sys::killpg(j.pgid, crate::sys::SIGHUP);
+            }
+        }
+    });
+}
+
 /// How many jobs the table currently tracks — the prompt's `\j` (C125).
 pub fn count() -> usize {
     STATE.with(|s| s.borrow().jobs.len())

@@ -96,6 +96,7 @@ pub struct Redir {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirOp {
     Read,        // `<`        — fd from a file
+    ReadWrite,   // `<>`       — fd opened read-write (C121)
     Write,       // `>`        — fd to a file (truncate; refused for an existing regular file under `set -C`)
     Clobber,     // `>|`       — fd to a file (truncate even under `set -C`, C50)
     Append,      // `>>`       — fd to a file (append)
@@ -629,6 +630,10 @@ fn lex_redirect(chars: &mut Peekable<Chars>, explicit_fd: Option<u32>) -> Result
 /// just without its `>>` case.
 fn lex_lt_op(chars: &mut Peekable<Chars>) -> Result<RedirOp, LexError> {
     Ok(match chars.peek() {
+        Some('>') => {
+            chars.next();
+            RedirOp::ReadWrite // `<>` (C121)
+        }
         Some('&') => {
             chars.next();
             let mut target = String::new();

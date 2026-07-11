@@ -1386,6 +1386,38 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
         }
     }
 
+    // `lastpipe` (C108): with the shopt on (and no job control), the last
+    // stage of a pipeline runs in *this* shell, so `… | read x` really
+    // sets `x` here. Implemented capture-then-feed (head stages run to
+    // completion, their output becomes the last stage's stdin) — a
+    // documented approximation of bash's streaming; the head stages must
+    // all be plain external commands for the fast path to apply.
+    if crate::vars::shopt("lastpipe")
+        && !crate::vars::interactive()
+        && pipeline.commands.len() > 1
+        && let Some(Stage::Simple(last)) = pipeline.commands.last()
+        && last.argv.first().is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
+        && pipeline.commands[..pipeline.commands.len() - 1].iter().all(|s| {
+            // Head stages must be runnable as plain externals — a disk
+            // twin of a builtin (`/bin/echo` for `echo`) counts.
+            matches!(s, Stage::Simple(c)
+                if c.argv.first().is_some_and(|n| !crate::func::exists(n)
+                    && (n.contains('/') || crate::builtins::resolve_in_path(n).is_some())))
+        })
+    {
+        let head =
+            Pipeline { commands: pipeline.commands[..pipeline.commands.len() - 1].to_vec() };
+        let (_, captured) = run(&head, true)?;
+        let mut cmd = last.clone();
+        if cmd.heredoc.is_none() {
+            cmd.heredoc = Some(captured);
+        }
+        if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
+            return with_prefix_assignments(&cmd, || call_function(&cmd.argv));
+        }
+        return with_prefix_assignments(&cmd, || run_builtin_foreground(&cmd));
+    }
+
     #[cfg(unix)]
     {
         crate::job::run_foreground(&pipeline)
@@ -1542,9 +1574,19 @@ pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> R
                 if crate::vars::restricted() && !matches!(mode, RedirMode::Read) {
                     return Err(format!("{file}: restricted: cannot redirect output"));
                 }
-                let f = match mode {
-                    RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
-                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
+                let f = if let Some(sock) = net_pseudo_device(file)? {
+                    sock
+                } else {
+                    match mode {
+                        RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                        RedirMode::ReadWrite => File::options()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .open(file)
+                            .map_err(|e| format!("{file}: {e}"))?,
+                        RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
+                    }
                 };
                 // Any fd, not just 0/1/2 — `StdioGuard.saved` is keyed by
                 // plain `i32`, so no fd is special-cased here (see C38).
@@ -1729,6 +1771,15 @@ pub fn capture_list(list: &CommandList) -> Result<String, String> {
     let mut status = 0;
     for job in &list.jobs {
         status = capture_andor(&job.list, &mut out)?;
+        // `inherit_errexit` (C108): command substitution honors `set -e`
+        // when the shopt is on — bash's default clears it inside `$()`.
+        if status != 0
+            && crate::vars::errexit()
+            && crate::vars::shopt("inherit_errexit")
+            && !crate::vars::errexit_suppressed()
+        {
+            crate::trap::exit_shell(status);
+        }
     }
     // POSIX: a variable-assignment-only command (`x=$(...)`) takes the exit
     // status of the last command substitution performed while expanding it,
@@ -2273,6 +2324,12 @@ pub(crate) fn build_stage(
             Redirect::File { fd, file, mode } => {
                 let f = match mode {
                     RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                    RedirMode::ReadWrite => File::options()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(file)
+                        .map_err(|e| format!("{file}: {e}"))?,
                     RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
                 };
                 match fd {
@@ -2387,6 +2444,37 @@ pub(crate) fn build_stage(
     Ok((command, real_pipe_read))
 }
 
+/// `/dev/tcp/host/port` and `/dev/udp/host/port` (C121): bash's network
+/// pseudo-devices, backed here by `std::net` (no kernel path exists, so
+/// intercepting before `open` is exactly what bash does too). `None` for
+/// ordinary paths; `Err` for a pseudo-device that fails to connect.
+#[cfg(unix)]
+fn net_pseudo_device(path: &str) -> Result<Option<File>, String> {
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
+    let (proto, rest) = if let Some(r) = path.strip_prefix("/dev/tcp/") {
+        ("tcp", r)
+    } else if let Some(r) = path.strip_prefix("/dev/udp/") {
+        ("udp", r)
+    } else {
+        return Ok(None);
+    };
+    let Some((host, port)) = rest.split_once('/') else {
+        return Err(format!("{path}: invalid network path"));
+    };
+    let port: u16 =
+        port.parse().map_err(|_| format!("{path}: invalid port"))?;
+    let raw = if proto == "tcp" {
+        std::net::TcpStream::connect((host, port))
+            .map_err(|e| format!("{path}: {e}"))?
+            .into_raw_fd()
+    } else {
+        let sock = std::net::UdpSocket::bind(("0.0.0.0", 0)).map_err(|e| format!("{path}: {e}"))?;
+        sock.connect((host, port)).map_err(|e| format!("{path}: {e}"))?;
+        sock.into_raw_fd()
+    };
+    Ok(Some(unsafe { File::from_raw_fd(raw) }))
+}
+
 /// Allocate the fd for a `{name}>…` redirect (C115): open the file (or
 /// dup the target) and move the result to the first free fd >= 10 via
 /// `F_DUPFD`, returning the allocated number.
@@ -2398,6 +2486,12 @@ fn allocate_varfd(inner: &Redirect) -> Result<i32, String> {
         Redirect::File { file, mode, .. } => {
             let f = match mode {
                 RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                RedirMode::ReadWrite => File::options()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(file)
+                    .map_err(|e| format!("{file}: {e}"))?,
                 _ => open_write(file, *mode)?,
             };
             let fd = f.as_raw_fd();

@@ -4144,3 +4144,25 @@ fn compgen_double_dash_ends_options() {
     assert_eq!(rush("compgen -W \"apple apricot banana\" -- ap").0, "apple\napricot\n");
     assert_eq!(rush("compgen -W \"one two three\" -- \"\"").0, "one\ntwo\nthree\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn backtick_command_substitution() {
+    // Legacy backtick substitution was entirely unimplemented (treated as
+    // literal text). It now behaves like `$(...)`, unquoted and inside
+    // double quotes. Each verified against bash.
+    assert_eq!(rush("echo `echo bare`").0, "bare\n");
+    assert_eq!(rush("echo \"`echo dq`\"").0, "dq\n");
+    assert_eq!(rush("x=\"`echo assign`\"; echo $x").0, "assign\n");
+    assert_eq!(rush("echo \"pre `echo mid` post\"").0, "pre mid post\n");
+    assert_eq!(rush("echo \"`echo a` and `echo b`\"").0, "a and b\n");
+    // Backticks compose with `$(...)` and with the word around them.
+    assert_eq!(rush("echo \"nested `echo x$(echo y)`\"").0, "nested xy\n");
+    // A backslash-escaped backtick inside double quotes stays literal.
+    assert_eq!(rush("echo \"esc \\`literal\\`\"").0, "esc `literal`\n");
+    // Word-splitting of an unquoted backtick result, and multi-command bodies.
+    assert_eq!(rush("for i in `seq 1 3`; do echo -n $i; done; echo").0, "123\n");
+    assert_eq!(rush("echo `echo a; echo b`").0, "a b\n");
+    // Nested backticks via the `\\`` escape.
+    assert_eq!(rush("n=`echo \\`echo deep\\``; echo $n").0, "deep\n");
+}

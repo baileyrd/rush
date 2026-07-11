@@ -144,6 +144,10 @@ thread_local! {
     // `set -o pipefail`: a pipeline's own exit status is the rightmost
     // non-zero stage, not just its last (see `exec::pipeline_status`).
     static PIPEFAIL: RefCell<bool> = const { RefCell::new(false) };
+    // `set -a`: every assignment marks the variable exported (C107).
+    static ALLEXPORT: RefCell<bool> = const { RefCell::new(false) };
+    // `set -f`: pathname expansion (globbing) is disabled (C107).
+    static NOGLOB: RefCell<bool> = const { RefCell::new(false) };
     // `set -x`: echo each command to stderr before running it (see
     // `exec::trace_command`).
     static XTRACE: RefCell<bool> = const { RefCell::new(false) };
@@ -226,6 +230,22 @@ pub fn errexit() -> bool {
     ERREXIT.with(|e| *e.borrow())
 }
 
+pub fn set_allexport(on: bool) {
+    ALLEXPORT.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn allexport() -> bool {
+    ALLEXPORT.with(|e| *e.borrow())
+}
+
+pub fn set_noglob(on: bool) {
+    NOGLOB.with(|e| *e.borrow_mut() = on);
+}
+
+pub fn noglob() -> bool {
+    NOGLOB.with(|e| *e.borrow())
+}
+
 pub fn set_nounset(on: bool) {
     NOUNSET.with(|e| *e.borrow_mut() = on);
 }
@@ -259,6 +279,31 @@ pub const SHOPT_DEFAULTS: &[(&str, bool)] = &[
     ("failglob", false),
     ("globstar", false),
     ("nullglob", false),
+    // C108: the wider bash option set. `autocd`, `nocasematch`,
+    // `nocaseglob`, and `xpg_echo` are wired to real behavior; the rest
+    // are settable/queryable but inert for now (documented — accepting
+    // them keeps ported scripts' `shopt -s` preambles from hard-erroring).
+    ("autocd", false),
+    ("cdspell", false),
+    ("checkwinsize", true),
+    ("cmdhist", true),
+    ("direxpand", false),
+    ("dirspell", false),
+    ("execfail", false),
+    ("expand_aliases", true),
+    ("globasciiranges", true),
+    ("histappend", false),
+    ("hostcomplete", true),
+    ("huponexit", false),
+    ("inherit_errexit", false),
+    ("lastpipe", false),
+    ("login_shell", false),
+    ("nocaseglob", false),
+    ("nocasematch", false),
+    ("no_empty_cmd_completion", false),
+    ("patsub_replacement", true),
+    ("sourcepath", true),
+    ("xpg_echo", false),
 ];
 
 /// Current value of a `shopt` option; `false` for an unknown name.
@@ -885,6 +930,10 @@ pub fn set(name: &str, value: &str) {
             }
         }
     });
+    // `set -a` (allexport, C107): every assignment exports.
+    if allexport() {
+        export(name);
+    }
 }
 
 /// Set a variable and mark it exported (`export NAME=value`) — always a

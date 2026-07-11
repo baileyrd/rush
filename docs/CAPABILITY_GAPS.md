@@ -3404,11 +3404,11 @@ editor's history store into the builtin layer is the M part)
 (`rush: -s: No such file or directory`). Blocks login-shell use,
 restricted shells, and `curl | rush -s -- args` pipelines. **Effort: L**
 
-### C105 — `$BASH_ENV` startup file not honored in non-interactive mode
+### C105 — `$BASH_ENV` startup file not honored in non-interactive mode ✅ done
 `BASH_ENV=/tmp/e rush -c …` never sources the file; CI/wrapper-injected
 setup silently vanishes. **Effort: S**
 
-### C106 — Standard shell variables not seeded; `UID` writable; `SHLVL` not incremented
+### C106 — Standard shell variables not seeded; `UID` writable; `SHLVL` not incremented ✅ done (RUSH_VERSION instead of BASH_VERSION — deliberate; SHELLOPTS/BASHOPTS reflection still open)
 `UID`, `EUID`, `HOSTNAME`, `OSTYPE`, `HOSTTYPE`, `MACHTYPE`,
 `BASH_VERSION`/`BASH_VERSINFO` analogs, `SHELLOPTS`/`BASHOPTS` are all
 unset; `UID=5` succeeds silently (bash: readonly error); inherited
@@ -3416,7 +3416,7 @@ unset; `UID=5` succeeds silently (bash: readonly error); inherited
 nesting detection all take wrong branches. **Effort: M**
 (`SHELLOPTS`/`BASHOPTS` need live option reflection)
 
-### C107 — `set` short options largely unsupported
+### C107 — `set` short options largely unsupported ✅ `-a`/`-f` real, the rest accepted as inert (documented)
 `-a` (allexport), `-b`, `-f` (noglob), `-h`, `-k`, `-v` (verbose), `-B`,
 `-E` (errtrace), `-P`, `-T` (functrace), and `set -o
 posix/errtrace/functrace` all print `set: -X: not supported`. `set -a`
@@ -3424,7 +3424,7 @@ posix/errtrace/functrace` all print `set: -X: not supported`. `set -a`
 `set -euEo pipefail` preambles fail outright. **Effort: M–L** (some can
 be accepted as no-ops initially)
 
-### C108 — `shopt` table is glob-only (5 options)
+### C108 — `shopt` table is glob-only (5 options) ✅ table + autocd/nocasematch/xpg_echo wired; rest accepted-inert; GLOBIGNORE/patsub_replacement still open
 Missing everything else: `lastpipe`, `inherit_errexit`, `xpg_echo`,
 `patsub_replacement`, `login_shell`, `huponexit`, `execfail`, `cmdhist`,
 `histappend`, `checkwinsize`, `sourcepath`, `extdebug`, `autocd`,
@@ -3438,12 +3438,12 @@ for zsh/fish converts (one check in the command-not-found path).
 the high-value ones first: `lastpipe`, `inherit_errexit`, `nocasematch`,
 `autocd`, `histappend`, `checkwinsize`, `xpg_echo`)
 
-### C109 — `$PS4` not expanded for xtrace
+### C109 — `$PS4` not expanded for xtrace ✅ done
 `PS4='+${LINENO}: '; set -x` prints the literal `$LINENO` text. The
 standard debugging idiom produces useless traces. (First-char repetition
 already works.) **Effort: S**
 
-### C110 — `wait -f` / `wait -p var` and `jobs -n`/`-r`/`-s` unsupported
+### C110 — `wait -f` / `wait -p var` and `jobs -n`/`-r`/`-s` unsupported ✅ done
 bash-5.x `wait -n -p which` (identify the finished job) errors and
 leaves the var unset; `jobs -r` ("any jobs still running?") is an
 invalid option. Both are small option-parsing additions over the

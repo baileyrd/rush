@@ -532,7 +532,7 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
 
     let mut out = Vec::new();
     for field in fields {
-        if field.globbable {
+        if field.globbable && !crate::vars::noglob() {
             let matches = crate::glob::glob(&field.pattern);
             if !matches.is_empty() {
                 out.extend(matches);

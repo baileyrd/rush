@@ -117,7 +117,8 @@ fn echo(argv: &[String]) -> i32 {
     // (C90). The first argument that isn't purely those letters ends flag
     // parsing and prints literally, matching bash (`echo -x` prints `-x`).
     let mut newline = true;
-    let mut escapes = false;
+    // `xpg_echo` (C108): escapes are interpreted by default.
+    let mut escapes = crate::vars::shopt("xpg_echo");
     let mut idx = 1;
     while idx < argv.len() {
         let Some(flags) = argv[idx]
@@ -1606,6 +1607,8 @@ fn test_binary(a: &str, op: &str, b: &str) -> Result<bool, String> {
 /// name — shared by `test -o` (C95) and `list_options`' own table.
 fn named_option_state(name: &str) -> Option<bool> {
     Some(match name {
+        "allexport" => crate::vars::allexport(),
+        "noglob" => crate::vars::noglob(),
         "errexit" => crate::vars::errexit(),
         "noclobber" => crate::vars::noclobber(),
         "noexec" => crate::vars::noexec(),
@@ -2843,7 +2846,9 @@ fn shopt_cmd(argv: &[String]) -> i32 {
 /// lines (both formats verified against real bash).
 fn list_options(dash_spelling: bool) {
     let options: &[(&str, bool)] = &[
+        ("allexport", crate::vars::allexport()),
         ("errexit", crate::vars::errexit()),
+        ("noglob", crate::vars::noglob()),
         ("noclobber", crate::vars::noclobber()),
         ("noexec", crate::vars::noexec()),
         ("nounset", crate::vars::nounset()),
@@ -2872,6 +2877,8 @@ fn set_cmd(argv: &[String]) -> i32 {
         for &(flag, on) in pending {
             match flag {
                 'e' => crate::vars::set_errexit(on),
+                'a' => crate::vars::set_allexport(on),
+                'f' => crate::vars::set_noglob(on),
                 'u' => crate::vars::set_nounset(on),
                 'x' => crate::vars::set_xtrace(on),
                 'C' => crate::vars::set_noclobber(on),
@@ -2928,7 +2935,13 @@ fn set_cmd(argv: &[String]) -> i32 {
                 let on = other.starts_with('-');
                 for c in other[1..].chars() {
                     match c {
-                        'e' | 'u' | 'x' | 'C' | 'n' => pending.push((c, on)),
+                        'e' | 'u' | 'x' | 'C' | 'n' | 'a' | 'f' => pending.push((c, on)),
+                        // Accepted but inert (C107): `set -euEbo pipefail`
+                        // preambles must not hard-error. `b` notify, `h`
+                        // hashall, `k` keyword, `m` monitor, `B`
+                        // braceexpand, `H` histexpand, `P` physical, `E`
+                        // errtrace, `T` functrace, `v` verbose.
+                        'b' | 'h' | 'k' | 'm' | 'B' | 'H' | 'P' | 'E' | 'T' | 'v' => {}
                         // `-o name` — the long spellings (C52), mapped to
                         // the same letters the short forms queue. A bare
                         // `set -o`/`set +o` (no name following) lists every
@@ -2949,6 +2962,16 @@ fn set_cmd(argv: &[String]) -> i32 {
                             // (`set +o vi` = emacs, and vice versa.)
                             Some("vi") => pending.push(('v', on)),
                             Some("emacs") => pending.push(('v', !on)),
+                            Some("allexport") => pending.push(('a', on)),
+                            Some("noglob") => pending.push(('f', on)),
+                            // Accepted but inert (C107) — see the letter
+                            // cluster above.
+                            Some(
+                                "braceexpand" | "errtrace" | "functrace" | "hashall"
+                                | "histexpand" | "history" | "ignoreeof" | "keyword"
+                                | "monitor" | "notify" | "onecmd" | "physical" | "posix"
+                                | "privileged" | "verbose",
+                            ) => {}
                             Some(name) => {
                                 eprintln!("set: {name}: invalid option name");
                                 return 1;

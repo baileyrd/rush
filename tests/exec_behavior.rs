@@ -63,6 +63,21 @@ fn rush_stdin(src: &str, input: &str) -> (String, i32) {
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
 }
 
+/// Pipe `input` as the command source into a *plain* `rush` (no `-c`/`-s`)
+/// with a non-terminal stdin — bash's non-interactive "read commands from
+/// stdin" mode. Returns stdout.
+#[cfg(unix)]
+fn rush_stdin_plain(input: &str) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn rush");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).expect("write stdin");
+    let output = child.wait_with_output().expect("wait rush");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Like [`rush_stdin`], but returning stderr instead of stdout — for
 /// `select`'s menu/prompt, which (like real bash) goes to stderr rather
 /// than stdout.
@@ -100,7 +115,11 @@ fn rush_interactive(input: &str) -> (String, String) {
     let home = std::env::temp_dir().join(format!("rush_interactive_test_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&home).expect("create temp HOME");
 
+    // `-i` forces the interactive REPL on a pipe — the only way to drive
+    // interactive-only features (history expansion, PS0, IGNOREEOF, …)
+    // without a real terminal.
     let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-i")
         .env("HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1888,8 +1907,10 @@ fn ppid_expands_to_the_invoking_process() {
 fn dollar_dash_reflects_currently_set_options() {
     // C41: `$-` used to expand to empty always. One letter per set option;
     // `set +e` removes its letter again; `${-}` is the braced spelling.
+    // `h`/`B` (hashall/braceexpand) are always on and `c` marks `-c`, so a
+    // bare `$-` is `hBc` here — matching `bash -c` exactly (C135).
     let (out, _) = rush("echo [$-]; set -eu; echo [$-]; set +e; echo [${-}]");
-    assert_eq!(out, "[]\n[eu]\n[u]\n");
+    assert_eq!(out, "[hBc]\n[ehuBc]\n[huBc]\n");
 }
 
 #[cfg(unix)]
@@ -1899,7 +1920,7 @@ fn set_accepts_clustered_short_flags() {
     // the near-universal script header — errored with "not supported";
     // only one flag per word ever parsed.
     let (out, status) = rush("set -euo pipefail; echo [$-]");
-    assert_eq!(out, "[eu]\n");
+    assert_eq!(out, "[ehuBc]\n");
     assert_eq!(status, 0);
 
     // Flags before the first bare word still apply, and the word starts
@@ -1915,7 +1936,7 @@ fn set_applies_nothing_when_any_flag_is_invalid() {
     // neither `-e` nor `-u` (verified directly) — partial application
     // would errexit-kill the shell on `set`'s own failure here.
     let (out, status) = rush("set -eu -z 2>/dev/null; echo [$-] survived");
-    assert_eq!(out, "[] survived\n");
+    assert_eq!(out, "[hBc] survived\n");
     assert_eq!(status, 0);
 }
 
@@ -2269,7 +2290,7 @@ fn noclobber_refuses_overwrite_and_clobber_overrides() {
     let (out, _) = rush(&format!("set -C; set +C; echo ok > {f}; cat {f}; echo n >| {f}; cat {f}"));
     assert_eq!(out, "ok\nn\n");
     let (out, _) = rush("set -C; echo [$-]; set +C; echo [$-]");
-    assert_eq!(out, "[C]\n[]\n");
+    assert_eq!(out, "[hBCc]\n[hBc]\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2338,7 +2359,7 @@ fn set_o_long_names_and_listing() {
 
     // Round-trip: `set +o` output re-runs cleanly.
     let (out, _) = rush("set -o noclobber; saved=$(set +o); set +o noclobber; eval \"$saved\"; echo [$-]");
-    assert_eq!(out, "[C]\n");
+    assert_eq!(out, "[hBCc]\n");
 
     let (err, status) = rush_stderr("set -o badname");
     assert!(err.contains("badname: invalid option name"), "got: {err:?}");
@@ -3541,7 +3562,10 @@ fn quoted_array_expansion_with_adjacent_text() {
 /// pointed at a scratch dir so history I/O is isolated.
 #[cfg(unix)]
 fn rush_session(home: &std::path::Path, script: &str) -> String {
+    // `-i` forces the interactive REPL on a pipe (history, HISTTIMEFORMAT,
+    // IGNOREEOF, PS0 are interactive-only) — see `rush_interactive`.
     let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-i")
         .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -4213,4 +4237,30 @@ fn ulimit_pipe_size_pseudo_resource() {
     // Attempting to set it is rejected (status 1), same as bash.
     let (_, code) = rush("ulimit -p 16");
     assert_eq!(code, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn arithmetic_strips_quotes() {
+    // Quotes are stripped in an arithmetic context and their content lexed
+    // normally — a number stays a number, a bareword resolves like a name.
+    // Verified against bash.
+    assert_eq!(rush(r#"echo $(( "10" * 2 ))"#).0, "20\n");
+    assert_eq!(rush(r#"x=7; echo $(( "x" + 1 ))"#).0, "8\n");
+    assert_eq!(rush(r#"echo $(( "abc" ))"#).0, "0\n");
+    assert_eq!(rush(r#"echo $(( 5 > 3 ? "y" : "n" ))"#).0, "0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn dollar_dash_matches_bash_across_modes() {
+    // `$-` reports h/B (always on) plus the set-flags and the invocation
+    // flag: `hBc` under `-c`, and set-flags slot in alphabetically. Each
+    // verified against `bash -c`.
+    assert_eq!(rush("echo $-").0, "hBc\n");
+    assert_eq!(rush("set -eux; echo $-").0, "ehuxBc\n");
+    assert_eq!(rush("set -f -C; echo $-").0, "fhBCc\n");
+    // A pipe redirected onto stdin (no -c/-s/file) is a non-interactive
+    // stdin script: `$-` gets `s`, not `i`.
+    assert_eq!(rush_stdin_plain("echo $-\n"), "hBs\n");
 }

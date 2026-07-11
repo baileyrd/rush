@@ -51,6 +51,11 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
         let c = chars[i];
         if c.is_whitespace() {
             i += 1;
+        } else if c == '"' || c == '\'' {
+            // Quotes are stripped in an arithmetic context and their content
+            // lexed normally — `$(( "10" * 2 ))` is 20, `$(( "x" + 1 ))`
+            // resolves `x` like a bare name (matching bash).
+            i += 1;
         } else if c.is_ascii_digit() {
             // `0x`/`0X` hex and leading-`0` octal literals (C116), same as
             // bash/C — checked before the plain-decimal scan.

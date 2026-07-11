@@ -3723,16 +3723,28 @@ Remaining narrowings (documented, low-value or blocked on a sibling crate):
   `-p` (pipe size) is modelled as a read-only pseudo-resource with bash's
   fixed value (`PIPE_BUF` = 4096 bytes = 8 × 512-byte blocks) — it has no
   `RLIMIT_*` backing, so setting it is rejected exactly as bash does.
+- `$-` now matches bash across invocation modes: `hBc` under `-c`, `hB` for
+  a script file, `hBs` for stdin, `hiBH…` when interactive, with the
+  set-flags slotting in alphabetically (`h`/`B` are always on, `H` rides
+  interactive). A pipe redirected onto a plain `rush`'s stdin (no
+  `-c`/`-s`/file) is now a non-interactive stdin script, as in bash — `-i`
+  forces the REPL on a pipe when interactive behaviour is wanted.
+- Arithmetic strips quotes in an expression (`$(( "10" * 2 ))` = 20,
+  `$(( "x" + 1 ))` resolves `x`), matching bash.
+
+Still open (documented, genuinely low-value or architectural):
+
 - `time ( subshell ) 2>/dev/null` does not suppress the timing report: the
   redirection is applied inside the forked subshell child, never in the
   parent that writes the report. Simple/pipeline timed commands
   (`time echo hi 2>/dev/null`) match bash — only the parenthesized-group
-  form diverges. Niche.
+  form diverges. Niche; a fix would rework where pipeline-level redirects
+  apply relative to the report write.
 - Arithmetic division/modulo-by-zero diagnostics echo the operands without
-  their original spacing (`5/0` vs bash's `5 / 0`); the `error token`
-  detail matches. Cosmetic.
-- `$-`'s exact `h`/`B`/`c`/`T` letters (the load-bearing `i` is already
-  reported) remain cosmetic.
+  their original spacing (`5/0` vs bash's `5 / 0`), and a parenthesised
+  divisor is shown evaluated (`4/0`) rather than as source (`4 / (2-2) `);
+  the `error token` detail otherwise matches. Cosmetic — matching it needs
+  source-span tracking through the arithmetic evaluator.
 
 ---
 

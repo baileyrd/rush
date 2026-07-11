@@ -243,6 +243,13 @@ fn main() -> std::io::Result<()> {
         },
     );
     vars::set("RUSH_VERSION", env!("CARGO_PKG_VERSION"));
+    // `$IFS` is always *set* in bash (space-tab-newline default) — rush's
+    // splitter already treated unset-IFS as that default, but `"$IFS"`
+    // itself expanded empty, and a prefix-assignment restore (C75) needs a
+    // real prior value to put back.
+    if vars::get("IFS").is_none() {
+        vars::set("IFS", " \t\n");
+    }
     // `$SHLVL` increments per nested shell (C106) and stays exported.
     let shlvl = vars::get("SHLVL").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
     vars::set_exported("SHLVL", &shlvl.to_string());

@@ -1360,10 +1360,10 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
         }
         // A defined function shadows external commands (but not builtins).
         if cmd.argv.first().is_some_and(|name| crate::func::exists(name)) {
-            return call_function(&cmd.argv);
+            return with_prefix_assignments(cmd, || call_function(&cmd.argv));
         }
         if cmd.argv.first().is_some_and(|name| builtins::is_builtin(name)) {
-            return run_builtin_foreground(cmd);
+            return with_prefix_assignments(cmd, || run_builtin_foreground(cmd));
         }
         // `autocd` (C108): a lone directory name that isn't a command
         // becomes `cd` to it, echoed like bash does — interactive shells
@@ -1427,14 +1427,50 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
 /// (`local arr=(a b c)`, `declare -A arr=([k]=v ...)`) can't survive being
 /// flattened into `Vec<String>` argv at all (see `Command::local_decls`'s
 /// own doc comment and `expand::expand_simple`, which builds it).
+/// Apply a command's prefix assignments (`IFS=: read …`) around an
+/// in-process builtin/function call (C75): each named variable is set for
+/// the duration and restored (value and export flag — or removed, if it
+/// didn't exist) afterward, while anything else the call assigns (e.g.
+/// `read`'s own targets) persists. A prior *array* value isn't restored
+/// (prefix assignments are scalars; an accepted narrowing).
+fn with_prefix_assignments<F: FnOnce() -> R, R>(cmd: &Command, run: F) -> R {
+    if cmd.assignments.is_empty() {
+        return run();
+    }
+    let saved: Vec<(String, Option<String>, bool)> = cmd
+        .assignments
+        .iter()
+        .map(|(name, _)| (name.clone(), crate::vars::get(name), crate::vars::is_exported(name)))
+        .collect();
+    for (name, op) in &cmd.assignments {
+        crate::vars::assign(name, op);
+    }
+    let result = run();
+    for (name, value, exported) in saved {
+        match value {
+            Some(v) if exported => crate::vars::set_exported(&name, &v),
+            Some(v) => {
+                crate::vars::set(&name, &v);
+                if !exported {
+                    crate::vars::unexport(&name);
+                }
+            }
+            None => crate::vars::unset(&name),
+        }
+    }
+    result
+}
+
 /// Run a builtin or function from a forked pipeline-stage child (C82):
 /// functions shadow builtins, same precedence as the foreground path.
 /// The caller has already wired fds and applied redirects.
 pub(crate) fn run_stage_command_in_child(cmd: &Command) -> i32 {
-    if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
-        return call_function(&cmd.argv).unwrap_or(1);
-    }
-    dispatch_builtin(cmd)
+    with_prefix_assignments(cmd, || {
+        if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
+            return call_function(&cmd.argv).unwrap_or(1);
+        }
+        dispatch_builtin(cmd)
+    })
 }
 
 fn dispatch_builtin(cmd: &Command) -> i32 {

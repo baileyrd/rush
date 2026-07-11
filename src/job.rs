@@ -784,6 +784,11 @@ fn parse_signal(name: &str) -> Option<c_int> {
 /// `jobs [-l|-p]` (C64): `-l` adds the process-group id to each line,
 /// `-p` prints just the pgids — both pure formatting over data the job
 /// table already tracks.
+/// How many jobs the table currently tracks — the prompt's `\j` (C125).
+pub fn count() -> usize {
+    STATE.with(|s| s.borrow().jobs.len())
+}
+
 fn jobs_cmd(argv: &[String]) -> i32 {
     // `-r` running only / `-s` stopped only / `-n` changed-since-last-
     // notification only (C110), alongside the existing `-l`/`-p` forms.

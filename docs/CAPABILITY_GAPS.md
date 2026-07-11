@@ -3537,7 +3537,7 @@ Each physical line of a `for`/`if` typed interactively becomes its own
 just never hands it the whole command. Buffer the lines and add one
 joined entry after `parser::parse` succeeds. **Effort: S**
 
-### C125 — PS1 escape coverage tiny; `\[`/`\]`/`\e` render as literal garbage
+### C125 — PS1 escape coverage tiny; `\[`/`\]`/`\e` render as literal garbage ✅ done
 Only `\w \W \u \h \$ \? \n \\` exist; unknown escapes are kept literal —
 so the single most common bash prompt,
 `PS1='\[\e[32m\]\u@\h\[\e[0m\] \w\$ '`, renders visibly corrupted.
@@ -3545,7 +3545,7 @@ Missing: `\[ \] \e \a \nnn`, time/date (`\t \T \@ \A \d \D{fmt}`),
 `\j \! \# \v \V \s \l`. Also `\u`/`\h` read env vars instead of
 getpwuid/gethostname, so `\h` is usually empty on Linux. **Effort: S**
 
-### C126 — No `$`-expansion of PS1 (promptvars); no `PROMPT_COMMAND`; no PS0
+### C126 — No `$`-expansion of PS1 (promptvars); no `PROMPT_COMMAND`; no PS0 ✅ done (PS0 not included — lower priority)
 `prompt()` runs only the escape pass — `PS1='$(git_branch) \$ '` (the #1
 prompt customization in the wild) never expands, while RPS1 *does* get
 `expand_dollars` (internal inconsistency). No `PROMPT_COMMAND` hook
@@ -3553,7 +3553,7 @@ prompt customization in the wild) never expands, while RPS1 *does* get
 terminal-title updates, and `history -a`-style hooks are impossible.
 **Effort: S**
 
-### C127 — PS2 hardcoded to `"> "`; `PROMPT_DIRTRIM` missing
+### C127 — PS2 hardcoded to `"> "`; `PROMPT_DIRTRIM` missing ✅ done
 `$PS2` is never read; continuation prompts can't be customized, and deep
 paths flood `\w`. **Effort: S**
 

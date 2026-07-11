@@ -3856,3 +3856,37 @@ fn nocasematch_regex_matching() {
     let (out, _) = rush("[[ ABC =~ ^abc$ ]] && echo yes || echo no");
     assert_eq!(out, "no\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn histtimeformat_and_native_read_s() {
+    // C122 remainder: HISTTIMEFORMAT prefixes each entry with its
+    // rendered timestamp, and the file carries `#<epoch>` lines.
+    let home = std::env::temp_dir().join(format!("rush_htf_{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let out = rush_session(&home, "HISTTIMEFORMAT=\"T \"\necho one\nhistory\n");
+    // Every listed line is prefixed with the format's literal "T ".
+    assert!(out.contains("  T echo one\n"), "got: {out:?}");
+    let file = std::fs::read_to_string(home.join(".rush_history")).unwrap();
+    assert!(file.lines().any(|l| l.starts_with('#') && l[1..].chars().all(|c| c.is_ascii_digit())),
+        "no #epoch line in: {file:?}");
+    let _ = std::fs::remove_dir_all(&home);
+
+    // C89: read -s still reads on a pipe (echo suppression is a no-op
+    // off a tty); no more stty shell-out.
+    let (out, _) = rush_stdin("read -s x; echo \"[$x]\"", "hidden\n");
+    assert_eq!(out, "[hidden]\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_builtin_registers_without_error() {
+    // C128: the bind builtin parses and queues without an editor
+    // present (the REPL applies the queue); unknown functions error.
+    let (out, code) = rush(r#"bind "\C-t: forward-word"; bind -x "\C-g: echo hi"; bind "set completion-ignore-case on"; echo ok"#);
+    assert_eq!(out, "ok\n");
+    assert_eq!(code, 0);
+
+    let (_, code) = rush(r#"bind "\C-t: no-such-readline-function""#);
+    assert_eq!(code, 1);
+}

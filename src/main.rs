@@ -66,6 +66,23 @@ impl Hooks for ShellHooks {
         #[cfg(unix)]
         trap::check_pending();
     }
+    fn host_binding(&self, tag: &str, line: &mut String, cursor: &mut usize) {
+        // `bind -x` (C128): run the bound command with READLINE_LINE /
+        // READLINE_POINT set, then read them back into the buffer.
+        let Some(cmd) = builtins::host_binding_command(tag) else { return };
+        vars::set("READLINE_LINE", line);
+        vars::set("READLINE_POINT", &cursor.to_string());
+        if let Ok(list) = parser::parse(&cmd) {
+            let _ = exec::run_list(&list);
+        }
+        if let Some(new_line) = vars::get("READLINE_LINE") {
+            *line = new_line;
+        }
+        *cursor = vars::get("READLINE_POINT")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(line.len())
+            .min(line.len());
+    }
 }
 
 /// `$HISTFILE` (C122), defaulting to `~/.rush_history`.
@@ -107,6 +124,9 @@ fn apply_history_knobs(rl: &mut Editor) {
     }
     let control = vars::get("HISTCONTROL").unwrap_or_default();
     rl.set_history_dedup(control.split(':').any(|c| c == "erasedups"));
+    // `$HISTTIMEFORMAT` set → persist `#<epoch>` timestamp lines in the
+    // history file, bash's format (C122).
+    rl.set_history_timestamps(vars::get("HISTTIMEFORMAT").is_some_and(|f| !f.is_empty()));
 }
 
 thread_local! {
@@ -563,19 +583,76 @@ fn main() -> std::io::Result<()> {
 /// stopgap until rusty_lines exposes `TIOCGWINSZ` (see the handoff doc).
 /// No-op when stdin isn't a terminal or `stty` isn't available.
 fn update_winsize() {
-    // `.output()` nulls stdin by default; `stty` reads the winsize from
-    // its controlling terminal on fd 0, so stdin must be inherited.
-    if let Ok(out) = std::process::Command::new("stty")
-        .arg("size")
-        .stdin(std::process::Stdio::inherit())
-        .output()
-        && out.status.success()
-        && let Ok(text) = String::from_utf8(out.stdout)
-        && let Some((rows, cols)) = text.trim().split_once(' ')
-    {
-        vars::set("LINES", rows);
-        vars::set("COLUMNS", cols);
+    // Native `TIOCGWINSZ` via rusty_lines (C129) — the stty shell-out is
+    // gone now that the crate exposes it.
+    if let Some((cols, rows)) = rusty_lines::terminal_size() {
+        vars::set("COLUMNS", &cols.to_string());
+        vars::set("LINES", &rows.to_string());
     }
+}
+
+/// Drain the `bind` builtin's queued rebindings into the live editor
+/// (C128); refresh the snapshot `bind -P` reads from.
+fn apply_pending_binds(rl: &mut Editor) {
+    for pending in builtins::take_pending_binds() {
+        use builtins::PendingBind;
+        let _ = match pending {
+            PendingBind::Action(keys, action) => match editor_action(&action) {
+                Some(a) => rl.bind(&keys, a),
+                None => Ok(()),
+            },
+            PendingBind::Host(keys, _cmd) => rl.bind_host(&keys, keys.clone()),
+            PendingBind::Unbind(keys) => rl.unbind(&keys),
+        };
+    }
+    builtins::set_bindings_snapshot(
+        rl.bindings().map(|(spec, action)| (spec, format!("{action:?}"))).collect(),
+    );
+}
+
+/// Map rush's action-name string to a `rusty_lines::EditorAction`.
+fn editor_action(name: &str) -> Option<rusty_lines::EditorAction> {
+    use rusty_lines::EditorAction as A;
+    Some(match name {
+        "BeginningOfLine" => A::BeginningOfLine,
+        "EndOfLine" => A::EndOfLine,
+        "ForwardChar" => A::ForwardChar,
+        "BackwardChar" => A::BackwardChar,
+        "ForwardWord" => A::ForwardWord,
+        "BackwardWord" => A::BackwardWord,
+        "KillLine" => A::KillLine,
+        "UnixLineDiscard" => A::UnixLineDiscard,
+        "UnixWordRubout" => A::UnixWordRubout,
+        "KillWord" => A::KillWord,
+        "BackwardKillWord" => A::BackwardKillWord,
+        "DeleteChar" => A::DeleteChar,
+        "BackwardDeleteChar" => A::BackwardDeleteChar,
+        "Yank" => A::Yank,
+        "YankPop" => A::YankPop,
+        "TransposeChars" => A::TransposeChars,
+        "TransposeWords" => A::TransposeWords,
+        "UpcaseWord" => A::UpcaseWord,
+        "DowncaseWord" => A::DowncaseWord,
+        "CapitalizeWord" => A::CapitalizeWord,
+        "Undo" => A::Undo,
+        "RevertLine" => A::RevertLine,
+        "InsertLastArgument" => A::InsertLastArgument,
+        "PreviousHistory" => A::PreviousHistory,
+        "NextHistory" => A::NextHistory,
+        "BeginningOfHistory" => A::BeginningOfHistory,
+        "EndOfHistory" => A::EndOfHistory,
+        "HistorySearchBackward" => A::HistorySearchBackward,
+        "HistorySearchForward" => A::HistorySearchForward,
+        "ReverseSearchHistory" => A::ReverseSearchHistory,
+        "ForwardSearchHistory" => A::ForwardSearchHistory,
+        "ClearScreen" => A::ClearScreen,
+        "Complete" => A::Complete,
+        "MenuComplete" => A::MenuComplete,
+        "QuotedInsert" => A::QuotedInsert,
+        "EditAndExecuteCommand" => A::EditAndExecuteCommand,
+        "AcceptLine" => A::AcceptLine,
+        _ => return None,
+    })
 }
 
 /// `$BASH_ENV` (C105): a non-interactive shell sources the named file
@@ -622,6 +699,7 @@ fn interactive() -> std::io::Result<()> {
         builtins::history_record(entry);
     }
     apply_history_knobs(&mut rl);
+    apply_pending_binds(&mut rl); // ~/.rushrc may have called `bind` (C128)
 
     // Claim the terminal and set up signal handling for job control.
     #[cfg(unix)]
@@ -664,7 +742,13 @@ fn interactive() -> std::io::Result<()> {
         let rprompt = vars::get("RPS1")
             .and_then(|raw| expand::expand_dollars(&raw).ok())
             .unwrap_or_default();
-        match rl.read_line(&prompt, &rprompt, &ShellHooks)? {
+        // `$TMOUT` (C130): idle auto-logout — a read with no complete
+        // line before the deadline returns `TimedOut`.
+        let tmout = vars::get("TMOUT")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .map(std::time::Duration::from_secs);
+        match rl.read_line_timeout(&prompt, &rprompt, &ShellHooks, tmout)? {
             ReadResult::Line(line) => {
                 eof_count = 0;
                 if buffer.is_empty() && line.trim().is_empty() {
@@ -727,16 +811,16 @@ fn interactive() -> std::io::Result<()> {
                         buffer.clear();
                     }
                 }
-                // `history -c`/`-d`/`-r`/`-s` mutated the mirror: rebuild
-                // the editor's own list to match (C103).
+                // `history -c`/`-d`/`-r`/`-s` mutated the mirror: sync the
+                // editor's own list in place — `replace_history` keeps the
+                // kill ring and undo stacks that a fresh `Editor` would
+                // drop (C103, using the rusty_lines API from the handoff).
                 if builtins::history_reset_pending() {
-                    let mut fresh = Editor::new();
-                    for entry in builtins::history_entries() {
-                        fresh.add_history_entry(&entry);
-                    }
-                    rl = fresh;
+                    rl.replace_history(builtins::history_entries());
                 }
                 apply_history_knobs(&mut rl);
+                // A `bind` run this turn takes effect before the next prompt.
+                apply_pending_binds(&mut rl);
             }
             // Ctrl-C at an idle prompt (not a running foreground job — that's
             // a child process under job control, and never reaches here).
@@ -759,9 +843,12 @@ fn interactive() -> std::io::Result<()> {
                 }
                 break;
             }
-            // `$TMOUT` idle timeout — wired in via read_line_timeout in
-            // Batch G2; the plain read_line never returns this.
-            ReadResult::TimedOut => break,
+            // `$TMOUT` idle timeout (C130): bash's "timed out waiting for
+            // input" auto-logout.
+            ReadResult::TimedOut => {
+                eprintln!("\ntimed out waiting for input: auto-logout");
+                break;
+            }
         }
     }
 

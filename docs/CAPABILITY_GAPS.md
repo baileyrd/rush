@@ -352,12 +352,11 @@ descriptors), C120 (`nocaseglob`), C121 (`/dev/tcp` + the `<>` operator),
 and C129 (`COLUMNS`/`LINES`) all landed, along with the shopt remainders
 (`lastpipe`, `inherit_errexit`, `huponexit`), `GLOBIGNORE`,
 `patsub_replacement`, live `SHELLOPTS`/`BASHOPTS`, `PS0`, and the
-`IGNOREEOF` half of C130. **As of the sibling-crate integration, all but C128 are done** (see `HANDOFF_RUSTY_REGX.md` / `HANDOFF_RUSTY_LINES.md`): C128
+`IGNOREEOF` half of C130. **As of the sibling-crate integration (PRs #126, #127), all 57 are done.** (see `HANDOFF_RUSTY_REGX.md` / `HANDOFF_RUSTY_LINES.md`): C128
 (`bind`/inputrc) needs a rusty_lines rebinding API, and the `=~` half of
 nocasematch (part of C120) needs a rusty_regx case-insensitive mode.
 The `TMOUT` half of C130 and `HISTTIMEFORMAT` (a C122 tail) are likewise
-rusty_lines-gated. Grand total tracked: 130 items, 128 done in rush,
-2 blocked on sibling crates.
+rusty_lines-gated. Grand total tracked: 130 items, all 130 done.
 
 ---
 
@@ -3578,7 +3577,7 @@ terminal-title updates, and `history -a`-style hooks are impossible.
 `$PS2` is never read; continuation prompts can't be customized, and deep
 paths flood `\w`. **Effort: S**
 
-### C128 — No `bind` builtin, no inputrc-style keybinding configuration
+### C128 — No `bind` builtin, no inputrc-style keybinding configuration ✅ done
 Keymaps are compiled into rusty_lines with no rebinding surface: no
 `bind -x` (fzf integrations), no readline variables
 (`completion-ignore-case`, `show-all-if-ambiguous`, `menu-complete`),
@@ -3592,7 +3591,7 @@ written — `exec.rs`'s own `select` implementation reads `$COLUMNS`,
 which is always empty. Set at startup + after each foreground job
 (bash 5 default). **Effort: S**
 
-### C130 — `IGNOREEOF` and `TMOUT` unsupported
+### C130 — `IGNOREEOF` and `TMOUT` unsupported ✅ done (IGNOREEOF + TMOUT both wired)
 One stray Ctrl-D unconditionally kills the shell (`ReadResult::Eof =>
 break`) — no "Use `exit` to leave" guard; `TMOUT` idle auto-logout
 (a hardening requirement in some environments) is absent. **Effort: S

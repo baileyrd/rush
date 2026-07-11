@@ -708,12 +708,47 @@ pub fn eval_cmd(args: &[String]) -> Result<i32, String> {
 pub fn exec_cmd(argv: &[String]) -> i32 {
     use std::os::unix::process::CommandExt;
 
-    let Some(program) = argv.get(1) else {
+    // `-a name` (replacement argv[0]), `-l` (login-style: argv[0]
+    // prefixed with `-`), `-c` (empty environment) (C101).
+    let mut argv0: Option<String> = None;
+    let mut login = false;
+    let mut clear_env = false;
+    let mut idx = 1;
+    while let Some(flag) = argv.get(idx).map(String::as_str) {
+        match flag {
+            "-l" => login = true,
+            "-c" => clear_env = true,
+            "-a" => {
+                idx += 1;
+                match argv.get(idx) {
+                    Some(name) => argv0 = Some(name.clone()),
+                    None => {
+                        eprintln!("exec: -a: option requires an argument");
+                        return 2;
+                    }
+                }
+            }
+            "--" => {
+                idx += 1;
+                break;
+            }
+            _ => break,
+        }
+        idx += 1;
+    }
+
+    let Some(program) = argv.get(idx) else {
         return 0;
     };
 
     let mut command = std::process::Command::new(resolve_program(program));
-    command.args(&argv[2..]);
+    command.args(&argv[idx + 1..]);
+    if login && argv0.is_none() {
+        argv0 = Some(format!("-{program}"));
+    }
+    if let Some(name) = argv0 {
+        command.arg0(name);
+    }
     // `env_clear` first: `Command` otherwise inherits the *real* OS
     // environment by default regardless of what's fed to `.envs()`, which
     // only adds/overrides — never removes — entries on top of it. Since
@@ -727,7 +762,9 @@ pub fn exec_cmd(argv: &[String]) -> i32 {
     // there's nothing else in it that could depend on the untouched
     // default inheritance.
     command.env_clear();
-    command.envs(crate::vars::exported());
+    if !clear_env {
+        command.envs(crate::vars::exported());
+    }
 
     let err = command.exec();
     eprintln!("{}: {program}: {err}", argv[0]);
@@ -1860,6 +1897,11 @@ pub(crate) fn pipeline_status(stage_statuses: &[i32]) -> i32 {
 fn resolve_program(program: &str) -> String {
     if program.contains('/') {
         return program.to_string();
+    }
+    // The `hash` table wins over a fresh `$PATH` search (C100) — that's
+    // what makes `hash -p /path name` actually redirect future spawns.
+    if let Some(hashed) = crate::builtins::hashed_path(program) {
+        return hashed;
     }
     match crate::builtins::resolve_in_path(program) {
         Some(path) => path.to_string_lossy().into_owned(),

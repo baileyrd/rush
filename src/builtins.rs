@@ -51,6 +51,16 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "dirs" => Some(dirs_cmd(argv)),
         "unabbr" => Some(unabbr_cmd(argv)),
         "let" => Some(let_cmd(argv)),
+        // `builtin name [args...]` (C92): run the builtin directly, so a
+        // wrapper function can call the thing it shadows without recursing.
+        "builtin" => Some(match argv.get(1) {
+            None => 0,
+            Some(name) if is_builtin(name) => try_run(&argv[1..]).unwrap_or(1),
+            Some(name) => {
+                eprintln!("builtin: {name}: not a shell builtin");
+                1
+            }
+        }),
         _ => other_builtin(argv),
     }
 }
@@ -62,7 +72,7 @@ pub const NAMES: &[&str] = &[
     ":", "false", "exit", "alias", "unalias", "set", "trap", "read", "printf", "shift", "local",
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
-    "readonly", "let",
+    "readonly", "let", "builtin",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -102,13 +112,55 @@ fn other_names() -> &'static [&'static str] {
 /// `echo [-n] [args...]` — join args with spaces; `-n` suppresses the newline.
 /// (No `-e` escape processing, matching the bash default.)
 fn echo(argv: &[String]) -> i32 {
-    let mut args = &argv[1..];
-    let newline = !matches!(args.first(), Some(flag) if flag == "-n");
-    if !newline {
-        args = &args[1..];
+    // Leading flags: `-n` (no newline), `-e` (interpret escapes), `-E`
+    // (don't — the default), clustered in any combination (`-en`, `-nE`)
+    // (C90). The first argument that isn't purely those letters ends flag
+    // parsing and prints literally, matching bash (`echo -x` prints `-x`).
+    let mut newline = true;
+    let mut escapes = false;
+    let mut idx = 1;
+    while idx < argv.len() {
+        let Some(flags) = argv[idx]
+            .strip_prefix('-')
+            .filter(|f| !f.is_empty() && f.chars().all(|c| matches!(c, 'n' | 'e' | 'E')))
+        else {
+            break;
+        };
+        for c in flags.chars() {
+            match c {
+                'n' => newline = false,
+                'e' => escapes = true,
+                'E' => escapes = false,
+                _ => unreachable!(),
+            }
+        }
+        idx += 1;
     }
 
-    let line = args.join(" ");
+    let mut line = argv[idx..].join(" ");
+    if escapes {
+        // `\c` means "stop output here, no newline" in echo (unlike
+        // `$'...'`, where `\cX` is a control character) — find the first
+        // unescaped one before handing off to the shared unescaper.
+        let mut cut = None;
+        let mut chars = line.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some((_, 'c')) => {
+                        cut = Some(i);
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        if let Some(i) = cut {
+            line.truncate(i);
+            newline = false;
+        }
+        line = crate::expand::ansi_unescape(&line);
+    }
     if newline {
         println!("{line}");
     } else {
@@ -467,9 +519,9 @@ thread_local! {
     static DIR_STACK: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The stack as bash's `dirs` shows it: the current directory first, then
-/// the pushed entries, `$HOME` abbreviated to `~`.
-fn dirs_display() -> String {
+/// The stack as bash's `dirs` shows it, one entry per element: the current
+/// directory first, then the pushed entries, `$HOME` abbreviated to `~`.
+fn dirs_entries() -> Vec<String> {
     let mut entries = vec![std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default()];
     DIR_STACK.with(|s| entries.extend(s.borrow().iter().rev().cloned()));
     let home = crate::vars::get("HOME").unwrap_or_default();
@@ -482,8 +534,11 @@ fn dirs_display() -> String {
                 e.clone()
             }
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect()
+}
+
+fn dirs_display() -> String {
+    dirs_entries().join(" ")
 }
 
 fn current_dir_string() -> Option<String> {
@@ -521,8 +576,26 @@ fn pushd_cmd(argv: &[String]) -> i32 {
     0
 }
 
-/// `popd` (C72): drop the current directory, cd to the next stack entry.
-fn popd_cmd(_argv: &[String]) -> i32 {
+/// `popd [+N]` (C72): drop the current directory and cd to the next stack
+/// entry — or, with `+N` (C101), remove the Nth entry of `dirs`' listing
+/// (0 = the current directory, so `+0` is the plain form; higher indices
+/// remove without changing directory, bash's own rule).
+fn popd_cmd(argv: &[String]) -> i32 {
+    if let Some(n) = argv.get(1).and_then(|a| a.strip_prefix('+')).and_then(|r| r.parse::<usize>().ok())
+        && n >= 1
+    {
+        let removed = DIR_STACK.with(|s| {
+            let mut s = s.borrow_mut();
+            let len = s.len();
+            (n <= len).then(|| s.remove(len - n))
+        });
+        if removed.is_none() {
+            eprintln!("popd: +{n}: directory stack index out of range");
+            return 1;
+        }
+        println!("{}", dirs_display());
+        return 0;
+    }
     let Some(next) = DIR_STACK.with(|s| s.borrow_mut().pop()) else {
         eprintln!("popd: directory stack empty");
         return 1;
@@ -534,14 +607,31 @@ fn popd_cmd(_argv: &[String]) -> i32 {
     0
 }
 
-/// `dirs [-c]` (C72): print the stack (`-c` clears it).
+/// `dirs [-c] [-p] [-v]` (C72): print the stack — `-c` clears it, `-p`
+/// one per line, `-v` one per line with the index column (C101).
 fn dirs_cmd(argv: &[String]) -> i32 {
-    if argv.get(1).map(String::as_str) == Some("-c") {
-        DIR_STACK.with(|s| s.borrow_mut().clear());
-        return 0;
+    match argv.get(1).map(String::as_str) {
+        Some("-c") => {
+            DIR_STACK.with(|s| s.borrow_mut().clear());
+            0
+        }
+        Some("-v") => {
+            for (i, e) in dirs_entries().iter().enumerate() {
+                println!(" {i}  {e}");
+            }
+            0
+        }
+        Some("-p") => {
+            for e in dirs_entries() {
+                println!("{e}");
+            }
+            0
+        }
+        _ => {
+            println!("{}", dirs_display());
+            0
+        }
     }
-    println!("{}", dirs_display());
-    0
 }
 
 /// Levenshtein distance, for `cd`'s interactive spelling correction (C72).
@@ -603,6 +693,14 @@ fn cd_fallback_target(target: &str) -> Option<String> {
 }
 
 fn cd(argv: &[String]) -> i32 {
+    // `-L`/`-P`/`-e` are accepted and skipped (C101): rush always tracks
+    // the physical directory (`std::env` has no logical-path notion), so
+    // `-P` is the native behavior and `-L` a documented approximation.
+    let mut argv = argv.to_vec();
+    while argv.len() > 1 && matches!(argv[1].as_str(), "-L" | "-P" | "-e") {
+        argv.remove(1);
+    }
+    let argv = &argv[..];
     // `cd -` goes to $OLDPWD and echoes it, like POSIX `cd`. `cd -N`
     // (C72) jumps to the Nth directory-stack entry (1-based, `dirs`'
     // order), like zsh.
@@ -1042,9 +1140,9 @@ fn test_dispatch(argv: &[String], bracket: bool) -> i32 {
     }
 }
 
-const UNARY_OPS: &[&str] = &["-z", "-n", "-e", "-f", "-d", "-s", "-r", "-w", "-x"];
+const UNARY_OPS: &[&str] = &["-z", "-n", "-e", "-f", "-d", "-s", "-r", "-w", "-x", "-v", "-o", "-R"];
 const BINARY_OPS: &[&str] =
-    &["=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
+    &["=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "<", ">"];
 
 /// `EXPR1 -o EXPR2` (lowest precedence, left-assoc): true if either side is.
 fn test_eval(args: &[String]) -> Result<bool, String> {
@@ -1133,6 +1231,22 @@ fn test_unary(op: &str, s: &str) -> Result<bool, String> {
         "-s" => Path::new(s).metadata().map(|m| m.len() > 0).unwrap_or(false),
         // Permission bits aren't portable; approximate with existence.
         "-r" | "-w" | "-x" => Path::new(s).exists(),
+        // `-v name` — is the variable set (C95)? An `arr[i]` form checks
+        // that one element, same as bash.
+        "-v" => match crate::expand::parse_array_unset_index(s) {
+            Ok(Some(crate::expand::UnsetTarget::Index(a, i))) => {
+                crate::vars::array_get(&a, i).is_some()
+            }
+            Ok(Some(crate::expand::UnsetTarget::Key(a, k))) => {
+                crate::vars::assoc_get(&a, &k).is_some()
+            }
+            _ => crate::vars::get(s).is_some() || crate::vars::array_len(s) > 0,
+        },
+        // `-o name` — is the named shell option on (C95)? Unknown names
+        // are simply false, same as bash.
+        "-o" => named_option_state(s).unwrap_or(false),
+        // `-R name` — set *and* a nameref (C95).
+        "-R" => crate::vars::nameref_target(s).is_some() && crate::vars::get(s).is_some(),
         _ => return Err(format!("unknown unary operator `{op}`")),
     })
 }
@@ -1148,7 +1262,27 @@ fn test_binary(a: &str, op: &str, b: &str) -> Result<bool, String> {
         "-le" => int(a)? <= int(b)?,
         "-gt" => int(a)? > int(b)?,
         "-ge" => int(a)? >= int(b)?,
+        // Lexicographic string comparison (C95) — reached as `\<`/`\>` or
+        // quoted, since an unquoted `<`/`>` is a redirection first.
+        "<" => a < b,
+        ">" => a > b,
         _ => return Err(format!("unknown operator `{op}`")),
+    })
+}
+
+/// The state of a `set -o`-style long-named option, `None` for an unknown
+/// name — shared by `test -o` (C95) and `list_options`' own table.
+fn named_option_state(name: &str) -> Option<bool> {
+    Some(match name {
+        "errexit" => crate::vars::errexit(),
+        "noclobber" => crate::vars::noclobber(),
+        "noexec" => crate::vars::noexec(),
+        "nounset" => crate::vars::nounset(),
+        "pipefail" => crate::vars::pipefail(),
+        "vi" => crate::vars::edit_mode_vi(),
+        "emacs" => !crate::vars::edit_mode_vi(),
+        "xtrace" => crate::vars::xtrace(),
+        _ => return None,
     })
 }
 
@@ -1215,7 +1349,29 @@ fn return_cmd(argv: &[String]) -> i32 {
 fn unset(argv: &[String]) -> i32 {
     use crate::expand::UnsetTarget;
     let mut status = 0;
-    for name in &argv[1..] {
+    // `-f` targets functions, `-v` variables (the default) (C97). bash
+    // with neither flag also falls back to a function when no variable by
+    // that name exists — matched below.
+    let (mode, start) = match argv.get(1).map(String::as_str) {
+        Some("-f") => ('f', 2),
+        Some("-v") => ('v', 2),
+        _ => (' ', 1),
+    };
+    if mode == 'f' {
+        for name in &argv[start..] {
+            crate::func::remove(name);
+        }
+        return 0;
+    }
+    for name in &argv[start..] {
+        if mode == ' '
+            && crate::vars::get(name).is_none()
+            && crate::vars::array_len(name) == 0
+            && crate::func::exists(name)
+        {
+            crate::func::remove(name);
+            continue;
+        }
         match crate::expand::parse_array_unset_index(name) {
             Ok(target) => {
                 // Readonly names can't be unset — whole variable or one
@@ -1769,19 +1925,24 @@ fn command_v(names: &[String], verbose: bool, default_path: bool) -> i32 {
 /// `-t` prints just the one-word classification instead of the full
 /// sentence — useful in a script (`[ "$(type -t foo)" = function ]`).
 fn type_cmd(argv: &[String]) -> i32 {
-    // `-t` (one-word label) and `-a` (every match, C48) — alone or
-    // clustered (`type -at`), same as bash.
+    // `-t` (one-word label), `-a` (every match, C48), and the path forms
+    // `-p` (path only if it'd run the disk file) / `-P` (force a `$PATH`
+    // search, C100) — alone or clustered, same as bash.
     let mut just_kind = false;
     let mut all = false;
+    let mut path_only = false;
+    let mut force_path = false;
     let mut idx = 1;
     while idx < argv.len() {
-        let Some(flags) = argv[idx].strip_prefix('-').filter(|f| !f.is_empty() && f.chars().all(|c| matches!(c, 't' | 'a'))) else {
+        let Some(flags) = argv[idx].strip_prefix('-').filter(|f| !f.is_empty() && f.chars().all(|c| matches!(c, 't' | 'a' | 'p' | 'P'))) else {
             break;
         };
         for c in flags.chars() {
             match c {
                 't' => just_kind = true,
                 'a' => all = true,
+                'p' => path_only = true,
+                'P' => force_path = true,
                 _ => unreachable!(),
             }
         }
@@ -1789,11 +1950,27 @@ fn type_cmd(argv: &[String]) -> i32 {
     }
     let names = &argv[idx..];
     if names.is_empty() {
-        eprintln!("type: usage: type [-at] name ...");
+        eprintln!("type: usage: type [-aptP] name ...");
         return 2;
     }
     let mut status = 0;
     for name in names {
+        if path_only || force_path {
+            // `-p`: print the disk path only when plain `type` would run
+            // it (i.e. no function/builtin/alias shadows it); `-P` prints
+            // it regardless. Nothing found → status 1, silently.
+            let shadowed = crate::func::exists(name) || is_builtin(name);
+            match resolve_in_path(name) {
+                Some(p) if force_path || !shadowed => println!("{}", p.display()),
+                Some(_) => {}
+                // A builtin/function with no disk file is still "found"
+                // for `-p` (status 0, nothing printed) — only a name that
+                // resolves to nothing at all fails.
+                None if force_path || !shadowed => status = 1,
+                None => {}
+            }
+            continue;
+        }
         let kinds = if all {
             classify_all(name)
         } else {
@@ -1811,25 +1988,87 @@ fn type_cmd(argv: &[String]) -> i32 {
     status
 }
 
-/// `hash [-r] [name...]` — rush never caches `$PATH` lookups (each spawn
-/// just searches `$PATH` fresh, so there's no cache to poison), so this is
-/// necessarily a narrower stub: `-r` and a bare `hash` are accepted as
-/// no-ops (status 0), and `hash name...` reports whether each would
-/// currently resolve on `$PATH`, without printing or caching anything.
+thread_local! {
+    // `hash`'s remembered name→path table (C100). Spawns consult it via
+    // `hashed_path` before searching `$PATH`, so `hash -p /path name`
+    // really redirects future lookups of `name`.
+    static HASH_TABLE: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The remembered path for `name`, if `hash` has one — consulted by the
+/// spawn path ahead of the `$PATH` search.
+pub fn hashed_path(name: &str) -> Option<String> {
+    HASH_TABLE.with(|t| t.borrow().get(name).cloned())
+}
+
+/// `hash [-r] [-d name...] [-t name...] [-p path name] [name...]` (C100):
+/// a real remembered-paths table. Plain `hash name` resolves on `$PATH`
+/// and remembers; `-t` reports a remembered path, `-d` forgets one, `-p`
+/// plants an explicit path, `-r` empties the table.
 fn hash_cmd(argv: &[String]) -> i32 {
-    if argv.get(1).map(String::as_str) == Some("-r") {
-        return 0;
+    match argv.get(1).map(String::as_str) {
+        Some("-r") => {
+            HASH_TABLE.with(|t| t.borrow_mut().clear());
+            return 0;
+        }
+        Some("-d") => {
+            let mut status = 0;
+            for name in &argv[2..] {
+                if HASH_TABLE.with(|t| t.borrow_mut().remove(name)).is_none() {
+                    eprintln!("hash: {name}: not found");
+                    status = 1;
+                }
+            }
+            return status;
+        }
+        Some("-t") => {
+            let mut status = 0;
+            for name in &argv[2..] {
+                match hashed_path(name) {
+                    Some(p) => println!("{p}"),
+                    None => {
+                        eprintln!("hash: {name}: not found");
+                        status = 1;
+                    }
+                }
+            }
+            return status;
+        }
+        Some("-p") => {
+            let (Some(path), Some(name)) = (argv.get(2), argv.get(3)) else {
+                eprintln!("hash: -p: option requires an argument");
+                return 2;
+            };
+            HASH_TABLE.with(|t| t.borrow_mut().insert(name.clone(), path.clone()));
+            return 0;
+        }
+        _ => {}
     }
     let names = &argv[1..];
     if names.is_empty() {
-        println!("hash: hash table empty");
+        let entries: Vec<(String, String)> =
+            HASH_TABLE.with(|t| t.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        if entries.is_empty() {
+            println!("hash: hash table empty");
+        } else {
+            println!("hits\tcommand");
+            for (_, path) in entries {
+                println!("   0\t{path}");
+            }
+        }
         return 0;
     }
     let mut status = 0;
     for name in names {
-        if resolve_in_path(name).is_none() {
-            eprintln!("hash: {name}: not found");
-            status = 1;
+        match resolve_in_path(name) {
+            Some(path) => {
+                HASH_TABLE.with(|t| t.borrow_mut().insert(name.clone(), path.display().to_string()));
+            }
+            None => {
+                eprintln!("hash: {name}: not found");
+                status = 1;
+            }
         }
     }
     status
@@ -2424,12 +2663,19 @@ fn trap_cmd(argv: &[String]) -> i32 {
         }
         return 0;
     }
+    // A leading `--` ends option parsing (C101) — load-bearing because
+    // `trap -p`'s own re-runnable output uses it (`trap -- 'cmd' EXIT`).
+    let argv: Vec<&String> =
+        argv.iter().enumerate().filter(|&(i, a)| !(i == 1 && a == "--")).map(|(_, a)| a).collect();
+    if argv.len() < 2 {
+        return 0; // bare `trap --`
+    }
     // Signal specs normalize to the canonical bare name delivery keys on
     // (C44): `15`, `SIGTERM`, `sigterm`, and `TERM` are all the same trap.
     // An invalid spec errors (status 1) without blocking the *other* specs
     // in the same call from registering — matching real bash, verified
     // directly (`trap 'cmd' BOGUS TERM` errors *and* registers TERM).
-    let command = &argv[1];
+    let command = argv[1];
     let mut status = 0;
     for spec in &argv[2..] {
         match crate::trap::normalize_signal_spec(spec) {

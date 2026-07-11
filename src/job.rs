@@ -556,6 +556,9 @@ fn kill_cmd(argv: &[String]) -> i32 {
             }
             Some(spec) => {
                 if let Ok(n) = spec.parse::<c_int>() {
+                    // An exit status over 128 decodes as 128+signal —
+                    // `kill -l $?` on a signal-killed child (C101).
+                    let n = if n > 128 { n - 128 } else { n };
                     match SIGNAL_TABLE.iter().find(|&&(_, s)| s == n) {
                         Some((name, _)) => {
                             println!("{name}");
@@ -582,7 +585,23 @@ fn kill_cmd(argv: &[String]) -> i32 {
     }
     let mut sig = crate::sys::SIGTERM;
     let mut start = 1;
-    if let Some(first) = argv.get(1).and_then(|a| a.strip_prefix('-')) {
+    // `kill -s SIG pid...` — the POSIX signal-by-name spelling (C101).
+    if argv.get(1).map(String::as_str) == Some("-s") {
+        let Some(spec) = argv.get(2) else {
+            eprintln!("kill: -s: option requires an argument");
+            return 1;
+        };
+        match parse_signal(spec) {
+            Some(s) => {
+                sig = s;
+                start = 3;
+            }
+            None => {
+                eprintln!("kill: {spec}: invalid signal specification");
+                return 1;
+            }
+        }
+    } else if let Some(first) = argv.get(1).and_then(|a| a.strip_prefix('-')) {
         match parse_signal(first) {
             Some(s) => {
                 sig = s;

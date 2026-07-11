@@ -29,3 +29,9 @@ pub fn exists(name: &str) -> bool {
 pub fn get(name: &str) -> Option<CommandList> {
     FUNCS.with(|f| f.borrow().get(name).cloned())
 }
+
+/// Remove a function definition (`unset -f`, C97). Returns whether it
+/// existed.
+pub fn remove(name: &str) -> bool {
+    FUNCS.with(|f| f.borrow_mut().remove(name).is_some())
+}

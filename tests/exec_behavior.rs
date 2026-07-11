@@ -3123,3 +3123,85 @@ fn let_builtin() {
     let (out, _) = rush("let 0; echo st=$?; let 1; echo st=$?; let; echo st=$?");
     assert_eq!(out, "st=1\nst=0\nst=1\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn echo_escape_flags() {
+    // C90: `-e`/`-E` and clustered flags printed as literal text.
+    let (out, _) = rush(r#"echo -e "a\tb"; echo -en "x\ty"; echo; echo -E "a\tb"; echo -e "one\ctwo"; echo"#);
+    assert_eq!(out, "a\tb\nx\ty\na\\tb\none\n");
+    // A non-flag dash word still prints literally.
+    let (out, _) = rush("echo -x; echo -- foo");
+    assert_eq!(out, "-x\n-- foo\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_builtin_and_unset_f() {
+    // C92: `builtin` lets a wrapper function call what it shadows.
+    let (out, _) = rush(r#"cd() { builtin cd "$@" && echo wrapped; }; cd /tmp; pwd"#);
+    assert_eq!(out, "wrapped\n/tmp\n");
+    let (_, code) = rush("builtin nosuchbuiltin");
+    assert_eq!(code, 1);
+
+    // C97: `unset -f` removes functions; plain `unset` falls back to the
+    // function when no variable exists.
+    let (out, _) = rush("f(){ :; }; unset -f f; type f 2>/dev/null; echo st=$?; g(){ :; }; unset g; type g 2>/dev/null; echo st=$?");
+    assert_eq!(out, "st=1\nst=1\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_v_o_and_string_comparison() {
+    // C95: `-v`, `-o`, and string `<`/`>` were "too many arguments".
+    let (out, _) = rush(r#"x=1; test -v x; echo $?; test -v nosuch; echo $?; a=(q); test -v "a[0]"; echo $?"#);
+    assert_eq!(out, "0\n1\n0\n");
+    let (out, _) = rush(r#"set -e; test -o errexit; echo $?; set +e; test -o bogus; echo $?"#);
+    assert_eq!(out, "0\n1\n");
+    let (out, _) = rush(r#"[ abc \< abd ]; echo $?; [ b \> a ]; echo $?"#);
+    assert_eq!(out, "0\n0\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn type_path_flags_and_hash_table() {
+    // C100: `type -p`/`-P` and the real `hash` table.
+    let (out, code) = rush("type -p ls; type -p cd; echo st=$?; type -P ls");
+    assert_eq!(out, "/usr/bin/ls\nst=0\n/usr/bin/ls\n");
+    assert_eq!(code, 0);
+
+    let (out, _) = rush("hash ls; hash -t ls; hash -d ls; hash -t ls 2>/dev/null; echo st=$?");
+    assert_eq!(out, "/usr/bin/ls\nst=1\n");
+
+    // `hash -p` really redirects future spawns of that name.
+    let (out, _) = rush("hash -p /bin/echo myecho; myecho works");
+    assert_eq!(out, "works\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn assorted_flag_batch() {
+    // C101: kill -s / kill -l 128+n, trap --, exec -a/-c, cd -P/-L,
+    // dirs -v, popd +N.
+    let (out, code) = rush("kill -l 143; kill -l 15");
+    assert_eq!(out, "TERM\nTERM\n");
+    assert_eq!(code, 0);
+
+    let (_, code) = rush("kill -s TERM $$; echo alive");
+    assert_eq!(code, 143);
+
+    let (out, _) = rush(r#"trap -- "echo T" EXIT"#);
+    assert_eq!(out, "T\n");
+
+    let (out, _) = rush(r#"exec -a customname sh -c 'echo $0'"#);
+    assert_eq!(out, "customname\n");
+
+    let (out, _) = rush("FOO=bar; export FOO; exec -c env");
+    assert_eq!(out, "");
+
+    let (out, _) = rush("cd -P /tmp && pwd; cd -L / && pwd");
+    assert_eq!(out, "/tmp\n/\n");
+
+    let (out, _) = rush("cd /; pushd /tmp >/dev/null; pushd /usr >/dev/null; dirs -v; popd +1 >/dev/null; dirs");
+    assert_eq!(out, " 0  /usr\n 1  /tmp\n 2  /\n/usr /\n");
+}

@@ -25,6 +25,7 @@ mod parser;
 #[cfg(unix)]
 mod sys;
 mod trap;
+mod unparse;
 mod vars;
 
 use std::path::PathBuf;
@@ -398,6 +399,9 @@ fn main() -> std::io::Result<()> {
         },
     );
     vars::set("RUSH_VERSION", env!("CARGO_PKG_VERSION"));
+    // Functions exported by a parent shell (`BASH_FUNC_name%%` entries,
+    // C98) become defined functions.
+    builtins::import_functions();
     // `$IFS` is always *set* in bash (space-tab-newline default) — rush's
     // splitter already treated unset-IFS as that default, but `"$IFS"`
     // itself expanded empty, and a prefix-assignment restore (C75) needs a

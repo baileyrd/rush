@@ -723,8 +723,15 @@ fn kill_cmd(argv: &[String]) -> i32 {
                 }
             }
         } else if let Ok(pid) = target.parse::<pid_t>() {
-            unsafe {
-                crate::sys::kill(pid, sig);
+            // Check the result (C132): `kill -0 pid` is the canonical
+            // process-liveness probe — a failure (ESRCH) must report and
+            // set status 1, not silently succeed.
+            let rc = unsafe { crate::sys::kill(pid, sig) };
+            if rc == -1 {
+                let msg = crate::sys::last_os_error().to_string();
+                let msg = msg.split(" (os error").next().unwrap_or(&msg);
+                eprintln!("kill: ({pid}) - {msg}");
+                status = 1;
             }
         } else {
             eprintln!("kill: {target}: arguments must be job or process IDs");

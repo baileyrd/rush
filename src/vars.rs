@@ -918,6 +918,23 @@ pub fn export(name: &str) {
     });
 }
 
+/// Whether `name` is currently exported (`declare -p`'s `x` letter, C96).
+pub fn is_exported(name: &str) -> bool {
+    let name = &resolve_name(name);
+    VARS.with(|v| v.borrow().get(name.as_str()).is_some_and(|var| var.exported))
+}
+
+/// Drop the export flag without touching the value (`export -n NAME`,
+/// C98) — the variable stays set, but children stop seeing it.
+pub fn unexport(name: &str) {
+    let name = &resolve_name(name);
+    VARS.with(|v| {
+        if let Some(var) = v.borrow_mut().get_mut(name.as_str()) {
+            var.exported = false;
+        }
+    });
+}
+
 /// Replace `name` entirely with a fresh 0-indexed array (`arr=(a b c)`),
 /// discarding whatever was there before — scalar or array — same as any
 /// other whole-variable assignment. Preserves the exported flag mechanically

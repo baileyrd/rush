@@ -187,11 +187,24 @@ fn echo(argv: &[String]) -> i32 {
 /// whole format repeats against the rest, POSIX/bash style: `printf
 /// "%s-%d\n" a 1 b 2 c` is `a-1`, `b-2`, `c-0`.
 fn printf_cmd(argv: &[String]) -> i32 {
-    let Some(format) = argv.get(1) else {
-        eprintln!("printf: usage: printf format [arguments]");
+    // `printf -v var format args...` (C99): format into `var` (or
+    // `arr[i]`) instead of stdout — the standard no-subshell formatter.
+    let (target, fmt_idx) = if argv.get(1).map(String::as_str) == Some("-v") {
+        match argv.get(2) {
+            Some(name) => (Some(name.clone()), 3),
+            None => {
+                eprintln!("printf: -v: option requires an argument");
+                return 2;
+            }
+        }
+    } else {
+        (None, 1)
+    };
+    let Some(format) = argv.get(fmt_idx) else {
+        eprintln!("printf: usage: printf [-v var] format [arguments]");
         return 2;
     };
-    let args = &argv[2..];
+    let args = &argv[fmt_idx + 1..];
 
     let pieces = match printf::parse_format(format) {
         Ok(p) => p,
@@ -229,9 +242,19 @@ fn printf_cmd(argv: &[String]) -> i32 {
         }
     }
 
-    print!("{out}");
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
+    match target {
+        Some(name) => match name.split_once('[') {
+            Some((base, rest)) if rest.ends_with(']') => {
+                crate::vars::key_set(base, &rest[..rest.len() - 1], &out);
+            }
+            _ => crate::vars::set(&name, &out),
+        },
+        None => {
+            print!("{out}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
     status
 }
 
@@ -252,6 +275,8 @@ mod printf {
         width: Option<usize>,
         precision: Option<usize>,
         spec: char,
+        /// `%(fmt)T`'s strftime-style format (C99).
+        time_fmt: Option<String>,
     }
 
     /// Parse a format string into literal chunks (with `\`-escapes already
@@ -360,11 +385,105 @@ mod printf {
             conv.precision = Some(take_digits(chars).unwrap_or(0));
         }
 
+        // `%(fmt)T` (C99): a strftime-style date conversion whose format
+        // rides inside the parens.
+        if chars.peek() == Some(&'(') {
+            chars.next();
+            let mut fmt = String::new();
+            loop {
+                match chars.next() {
+                    Some(')') => break,
+                    Some(c) => fmt.push(c),
+                    None => return Err("`%(': missing `)T'".to_string()),
+                }
+            }
+            if chars.next() != Some('T') {
+                return Err("`%(': expected `T' after `)'".to_string());
+            }
+            conv.spec = 'T';
+            conv.time_fmt = Some(fmt);
+            return Ok(conv);
+        }
         conv.spec = chars.next().ok_or("missing conversion specifier")?;
         if !"diouxXcsbq".contains(conv.spec) {
             return Err(format!("`%{}': invalid conversion specification", conv.spec));
         }
         Ok(conv)
+    }
+
+    /// A strftime subset for `%(fmt)T` (C99), UTC: civil date via the
+    /// days-from-epoch algorithm, no timezone database.
+    fn strftime(fmt: &str, epoch: i64) -> String {
+        const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"];
+        const DAYS: [&str; 7] =
+            ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        let days = epoch.div_euclid(86400);
+        let secs_of_day = epoch.rem_euclid(86400);
+        let (hour, min, sec) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+        // Howard Hinnant's civil-from-days.
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+        let weekday = (days + 4).rem_euclid(7); // epoch day 0 = Thursday
+        let jan1 = {
+            // day-of-year: days since Jan 1 of `year`
+            let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            let cum = [0i64, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+            cum[(m - 1) as usize] + d + i64::from(is_leap && m > 2)
+        };
+        let hour12 = if hour % 12 == 0 { 12 } else { hour % 12 };
+
+        let mut out = String::new();
+        let mut chars = fmt.chars();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('Y') => out.push_str(&year.to_string()),
+                Some('y') => out.push_str(&format!("{:02}", year.rem_euclid(100))),
+                Some('m') => out.push_str(&format!("{m:02}")),
+                Some('d') => out.push_str(&format!("{d:02}")),
+                Some('e') => out.push_str(&format!("{d:2}")),
+                Some('j') => out.push_str(&format!("{jan1:03}")),
+                Some('H') => out.push_str(&format!("{hour:02}")),
+                Some('I') => out.push_str(&format!("{hour12:02}")),
+                Some('M') => out.push_str(&format!("{min:02}")),
+                Some('S') => out.push_str(&format!("{sec:02}")),
+                Some('s') => out.push_str(&epoch.to_string()),
+                Some('p') => out.push_str(if hour < 12 { "AM" } else { "PM" }),
+                Some('a') => out.push_str(&DAYS[weekday as usize][..3]),
+                Some('A') => out.push_str(DAYS[weekday as usize]),
+                Some('b') | Some('h') => out.push_str(&MONTHS[(m - 1) as usize][..3]),
+                Some('B') => out.push_str(MONTHS[(m - 1) as usize]),
+                Some('u') => out.push_str(&(if weekday == 0 { 7 } else { weekday }).to_string()),
+                Some('w') => out.push_str(&weekday.to_string()),
+                Some('T') | Some('X') => out.push_str(&format!("{hour:02}:{min:02}:{sec:02}")),
+                Some('R') => out.push_str(&format!("{hour:02}:{min:02}")),
+                Some('D') => out.push_str(&format!("{m:02}/{d:02}/{:02}", year.rem_euclid(100))),
+                Some('F') => out.push_str(&format!("{year}-{m:02}-{d:02}")),
+                Some('Z') => out.push_str("UTC"),
+                Some('z') => out.push_str("+0000"),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('%') => out.push('%'),
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            }
+        }
+        out
     }
 
     /// `%q`'s quoting: backslash-escape shell-special characters
@@ -421,6 +540,12 @@ mod printf {
         let mut error = None;
         let mut parse_int = || match raw.trim() {
             "" => 0i64,
+            // A leading `'` or `"` means the next character's codepoint —
+            // the standard char-to-number idiom (`printf %d "'A"` → 65)
+            // (C99).
+            s if s.starts_with('\'') || s.starts_with('"') => {
+                s.chars().nth(1).map(|c| c as i64).unwrap_or(0)
+            }
             s => s.parse().unwrap_or_else(|_| {
                 error = Some(format!("{raw}: invalid number"));
                 0
@@ -455,6 +580,20 @@ mod printf {
             'u' => (format!("{}", parse_int() as u64), true),
             'x' => (format!("{:x}", parse_int() as u64), true),
             'X' => (format!("{:X}", parse_int() as u64), true),
+            // `%(fmt)T` (C99): the argument is epoch seconds (`-1`/empty =
+            // now; `-2` approximated as now too — rush doesn't record its
+            // start instant). Rendered in UTC — rush carries no timezone
+            // database, a documented narrowing.
+            'T' => {
+                let secs = match raw.trim() {
+                    "" | "-1" | "-2" => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                    _ => parse_int(),
+                };
+                (strftime(conv.time_fmt.as_deref().unwrap_or("%X"), secs), false)
+            }
             _ => unreachable!("parse_conv only accepts known specifiers"),
         };
 
@@ -789,6 +928,22 @@ fn pwd() -> i32 {
 /// and exports it. The `NAME=value` arg arrives already expanded.
 fn export(argv: &[String]) -> i32 {
     let mut status = 0;
+    // `-n` un-exports (C98); `-f` would export functions, which needs
+    // function-source serialization rush doesn't have yet — warn loudly
+    // instead of silently pretending (a child genuinely won't see it).
+    match argv.get(1).map(String::as_str) {
+        Some("-n") => {
+            for name in &argv[2..] {
+                crate::vars::unexport(name);
+            }
+            return 0;
+        }
+        Some("-f") => {
+            eprintln!("export: -f: function export is not supported yet");
+            return 1;
+        }
+        _ => {}
+    }
     for arg in &argv[1..] {
         match arg.split_once('=') {
             // `export x=2` on a readonly `x` fails with status 1 but does
@@ -1509,6 +1664,60 @@ pub(crate) fn local_from_decls(
 /// function-scoped declaration). No `-p` (print), `-x` (export), `-r`
 /// (readonly), `-i` (integer), or `-f` (functions) — none of those exist
 /// here at all yet.
+/// `declare -p [name...]` / `declare -F [name...]` / `declare -f
+/// [name...]` — the introspection forms (C96). `-p` round-trips variables
+/// in bash's own `declare -flags name="value"` format; `-F` lists
+/// function names (`declare -f name` lines bare, just the name when
+/// filtered — bash's formats). `-f` reports existence by status; printing
+/// a function's *source* needs an AST unparser rush doesn't have yet, a
+/// documented narrowing (existence checks — its most common use — work).
+pub(crate) fn declare_print(argv: &[String]) -> i32 {
+    let mode = argv[1].as_str();
+    let names = &argv[2..];
+    match mode {
+        "-p" => {
+            if names.is_empty() {
+                let mut all = crate::vars::names();
+                all.sort();
+                for name in all {
+                    println!("{}", crate::expand::declare_p_line(&name));
+                }
+                return 0;
+            }
+            let mut status = 0;
+            for name in names {
+                if crate::vars::get(name).is_some() || crate::vars::array_len(name) > 0 {
+                    println!("{}", crate::expand::declare_p_line(name));
+                } else {
+                    eprintln!("declare: {name}: not found");
+                    status = 1;
+                }
+            }
+            status
+        }
+        _ => {
+            // `-F` and `-f` share the status rules; only output differs.
+            if names.is_empty() {
+                for name in crate::func::names() {
+                    println!("declare -f {name}");
+                }
+                return 0;
+            }
+            let mut status = 0;
+            for name in names {
+                if crate::func::exists(name) {
+                    if mode == "-F" {
+                        println!("{name}");
+                    }
+                } else {
+                    status = 1;
+                }
+            }
+            status
+        }
+    }
+}
+
 pub(crate) fn declare_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,

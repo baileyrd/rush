@@ -163,7 +163,14 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
     // inside a function — an accepted, documented simplification; use
     // `local` explicitly for function-scoped declarations.)
     let decl_word = if idx < rc.argv.len() { expand_argv_word(&rc.argv[idx])?.into_iter().next() } else { None };
-    let (argv, local_decls, decl_attrs) = if matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("typeset") | Some("readonly")) {
+    // `declare -p`/`-f`/`-F` are introspection, not declaration (C96):
+    // route them down the plain-argv path so the builtin dispatcher can
+    // see the flag and hand off to `declare_print`.
+    let declare_print_form = matches!(decl_word.as_deref(), Some("declare") | Some("typeset"))
+        && matches!(rc.argv.get(idx + 1).map(|w| w.as_slice()),
+            Some([WordPart::Unquoted(s)]) if matches!(s.as_str(), "-p" | "-f" | "-F"));
+    let (argv, local_decls, decl_attrs) = if !declare_print_form
+        && matches!(decl_word.as_deref(), Some("local") | Some("declare") | Some("typeset") | Some("readonly")) {
         let cmd_name = decl_word.unwrap();
         let mut rest = &rc.argv[idx + 1..];
         // Leading flags apply to every name that follows in this same
@@ -2035,6 +2042,9 @@ fn attr_letters(name: &str) -> String {
     if attrs.upper {
         out.push('u');
     }
+    if crate::vars::is_exported(name) {
+        out.push('x'); // last, matching bash's `declare -irx`-style order
+    }
     out
 }
 
@@ -2068,6 +2078,41 @@ fn reconstruct_assignment(name: &str) -> String {
     } else {
         format!("declare -{flags} {name}={value}")
     }
+}
+
+/// One `declare -p` output line (C96), in bash's own format exactly:
+/// double-quoted values (`declare -- x="5"` — unlike `${v@A}`, which
+/// single-quotes), `--` for a flagless scalar, and the assoc form's
+/// trailing space inside the parens (`([k]="1" )`).
+pub(crate) fn declare_p_line(name: &str) -> String {
+    fn dq(v: &str) -> String {
+        let mut out = String::from("\"");
+        for c in v.chars() {
+            if matches!(c, '"' | '\\' | '$' | '`') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('"');
+        out
+    }
+    let letters = attr_letters(name);
+    let flags = if letters.is_empty() { "--".to_string() } else { format!("-{letters}") };
+    if crate::vars::is_assoc(name) {
+        let elems: String = crate::vars::assoc_keys(name)
+            .into_iter()
+            .map(|k| format!("[{k}]={} ", dq(&crate::vars::assoc_get(name, &k).unwrap_or_default())))
+            .collect();
+        return format!("declare {flags} {name}=({elems})");
+    }
+    if crate::vars::is_indexed_array(name) {
+        let elems: Vec<String> = crate::vars::array_indices(name)
+            .into_iter()
+            .map(|i| format!("[{i}]={}", dq(&crate::vars::array_get(name, i).unwrap_or_default())))
+            .collect();
+        return format!("declare {flags} {name}=({})", elems.join(" "));
+    }
+    format!("declare {flags} {name}={}", dq(&crate::vars::get(name).unwrap_or_default()))
 }
 
 /// Whether `rest` (the text after the variable name inside `${...}`)

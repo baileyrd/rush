@@ -35,3 +35,12 @@ pub fn get(name: &str) -> Option<CommandList> {
 pub fn remove(name: &str) -> bool {
     FUNCS.with(|f| f.borrow_mut().remove(name).is_some())
 }
+
+/// Every defined function name, sorted — `declare -F` (C96).
+pub fn names() -> Vec<String> {
+    FUNCS.with(|f| {
+        let mut names: Vec<String> = f.borrow().keys().cloned().collect();
+        names.sort();
+        names
+    })
+}

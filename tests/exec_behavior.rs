@@ -4116,3 +4116,31 @@ fn local_redeclare_preserves_same_frame_value() {
     // An array re-declared bare keeps its elements.
     assert_eq!(rush("f(){ local -a a=(1 2); local a; echo \"[${a[@]}]\"; }; f").0, "[1 2]\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn declare_export_flag_and_clustered() {
+    // C135: `declare -x` marks a name exported (it was previously dropped),
+    // including clustered with other flags (`-rx`) and via `local -x`.
+    // Verified against bash.
+    assert_eq!(rush("declare -x q=1; echo \"[${q@a}]\"").0, "[x]\n");
+    assert_eq!(rush("declare -rx q=1; echo \"[${q@a}]\"").0, "[rx]\n");
+    assert_eq!(rush("declare -ix n=5; echo \"[${n@a}]\"").0, "[ix]\n");
+    // The export actually reaches a child's environment.
+    assert_eq!(rush("declare -x FOO=bar; printenv FOO").0, "bar\n");
+    assert_eq!(rush("f(){ local -x LV=1; printenv LV; }; f").0, "1\n");
+    // A clustered -r still enforces readonly: reassigning aborts with
+    // status 1 (a readonly-assignment error is fatal in a non-interactive
+    // shell — matching bash, which also produces no further output).
+    let (out, code) = rush("declare -rx r=1; r=2 2>/dev/null; echo $r");
+    assert_eq!((out.as_str(), code), ("", 1));
+}
+
+#[cfg(unix)]
+#[test]
+fn compgen_double_dash_ends_options() {
+    // C135: `compgen … -- WORD` treats WORD as the completion prefix even
+    // when it looks like an option. Verified against bash.
+    assert_eq!(rush("compgen -W \"apple apricot banana\" -- ap").0, "apple\napricot\n");
+    assert_eq!(rush("compgen -W \"one two three\" -- \"\"").0, "one\ntwo\nthree\n");
+}

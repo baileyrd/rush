@@ -2403,6 +2403,9 @@ pub(crate) fn local_from_decls(
         if !declared {
             eprintln!("local: can only be used in a function");
             status = 1;
+        } else if attrs.export {
+            // `local -x` marks the frame-local name exported (C135).
+            crate::vars::export(name);
         }
     }
     status
@@ -2536,6 +2539,12 @@ pub(crate) fn declare_from_decls(
         }
         if attrs.readonly {
             crate::vars::set_attrs(name, crate::vars::Attrs { readonly: true, ..Default::default() });
+        }
+        // `declare -x` marks the name exported (C135) — even a bare
+        // `declare -x name` with no value, so a later assignment inherits
+        // the export, matching bash.
+        if attrs.export {
+            crate::vars::export(name);
         }
         // A bare `declare name` (no flags, no initializer) is a
         // documented no-op here — bash pre-declares it unset, which is
@@ -3185,6 +3194,13 @@ fn parse_comp_spec(args: &[String]) -> Result<(crate::completion::programmable::
             "-u" => spec.actions.push("user".into()),
             "-g" => spec.actions.push("group".into()),
             "-s" => spec.actions.push("signal".into()),
+            // `--` ends option parsing; the rest are operands (so the word
+            // to complete can itself look like an option, e.g.
+            // `compgen -W '…' -- -x`).
+            "--" => {
+                operands.extend(it.map(|a| a.clone()));
+                break;
+            }
             other if other.starts_with('-') => {
                 return Err(format!("{other}: unsupported option"));
             }

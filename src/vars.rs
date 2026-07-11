@@ -64,6 +64,11 @@ pub struct Attrs {
     /// `ATTRS` map (`set_attrs` doesn't copy it); the actual ref → target
     /// mapping lives in `NAMEREFS`.
     pub nameref: bool,
+    /// `declare -x`/`local -x`: mark the name exported. Like `nameref`,
+    /// carried through `Command::decl_attrs` only — export state lives on
+    /// the `Var` itself (`Var::exported`), not in the `ATTRS` map, so it's
+    /// applied via `vars::export` rather than `set_attrs`.
+    pub export: bool,
 }
 
 impl Attrs {

@@ -173,6 +173,13 @@ mod imp {
         unsafe { libc::fcntl(fd, cmd, arg) }
     }
 
+    /// Poll `fd` for readability with a zero timeout — true if a read would
+    /// not block (data available or EOF). Backs `read -t 0`.
+    pub fn poll_readable(fd: c_int) -> bool {
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        unsafe { libc::poll(&mut pfd, 1, 0) > 0 }
+    }
+
     pub unsafe fn getrlimit(resource: c_int, rlim: *mut rlimit) -> c_int {
         unsafe { libc::getrlimit(resource as _, rlim) }
     }
@@ -253,6 +260,13 @@ mod imp {
 
     pub fn last_os_error() -> std::io::Error {
         std::io::Error::from_raw_os_error(LAST_ERRNO.with(|c| c.get()))
+    }
+
+    /// Poll `fd` for readability with a zero timeout — true if a read would
+    /// not block (data available or EOF). Backs `read -t 0`.
+    pub fn poll_readable(fd: c_int) -> bool {
+        let mut fds = [fd::PollFd { fd, events: fd::POLLIN, revents: 0 }];
+        matches!(fd::poll(&mut fds, 0), Ok(n) if n > 0)
     }
 
     /// Raw `clone(SIGCHLD)` fork (see the module note): sound because rush is

@@ -3474,6 +3474,35 @@ fn shopt_xpg_echo_and_nocasematch() {
 
 #[cfg(unix)]
 #[test]
+fn nocasematch_regex_matching() {
+    // C120's `=~` half: nocasematch reaches the regex engine as REG_ICASE
+    // (rusty_regx::new_posix_ci). Every assertion verified against bash 5.2.
+    let (out, _) = rush("shopt -s nocasematch; [[ ABC =~ ^abc$ ]] && echo yes || echo no");
+    assert_eq!(out, "yes\n");
+    // Folding is per-comparison inside the engine, so BASH_REMATCH reports
+    // the *original* input spans, never folded text.
+    let (out, _) = rush(
+        r#"shopt -s nocasematch; [[ ABC =~ ^(a)(b) ]] && echo "${BASH_REMATCH[1]}${BASH_REMATCH[2]}""#,
+    );
+    assert_eq!(out, "AB\n");
+    // REG_ICASE folds range endpoints (`x` matches `[X-Z]`, `a` still
+    // doesn't) and treats [[:upper:]]/[[:lower:]] as [[:alpha:]] — the
+    // reasons a lowercase-both-sides shim would be wrong here.
+    let (out, _) = rush("shopt -s nocasematch; [[ xbc =~ [X-Z]bc ]] && echo yes || echo no");
+    assert_eq!(out, "yes\n");
+    let (out, _) = rush("shopt -s nocasematch; [[ abc =~ [X-Z]bc ]] && echo yes || echo no");
+    assert_eq!(out, "no\n");
+    let (out, _) = rush("shopt -s nocasematch; [[ ABC =~ [[:lower:]]bc ]] && echo yes || echo no");
+    assert_eq!(out, "yes\n");
+    // Folding is opt-in: without (or after unsetting) nocasematch, `=~`
+    // stays case-sensitive.
+    let (out, _) =
+        rush("shopt -s nocasematch; shopt -u nocasematch; [[ ABC =~ ^abc$ ]] && echo yes || echo no");
+    assert_eq!(out, "no\n");
+}
+
+#[cfg(unix)]
+#[test]
 fn ps4_expansion_and_wait_jobs_flags() {
     // C109: $PS4 wasn't expanded for xtrace.
     let (err, _) = rush_stderr(r#"PS4="+${LINENO}: "; set -x; echo hi"#);

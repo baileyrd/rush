@@ -1191,10 +1191,19 @@ fn eval_cond(ast: &crate::parser::CondAst) -> Result<bool, String> {
                 // as an empty string); on a failed match the array is
                 // *unset* — both verified against bash. An invalid regex
                 // is an evaluation error (status 2, script continues).
+                //
+                // Under `nocasematch` (C120) the engine's REG_ICASE mode
+                // does the folding — not a lowercased-input shim like
+                // `==`/`case` use, which would break `[X-Z]`-style classes
+                // and report folded text in BASH_REMATCH.
                 "=~" => {
                     let pattern = crate::expand::expand_cond_regex(rhs)?;
-                    let re = rusty_regx::Regex::new_posix(&pattern)
-                        .map_err(|e| format!("invalid regex: {e}"))?;
+                    let re = if crate::vars::shopt("nocasematch") {
+                        rusty_regx::Regex::new_posix_ci(&pattern)
+                    } else {
+                        rusty_regx::Regex::new_posix(&pattern)
+                    }
+                    .map_err(|e| format!("invalid regex: {e}"))?;
                     match re.captures(&l) {
                         Some(caps) => {
                             let groups: Vec<String> = (0..caps.len())

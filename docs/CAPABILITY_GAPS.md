@@ -3513,11 +3513,20 @@ hard errors (only Q/E/a/A exist). `$"hello"` prints a stray `$`.
 produces literal backslash text. (`\n`/`\t`/`\e` already work.)
 **Effort: S**
 
-### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108)
+### C120 — `nocaseglob` / `nocasematch` behaviors (see also C108) ✅ nocasematch done (`case`/`==`/`=~`); nocaseglob still open
 `shopt -s nocasematch; [[ ABC == abc ]]` unreachable — tracked with the
 shopt table in C108 but called out separately because it changes
 matching *semantics* in `[[ ]]`/`case`/globs, not just an option table
 entry. **Effort: M** (glob and pattern matchers need a case-fold mode)
+
+*Update:* `nocasematch` now covers all three pattern contexts. `case`
+and `[[ == ]]` fold via `match_nocase_aware` (PR #113); `[[ =~ ]]` uses
+the engine's `REG_ICASE` mode (`rusty_regx::Regex::new_posix_ci`,
+rusty_regx PR #7) rather than a lowercased-input shim, so range
+endpoints fold (`[X-Z]` matches `x`), `[[:upper:]]`/`[[:lower:]]` behave
+as `[[:alpha:]]` (glibc's rule), and `BASH_REMATCH` keeps the original
+input case — all differentially verified against bash 5.2. Remaining:
+`nocaseglob` for filename globbing.
 
 ### C121 — `/dev/tcp/host/port` and `/dev/udp` pseudo-devices not intercepted
 Redirections to them hit the kernel (ENOENT) instead of opening a

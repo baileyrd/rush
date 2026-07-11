@@ -3752,11 +3752,20 @@ A fresh probe over glob/redirection/arithmetic/quoting/read/builtin corners
 - Fixed earlier in this pass: `declare -x`/`local -x` export (was dropped);
   `compgen … --` end-of-options.
 
+The `read` cluster is now closed too:
+
+- **`read -t 0`** is a readiness poll (via `poll(2)`): it consumes no input
+  and leaves the variables untouched, exiting 0 when a read would not block
+  (data available or EOF) and non-zero otherwise. Previously it either
+  reported "no data" at EOF or armed a 0-second timeout that fired a spurious
+  SIGALRM (exit 142).
+- **`read -d ''`** (NUL delimiter) now trims trailing `$IFS` whitespace from
+  the absorbed remainder, like any `read`, so a newline-terminated body
+  doesn't retain its trailing newline. The same fix corrects trailing-
+  whitespace retention for any multi-field read (`read a b <<< "1 2 3   "`).
+
 Minor, still-open (documented, low-value):
 
-- `read -t 0` returns 1 on an at-EOF fd where bash returns 0 (the
-  "input available?" poll semantics differ at EOF).
-- `read -d ''` (NUL delimiter) keeps a trailing newline bash strips.
 - A quoted string inside `$(( ))` (`$(( x ? "a" : "b" ))`) errors instead
   of treating the quotes as bash does (the quoted token as a bare
   identifier → 0). Rare.

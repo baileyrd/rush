@@ -1420,6 +1420,13 @@ fn read_cmd(argv: &[String]) -> i32 {
         names.push("REPLY");
     }
 
+    // `read -t 0` (C89): a readiness poll — consume no input and leave the
+    // variables untouched; exit 0 if a read would not block (data available
+    // or EOF on the fd), non-zero otherwise. Matches bash.
+    if opts.timeout == Some(0.0) {
+        return if crate::sys::poll_readable(opts.fd) { 0 } else { 1 };
+    }
+
     // Prompt only when the input is a terminal, like bash.
     let tty = unsafe { crate::sys::isatty(opts.fd) } == 1;
     if let Some(prompt) = &opts.prompt
@@ -1884,8 +1891,15 @@ fn assign_read_fields(names: &[&str], line: &[u8], fields: &[ReadField]) {
         for (name, f) in names[..n_names - 1].iter().zip(fields) {
             crate::vars::set(name, &String::from_utf8_lossy(&line[f.start..f.end]));
         }
+        // The last name absorbs the remainder with internal separators
+        // intact, but trailing `$IFS` whitespace is trimmed — so it ends at
+        // the last field's end, not the raw end of the line. This matters
+        // when the line itself carries trailing whitespace, e.g. a `-d ''`
+        // (NUL-delimited) read of newline-terminated text (verified against
+        // bash).
         let overflow_start = fields[n_names - 1].start;
-        let value = String::from_utf8_lossy(&line[overflow_start..]).into_owned();
+        let overflow_end = fields.last().map_or(line.len(), |f| f.end);
+        let value = String::from_utf8_lossy(&line[overflow_start..overflow_end]).into_owned();
         crate::vars::set(names[n_names - 1], &value);
     }
 }

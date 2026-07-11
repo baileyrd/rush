@@ -4166,3 +4166,22 @@ fn backtick_command_substitution() {
     // Nested backticks via the `\\`` escape.
     assert_eq!(rush("n=`echo \\`echo deep\\``; echo $n").0, "deep\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn read_poll_and_delimiter_trimming() {
+    // `read -t 0` polls for readiness without consuming input: exit 0 when a
+    // read would not block (data or EOF present), non-zero otherwise, and the
+    // variables are left untouched. Verified against bash.
+    assert_eq!(rush("read -t 0 </dev/null; echo $?").0, "0\n");
+    assert_eq!(rush("echo data | { read -t 0; echo $?; }").0, "0\n");
+    assert_eq!(rush("read -t 0 x </dev/null; echo \"[${x-unset}]\"").0, "[unset]\n");
+
+    // `read -d ''` (NUL delimiter) still trims trailing $IFS whitespace from
+    // the absorbed remainder, like any read — so a newline-terminated body
+    // doesn't keep its trailing newline.
+    assert_eq!(rush_stdin(r#"read -d "" x; echo "[$x]""#, "l1\nl2\n").0, "[l1\nl2]\n");
+    assert_eq!(rush_stdin(r#"read -d "" x; echo "${#x}""#, "a\nb\n\n").0, "3\n");
+    // The same trailing-whitespace trim applies to an ordinary multi-field read.
+    assert_eq!(rush(r#"read a b <<< "1 2 3   "; echo "[$b]""#).0, "[2 3]\n");
+}

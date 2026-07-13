@@ -393,6 +393,22 @@ fn main() -> std::io::Result<()> {
     for (name, value) in std::env::vars() {
         vars::set_exported(&name, &value);
     }
+    // Windows' own environment block can store this as "Path" (or another
+    // casing) rather than POSIX's "PATH" — the loop above seeds whatever
+    // casing `std::env::vars()`'s enumeration happens to report, but every
+    // `PATH` lookup in this shell (`vars::get("PATH")`) is a literal,
+    // case-sensitive match — POSIX correctness: `$PATH` and `$path` really
+    // are different variables, so that can't change. `std::env::var`
+    // itself resolves case-insensitively on Windows (`GetEnvironmentVariableW`),
+    // so re-seeding straight through it lands the value under the exact
+    // name every PATH lookup here expects, whatever case it actually
+    // arrived in. Without this, external-command resolution silently
+    // finds nothing at all on Windows: `vars::get("PATH")` sees `None`,
+    // not merely a differently-cased miss.
+    #[cfg(not(unix))]
+    if let Ok(path) = std::env::var("PATH") {
+        vars::set_exported("PATH", &path);
+    }
 
     // `$$` — capture the original shell pid before any subshell fork, so
     // it stays stable in `( )` (C132; `$BASHPID` tracks the live pid).

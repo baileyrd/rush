@@ -727,7 +727,14 @@ fn command_type_and_hash_builtins() {
     assert_eq!(rush("f() { :; }; command -v f").0, "f\n");
     assert_eq!(rush("command -v cd").0, "cd\n");
     let (out, status) = rush("command -v ls");
-    assert!(out.trim_end().ends_with("/ls"), "got: {out:?}");
+    // A resolved path's file stem is "ls" everywhere — off Unix it's
+    // "ls.EXE" (or another `%PATHEXT%` suffix), so checking the raw string
+    // ending for a Unix-style "/ls" doesn't hold there.
+    let stem = std::path::Path::new(out.trim_end())
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase);
+    assert_eq!(stem.as_deref(), Some("ls"), "got: {out:?}");
     assert_eq!(status, 0);
     let (out, status) = rush("command -v rush_nonexistent_cmd_xyz");
     assert_eq!(out, "");
@@ -1033,8 +1040,10 @@ fn source_and_dot_builtin() {
 
     // `.` runs the file in the current environment: variables and functions
     // it defines stick around afterward, and `source` is a plain synonym.
-    assert_eq!(rush(&format!(". {file}; echo $FOO; greet world")).0, "bar\nhi world\n");
-    assert_eq!(rush(&format!("source {file}; echo $FOO")).0, "bar\n");
+    // Single-quoted (C51-agnostic): an unquoted Windows path's `\`
+    // separators would otherwise be read as escapes and stripped.
+    assert_eq!(rush(&format!(". '{file}'; echo $FOO; greet world")).0, "bar\nhi world\n");
+    assert_eq!(rush(&format!("source '{file}'; echo $FOO")).0, "bar\n");
 
     // With no extra args, the caller's own positional params show through
     // unchanged; extra args temporarily replace them, restored afterward.
@@ -1042,11 +1051,11 @@ fn source_and_dot_builtin() {
     std::fs::write(&args_path, "echo \"args:$#:$*\"\n").unwrap();
     let args_file = args_path.to_str().unwrap();
     assert_eq!(
-        rush(&format!("f() {{ . {args_file}; echo \"after:$#:$*\"; }}; f a b c")).0,
+        rush(&format!("f() {{ . '{args_file}'; echo \"after:$#:$*\"; }}; f a b c")).0,
         "args:3:a b c\nafter:3:a b c\n"
     );
     assert_eq!(
-        rush(&format!("f() {{ . {args_file} x y; echo \"after:$#:$*\"; }}; f a b c")).0,
+        rush(&format!("f() {{ . '{args_file}' x y; echo \"after:$#:$*\"; }}; f a b c")).0,
         "args:2:x y\nafter:3:a b c\n"
     );
 
@@ -1056,7 +1065,7 @@ fn source_and_dot_builtin() {
     let ret_path = std::env::temp_dir().join(format!("rush_source_return_{}.sh", std::process::id()));
     std::fs::write(&ret_path, "echo before\nreturn 5\necho after\n").unwrap();
     let ret_file = ret_path.to_str().unwrap();
-    let (out, status) = rush(&format!(". {ret_file}; echo \"status=$?\"; echo done"));
+    let (out, status) = rush(&format!(". '{ret_file}'; echo \"status=$?\"; echo done"));
     assert_eq!(out, "before\nstatus=5\ndone\n");
     assert_eq!(status, 0);
 
@@ -1064,7 +1073,7 @@ fn source_and_dot_builtin() {
     std::fs::write(&brk_path, "echo in-lib\nbreak\necho unreached\n").unwrap();
     let brk_file = brk_path.to_str().unwrap();
     assert_eq!(
-        rush(&format!("for i in 1 2 3; do . {brk_file}; echo unreached-loop-body; done; echo after-loop")).0,
+        rush(&format!("for i in 1 2 3; do . '{brk_file}'; echo unreached-loop-body; done; echo after-loop")).0,
         "in-lib\nafter-loop\n"
     );
 

@@ -822,10 +822,11 @@ pub fn source_file(name: &str, args: &[String]) -> Result<i32, String> {
     Ok(returned.unwrap_or(result?))
 }
 
-/// Resolve a `source`/`.` filename: a bare name (no `/`) is searched on
-/// `$PATH` for a readable file; anything else is used as a literal path.
+/// Resolve a `source`/`.` filename: a bare name (no path separator) is
+/// searched on `$PATH` for a readable file; anything else is used as a
+/// literal path.
 fn resolve_source_path(name: &str) -> Option<std::path::PathBuf> {
-    if name.contains('/') {
+    if crate::builtins::looks_like_path(name) {
         let p = std::path::Path::new(name);
         return p.is_file().then(|| p.to_path_buf());
     }
@@ -1320,7 +1321,7 @@ fn command_bypass(cmd: &Command) -> Option<Command> {
             // Leave the name untouched: with no `/` and no default-path
             // hit, the spawn fails with the ordinary "command not found"
             // (127) path.
-            None if !inner.argv[0].contains('/') => {
+            None if !crate::builtins::looks_like_path(&inner.argv[0]) => {
                 inner.argv[0] = format!("{}/", inner.argv[0]); // guaranteed NotFound, skips PATH search
             }
             None => {}
@@ -1405,7 +1406,7 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
             && crate::vars::interactive()
             && crate::vars::shopt("autocd")
             && std::path::Path::new(&cmd.argv[0]).is_dir()
-            && (cmd.argv[0].contains('/')
+            && (crate::builtins::looks_like_path(&cmd.argv[0])
                 || crate::builtins::resolve_in_path(&cmd.argv[0]).is_none())
         {
             println!("cd -- {}", cmd.argv[0]);
@@ -1431,7 +1432,7 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
             // twin of a builtin (`/bin/echo` for `echo`) counts.
             matches!(s, Stage::Simple(c)
                 if c.argv.first().is_some_and(|n| !crate::func::exists(n)
-                    && (n.contains('/') || crate::builtins::resolve_in_path(n).is_some())))
+                    && (crate::builtins::looks_like_path(n) || crate::builtins::resolve_in_path(n).is_some())))
         })
     {
         let head =
@@ -2248,7 +2249,7 @@ pub(crate) fn pipeline_status(stage_statuses: &[i32]) -> i32 {
 /// missing command already gets, without a second error path to keep
 /// consistent with it.
 fn resolve_program(program: &str) -> String {
-    if program.contains('/') {
+    if crate::builtins::looks_like_path(program) {
         return program.to_string();
     }
     // The `hash` table wins over a fresh `$PATH` search (C100) — that's

@@ -2844,13 +2844,12 @@ fn classify_all(name: &str) -> Vec<Kind> {
     if is_builtin(name) {
         kinds.push(Kind::Builtin);
     }
-    if name.contains('/') {
+    if looks_like_path(name) {
         kinds.extend(resolve_in_path(name).map(Kind::File));
     } else if let Some(path) = crate::vars::get("PATH") {
         kinds.extend(
             std::env::split_paths(&path)
-                .map(|dir| dir.join(name))
-                .filter(|c| is_executable_file(c))
+                .filter_map(|dir| find_executable(&dir.join(name)))
                 .map(Kind::File),
         );
     }
@@ -2875,15 +2874,22 @@ pub(crate) fn resolve_in_default_path(name: &str) -> Option<std::path::PathBuf> 
     resolve_in_path_string(name, Some("/bin:/usr/bin".to_string()))
 }
 
+/// Whether `name` names an explicit path rather than a bare word to search
+/// `$PATH` for. A literal `/` always counts; off Unix, so does the
+/// platform's own separator (`\`), so a Windows-native absolute path
+/// (`C:\lib.sh`, no `/` in sight) isn't misread as a `$PATH`-searched
+/// command name. `MAIN_SEPARATOR` is `/` on Unix too, so this reduces to a
+/// single check there.
+pub(crate) fn looks_like_path(name: &str) -> bool {
+    name.contains('/') || name.contains(std::path::MAIN_SEPARATOR)
+}
+
 fn resolve_in_path_string(name: &str, path: Option<String>) -> Option<std::path::PathBuf> {
-    if name.contains('/') {
-        let p = Path::new(name);
-        return is_executable_file(p).then(|| p.to_path_buf());
+    if looks_like_path(name) {
+        return find_executable(Path::new(name));
     }
     let path = path?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable_file(candidate))
+    std::env::split_paths(&path).find_map(|dir| find_executable(&dir.join(name)))
 }
 
 #[cfg(unix)]
@@ -2895,6 +2901,35 @@ fn is_executable_file(p: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable_file(p: &Path) -> bool {
     p.is_file()
+}
+
+/// Resolve `candidate` to an actual file on disk. Unix: just the
+/// executable-bit check. Off Unix, a bare name (`echo`, `cat`, …) has no
+/// executable form of its own on disk — Windows executables always carry
+/// an extension — so try each `%PATHEXT%` suffix in turn (default
+/// `.COM;.EXE;.BAT;.CMD`), the same search order `CreateProcess` itself
+/// uses for an extensionless name. Without this, every external command
+/// (including the coreutils Git for Windows ships, which is what most of
+/// this shell's own test suite runs against there) would silently fail to
+/// resolve.
+#[cfg(unix)]
+fn find_executable(p: &Path) -> Option<std::path::PathBuf> {
+    is_executable_file(p).then(|| p.to_path_buf())
+}
+
+#[cfg(not(unix))]
+fn find_executable(p: &Path) -> Option<std::path::PathBuf> {
+    if is_executable_file(p) {
+        return Some(p.to_path_buf());
+    }
+    if p.extension().is_some() {
+        return None;
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    pathext.split(';').map(str::trim).filter(|e| !e.is_empty()).find_map(|ext| {
+        let candidate = p.with_extension(ext.trim_start_matches('.'));
+        is_executable_file(&candidate).then_some(candidate)
+    })
 }
 
 /// `command [-v|-V] name [args...]` — with `-v`/`-V`, describes how `name`

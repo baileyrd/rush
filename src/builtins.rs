@@ -1424,11 +1424,11 @@ fn read_cmd(argv: &[String]) -> i32 {
     // variables untouched; exit 0 if a read would not block (data available
     // or EOF on the fd), non-zero otherwise. Matches bash.
     if opts.timeout == Some(0.0) {
-        return if crate::sys::poll_readable(opts.fd) { 0 } else { 1 };
+        return if fd_poll_readable(opts.fd) { 0 } else { 1 };
     }
 
     // Prompt only when the input is a terminal, like bash.
-    let tty = unsafe { crate::sys::isatty(opts.fd) } == 1;
+    let tty = fd_is_tty(opts.fd);
     if let Some(prompt) = &opts.prompt
         && tty
     {
@@ -1685,9 +1685,12 @@ fn read_logical_line(opts: &ReadOpts) -> (Vec<u8>, Vec<bool>, i32) {
 
     let finish = |line: Vec<u8>, protected: Vec<bool>, status: i32| {
         if let Some((setfl, flags)) = restore_flags {
+            #[cfg(unix)]
             unsafe {
                 crate::sys::fcntl(opts.fd, setfl, flags);
             }
+            #[cfg(not(unix))]
+            let _ = (setfl, flags);
         }
         (line, protected, status)
     };
@@ -1695,10 +1698,7 @@ fn read_logical_line(opts: &ReadOpts) -> (Vec<u8>, Vec<bool>, i32) {
     let read_byte = |deadline: Option<std::time::Instant>| -> Result<Option<u8>, i32> {
         let mut byte = [0u8; 1];
         loop {
-            let n = unsafe {
-                let mut f = std::mem::ManuallyDrop::new(<std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(opts.fd));
-                std::io::Read::read(&mut *f, &mut byte)
-            };
+            let n = read_fd_byte(opts.fd, &mut byte);
             match n {
                 Ok(0) => return Ok(None),
                 Ok(_) => return Ok(Some(byte[0])),
@@ -2052,7 +2052,7 @@ fn test_unary(op: &str, s: &str) -> Result<bool, String> {
             .and_then(|m| Some((m.modified().ok()?, m.accessed().ok()?)))
             .is_some_and(|(mt, at)| mt > at),
         // `-t fd`: the fd is an open terminal.
-        "-t" => s.parse::<i32>().is_ok_and(|fd| unsafe { crate::sys::isatty(fd) } == 1),
+        "-t" => s.parse::<i32>().is_ok_and(fd_is_tty),
         // `-v name` — is the variable set (C95)? An `arr[i]` form checks
         // that one element, same as bash.
         "-v" => match crate::expand::parse_array_unset_index(s) {
@@ -2136,6 +2136,56 @@ fn mode_bit(m: &std::fs::Metadata, bit: u32) -> bool {
 #[cfg(not(unix))]
 fn mode_bit(_m: &std::fs::Metadata, _bit: u32) -> bool {
     false
+}
+
+// `read`/`test -t` platform facade. On Unix these go through the `sys`
+// facade (rusty_libc or libc); on Windows — where rush is foreground-only —
+// they degrade sensibly rather than reference the Unix-only `sys` module.
+
+/// Is `fd` an open terminal? Windows degrades to std's terminal detection
+/// for the standard streams and `false` for any other descriptor.
+#[cfg(unix)]
+fn fd_is_tty(fd: i32) -> bool {
+    unsafe { crate::sys::isatty(fd) == 1 }
+}
+#[cfg(not(unix))]
+fn fd_is_tty(fd: i32) -> bool {
+    use std::io::IsTerminal;
+    match fd {
+        0 => std::io::stdin().is_terminal(),
+        1 => std::io::stdout().is_terminal(),
+        2 => std::io::stderr().is_terminal(),
+        _ => false,
+    }
+}
+
+/// `read -t 0` readiness poll. Windows has no portable fd-level poll and the
+/// whole `-t` deadline path is Linux-only, so it degrades to "ready".
+#[cfg(unix)]
+fn fd_poll_readable(fd: i32) -> bool {
+    crate::sys::poll_readable(fd)
+}
+#[cfg(not(unix))]
+fn fd_poll_readable(_fd: i32) -> bool {
+    true
+}
+
+/// Read up to `buf.len()` bytes from a raw fd without taking ownership of it.
+/// Windows supports only stdin (fd 0); other descriptors report EOF.
+#[cfg(unix)]
+fn read_fd_byte(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::os::fd::FromRawFd;
+    let mut f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    std::io::Read::read(&mut *f, buf)
+}
+#[cfg(not(unix))]
+fn read_fd_byte(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read as _;
+    if fd == 0 {
+        std::io::stdin().read(buf)
+    } else {
+        Ok(0)
+    }
 }
 
 #[cfg(unix)]

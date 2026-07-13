@@ -588,7 +588,7 @@ fn main() -> std::io::Result<()> {
         // with a pipe or file redirected onto stdin it reads commands from
         // stdin as a *non-interactive* script — so `$-` gets `s`, not `i`,
         // and interactive-only behaviour stays off (matching bash).
-        None if unsafe { crate::sys::isatty(0) } != 1 => {
+        None if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
             vars::set_invoked_with_s();
             let mut src = String::new();
             use std::io::Read as _;

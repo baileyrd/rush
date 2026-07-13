@@ -599,8 +599,13 @@ mod tests {
 
     #[test]
     fn is_directory_checks_the_filesystem_after_stripping_a_trailing_separator() {
-        assert!(is_directory("/tmp"));
-        assert!(is_directory(&format!("/tmp{}", std::path::MAIN_SEPARATOR)));
+        // `/tmp` isn't guaranteed off Unix (on Windows it resolves
+        // drive-relative and usually doesn't exist) — use the real temp dir
+        // instead so this holds on every platform.
+        let tmp_buf = std::env::temp_dir();
+        let tmp = tmp_buf.to_str().unwrap().trim_end_matches(std::path::MAIN_SEPARATOR);
+        assert!(is_directory(tmp));
+        assert!(is_directory(&format!("{tmp}{}", std::path::MAIN_SEPARATOR)));
         assert!(!is_directory("/this/path/should/not/exist/anywhere/hopefully"));
     }
 

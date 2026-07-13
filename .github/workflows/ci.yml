@@ -25,6 +25,13 @@ jobs:
         if: runner.os == 'Windows'
         run: echo "C:\Program Files\Git\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
+      - name: Debug PATH (temporary)
+        if: runner.os == 'Windows'
+        run: |
+          Test-Path "C:\Program Files\Git\usr\bin\cat.exe"
+          Get-Command cat -ErrorAction SilentlyContinue
+          $env:Path -split ';'
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

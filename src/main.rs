@@ -460,6 +460,16 @@ fn main() -> std::io::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // Hidden self-re-exec entry point (`exec::capture_via_self_reexec`):
+    // off Unix, `$(builtin_or_function ...)` spawns this same binary as a
+    // real child to get subshell isolation without `fork`. Checked before
+    // any ordinary flag parsing — this is never a real invocation a user
+    // would type.
+    #[cfg(not(unix))]
+    if args.get(1).map(String::as_str) == Some("--rush-internal-run-builtin") {
+        std::process::exit(exec::run_internal_capture(args[2..].to_vec()));
+    }
+
     // Invocation flags (C104), bash's set: `-c cmd`, `-s` (stdin with
     // positional args — the `curl | sh -s -- args` pipeline shape), `-i`
     // (force interactive), `-l`/`--login`, `-r`/`--restricted`, `-n`

@@ -1893,6 +1893,19 @@ fn capture_pipeline_expanded(raw: &RawPipeline, out: &mut String) -> Result<i32,
         crate::vars::set_last_status(status);
         return Ok(status);
     }
+    // Off Unix there's no `fork` to isolate a builtin/function call the
+    // way `capture_shell_command` does, but self-re-exec gets the same
+    // subshell semantics for free: a real child process, spawned exactly
+    // like an external command already is, just running this one call.
+    #[cfg(not(unix))]
+    if let [Stage::Simple(cmd)] = pipeline.commands.as_slice()
+        && cmd.argv.first().is_some_and(|n| crate::func::exists(n) || builtins::is_builtin(n))
+    {
+        let (status, captured) = capture_via_self_reexec(cmd)?;
+        out.push_str(&captured);
+        crate::vars::set_last_status(status);
+        return Ok(status);
+    }
     let (status, captured) = run(&pipeline, true)?;
     out.push_str(&captured);
     crate::vars::set_last_status(status);
@@ -2017,6 +2030,77 @@ fn capture_shell_command(cmd: &Command) -> Result<(i32, String), String> {
                 }
             }
         }
+    }
+}
+
+/// Off-Unix counterpart to `capture_shell_command`: no `fork` to isolate a
+/// builtin/function call in-process, so re-spawn this same binary instead —
+/// a real child process, hooked up with a piped stdout exactly like an
+/// external command already is (`build_stage`), running just this one call
+/// via the hidden `--rush-internal-run-builtin` entry point (`main.rs`,
+/// `run_internal_capture` below). Genuine subshell isolation for free: a
+/// separate process can't leak variable/option changes back to the parent,
+/// matching bash's own `$(...)` semantics without needing `fork` at all.
+/// A defined function's body rides along via the same `BASH_FUNC_name%%`
+/// encoding `export -f`/`import_functions` already use, set just for this
+/// one spawn regardless of whether it's normally exported — needed since,
+/// unlike `fork`, a fresh process doesn't otherwise know the function
+/// exists. Narrower than the Unix path in one respect: state that lives
+/// only in this process's own memory and was never a shell *variable*
+/// (aliases, other functions the body might call, history) isn't visible
+/// to the child — `$(alias)`/`$(type -a)`-style introspection of that
+/// state won't see it. Ordinary output-producing builtins (`echo`,
+/// `printf`, `pwd`, `true`/`false`, a plain function call, …) are
+/// unaffected, since `cmd.argv` here is already fully expanded before this
+/// point (`crate::expand::expand`, above) — the child needs nothing from
+/// the parent's variable table it wasn't handed directly.
+#[cfg(not(unix))]
+fn capture_via_self_reexec(cmd: &Command) -> Result<(i32, String), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut command = OsCommand::new(exe);
+    command.arg("--rush-internal-run-builtin");
+    command.args(&cmd.argv);
+    command.env_clear();
+    command.envs(crate::vars::exported());
+    for (name, op) in &cmd.assignments {
+        if crate::vars::is_readonly(name) {
+            eprintln!("rush: {name}: readonly variable");
+            continue;
+        }
+        if let Some(value) = prefix_env_value(name, op) {
+            command.env(name, value);
+        }
+    }
+    if let Some(name) = cmd.argv.first()
+        && let Some(body) = crate::func::get(name)
+    {
+        command.env(format!("BASH_FUNC_{name}%%"), crate::unparse::function_export_value(&body));
+    }
+    command.stdout(Stdio::piped());
+    let output = command.output().map_err(|e| e.to_string())?;
+    let status = output.status.code().unwrap_or(1);
+    Ok((status, String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// The child side of `capture_via_self_reexec`'s self-re-exec: run exactly
+/// one builtin or function call (already fully expanded by the parent) and
+/// return its status. Mirrors `capture_shell_command`'s own in-child
+/// dispatch — the only difference is *how* isolation is achieved (a real
+/// process here, `fork` there).
+#[cfg(not(unix))]
+pub(crate) fn run_internal_capture(argv: Vec<String>) -> i32 {
+    let cmd = Command {
+        argv,
+        redirects: Vec::new(),
+        assignments: Vec::new(),
+        heredoc: None,
+        local_decls: Vec::new(),
+        decl_attrs: crate::vars::Attrs::default(),
+    };
+    if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
+        call_function(&cmd.argv).unwrap_or(1)
+    } else {
+        run_builtin_foreground(&cmd).unwrap_or(1)
     }
 }
 

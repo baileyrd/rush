@@ -21,6 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Add Git's usr/bin to PATH (Windows coreutils the test suite runs against)
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\Git\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

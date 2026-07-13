@@ -2406,8 +2406,16 @@ pub(crate) fn build_stage(
             // must persist there); the fd has no CLOEXEC, so the child
             // simply inherits it.
             Redirect::VarFd { name, inner } => {
-                let allocated = allocate_varfd(inner)?;
-                crate::vars::set(name, &allocated.to_string());
+                #[cfg(unix)]
+                {
+                    let allocated = allocate_varfd(inner)?;
+                    crate::vars::set(name, &allocated.to_string());
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = inner;
+                    return Err(format!("{name}: `{{varname}}>` redirection unsupported off Unix"));
+                }
             }
             // For an external child, close/move are pre_exec fd surgery
             // (C111) — same sequencing rules as the extra-fd dups above.
@@ -2684,7 +2692,7 @@ fn open_write(file: &str, mode: crate::parser::RedirMode) -> Result<File, String
 /// background thread that a raw fork could race. There the child's `stdin` is
 /// `None` and this would be a no-op regardless; making it a compile-time no-op
 /// keeps the thread out of the Linux build entirely.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
     if let Some(body) = &cmd.heredoc {
         if let Some(mut stdin) = child.stdin.take() {

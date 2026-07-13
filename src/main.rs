@@ -247,7 +247,12 @@ pub(crate) fn expand_ps1(ps1: &str) -> String {
                 }
                 out.push_str(&prompt_time(if fmt.is_empty() { "%a %b %e %H:%M:%S" } else { &fmt }));
             }
-            Some('j') => out.push_str(&job::count().to_string()),
+            Some('j') => {
+                #[cfg(unix)]
+                out.push_str(&job::count().to_string());
+                #[cfg(not(unix))]
+                out.push('0');
+            }
             Some('!') | Some('#') => {
                 out.push_str(&(builtins::history_entries().len() + 1).to_string())
             }

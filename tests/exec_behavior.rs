@@ -144,6 +144,12 @@ fn pipeline_wires_stdout_to_stdin_across_two_real_processes() {
     assert_eq!(status, 0);
 }
 
+// A builtin's own redirects (`echo one > path`) are wired up via a raw
+// `dup2` around the call (`redirect_stdio`) — Unix-only, per
+// docs/ARCHITECTURE.md's G11 analysis; off Unix they're silently ignored,
+// so `echo` here would print to the test process's own stdout instead of
+// the file.
+#[cfg(unix)]
 #[test]
 fn redirect_write_then_append_then_read_back() {
     let path = std::env::temp_dir().join(format!("rush_exec_test_redirect_{}.txt", std::process::id()));
@@ -257,14 +263,22 @@ fn pipefail_reports_the_rightmost_nonzero_stage() {
     assert_eq!(rush("set -o pipefail; false | true; echo $?").0, "1\n");
     assert_eq!(rush("set -o pipefail; true | false; echo $?").0, "1\n");
     assert_eq!(rush("set -o pipefail; true | true; echo $?").0, "0\n");
-    assert_eq!(
-        rush("set -o pipefail; (exit 3) | (exit 5) | true; echo $?").0,
-        "5\n"
-    );
-    assert_eq!(
-        rush("set -o pipefail; (exit 5) | (exit 3) | (exit 0); echo $?").0,
-        "3\n"
-    );
+
+    // A subshell as one stage among several needs forking that stage
+    // separately from the rest of the pipeline (`job::spawn_compound_stage`)
+    // — Unix-only, per docs/ARCHITECTURE.md's G11 analysis (no Windows
+    // target ever sets `cfg(unix)`, so there's no fork to reach for here).
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            rush("set -o pipefail; (exit 3) | (exit 5) | true; echo $?").0,
+            "5\n"
+        );
+        assert_eq!(
+            rush("set -o pipefail; (exit 5) | (exit 3) | (exit 0); echo $?").0,
+            "3\n"
+        );
+    }
 
     // Applies inside command substitution too, not just a foreground pipeline.
     assert_eq!(rush("set -o pipefail; x=$(false | true); echo $?").0, "1\n");
@@ -530,6 +544,12 @@ fn local_assoc_array_scopes_to_the_function_call() {
     );
 }
 
+// `clone_or_materialize`'s real-pipe path (`make_pipe`) that this locks in
+// is Unix-only — off Unix a piped fd sharing a second descriptor falls
+// back to inherit (see docs/ARCHITECTURE.md's G11 analysis), so stderr
+// would leak straight to the test harness instead of routing through the
+// pipe.
+#[cfg(unix)]
 #[test]
 fn real_fd_routing_for_2_and_1_into_a_pipe() {
     // Regression lock-in for the G10 fix: `2>&1` combined with a pipe used
@@ -3803,6 +3823,12 @@ fn nocaseglob_and_shopt_behaviors() {
     assert_eq!(out, "new\n");
 }
 
+// `/dev/tcp` itself (`net_pseudo_device`) and the fd 3+ handed to `head`
+// here both need Unix-only machinery: the pseudo-device wraps a raw fd
+// (`IntoRawFd`), and passing fd 3+ into an external child goes through
+// `pre_exec`/`dup2` — neither has a Windows equivalent (see
+// docs/ARCHITECTURE.md's G11 analysis).
+#[cfg(unix)]
 #[test]
 fn dev_tcp_pseudo_device() {
     use std::io::{Read, Write};

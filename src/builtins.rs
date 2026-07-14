@@ -2181,10 +2181,26 @@ fn read_fd_byte(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
 #[cfg(not(unix))]
 fn read_fd_byte(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     use std::io::Read as _;
-    if fd == 0 {
+    if fd != 0 {
+        return Ok(0);
+    }
+    let handle = crate::winstdio::get(crate::winstdio::STD_INPUT_HANDLE);
+    if crate::winstdio::is_console(handle) {
+        // Console input: go through std's stdin for its UTF-16 → UTF-8
+        // decoding (`ReadConsoleW`); the console is the shell's own tty,
+        // so sharing std's buffer is harmless there.
         std::io::stdin().read(buf)
     } else {
-        Ok(0)
+        // Redirected (file/pipe — e.g. `read x < file` via the std-handle
+        // swap in `exec::redirect_stdio`): read the live handle directly,
+        // unbuffered — the Windows twin of the Unix arm's borrowed-fd read.
+        // Going through `std::io::stdin()` here would fill its process-wide
+        // BufReader from the redirect target and replay the surplus to
+        // later stdin reads after the redirect is restored.
+        let mut f = std::mem::ManuallyDrop::new(unsafe {
+            <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(handle)
+        });
+        f.read(buf)
     }
 }
 

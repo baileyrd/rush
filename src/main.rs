@@ -27,6 +27,8 @@ mod sys;
 mod trap;
 mod unparse;
 mod vars;
+#[cfg(not(unix))]
+mod winstdio;
 
 use std::path::PathBuf;
 

@@ -383,6 +383,10 @@ fn dynamic_var(name: &str) -> Option<String> {
         // changes inside a forked subshell (rush forks for `( )`).
         #[cfg(unix)]
         "BASHPID" => Some(unsafe { crate::sys::getpid() }.to_string()),
+        // No fork off Unix, so the live pid is always the shell's own —
+        // `std::process::id()` rather than the Unix-only `sys::getpid()`.
+        #[cfg(not(unix))]
+        "BASHPID" => Some(std::process::id().to_string()),
         // Live option reflection (C106's remainder): the currently-on
         // `set -o` names and `shopt` names, colon-joined and sorted.
         "SHELLOPTS" => {

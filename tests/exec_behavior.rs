@@ -1895,7 +1895,6 @@ fn backgrounding_an_unknown_command_does_not_abort_the_script_either() {
     assert_eq!(status, 0);
 }
 
-#[cfg(unix)]
 #[test]
 fn dollar_dollar_expands_to_the_shell_pid() {
     // C41: `echo $$` used to print the literal two-character text `$$`
@@ -4020,6 +4019,27 @@ fn bashpid_and_dollar_stability() {
     // $$ stays the parent's pid, $BASHPID is the live (forked) pid.
     let (out, _) = rush(r#"echo "$(( BASHPID > 0 ))"; ( echo "$(( $$ == PARENT ))" ) 2>/dev/null; outer=$$; ( [ "$$" = "$outer" ] && echo same; [ "$BASHPID" != "$outer" ] && echo differs )"#);
     assert!(out.contains("same\n") && out.contains("differs\n"), "got: {out:?}");
+}
+
+#[test]
+fn bashpid_matches_shell_pid_at_top_level() {
+    // The cross-platform slice of C132: at top level (no subshell fork
+    // involved), `$BASHPID` is the shell's own pid — exactly `$$`. Off
+    // Unix this pins the `std::process::id()` fallback arm.
+    let (out, _) = rush(r#"[ "$BASHPID" = "$$" ] && echo match"#);
+    assert_eq!(out, "match\n");
+}
+
+#[test]
+fn recursive_function_with_command_substitution() {
+    // Windows parity (G11): function dispatch used to fail off Unix with
+    // "program not found". A recursive body exercises function dispatch,
+    // arithmetic, and `$(...)` of a shell function (which off Unix runs
+    // via the self-re-exec fallback) all at once.
+    let (out, status) = rush(
+        "fact() { if [ $1 -le 1 ]; then echo 1; else echo $(( $1 * $(fact $(($1-1))) )); fi; }; fact 5",
+    );
+    assert_eq!((out.as_str(), status), ("120\n", 0));
 }
 
 #[cfg(unix)]

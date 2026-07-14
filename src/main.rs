@@ -379,6 +379,12 @@ fn main() -> std::io::Result<()> {
     #[cfg(unix)]
     trap::install_signal_handlers();
 
+    // Remember the original stdin handle before any redirect can swap the
+    // std-handle slot — how `read` later tells "fd 0 is a redirect target"
+    // apart from "fd 0 is the shell's own stdin" (see `winstdio`).
+    #[cfg(not(unix))]
+    winstdio::capture_startup_stdin();
+
     // Seed the shell's own variable table with the inherited process
     // environment, marked exported — matching real bash: an env-inherited
     // variable stays exported through a later *plain* reassignment (no

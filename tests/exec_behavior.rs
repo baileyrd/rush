@@ -196,6 +196,18 @@ fn builtin_stderr_and_combined_redirects_reach_the_file() {
 }
 
 #[test]
+fn read_builtin_shares_the_interactive_editors_input_stream() {
+    // In the interactive REPL, `read`'s input line arrives on the same
+    // stream the line editor reads command lines from. Off Unix `read`
+    // must go through the same `std::io::stdin()` buffer the editor uses
+    // whenever fd 0 is *not* redirected — a raw handle read here once left
+    // `read` empty-handed and handed its input line to the editor, which
+    // then tried to run `hi` as a command.
+    let (out, _) = rush_interactive("read x\nhi\necho \"[$x]\"\n");
+    assert!(out.contains("[hi]"), "read lost its line to the editor: {out:?}");
+}
+
+#[test]
 fn read_builtin_from_a_redirected_file_is_scoped_to_the_call() {
     // `read x < file` twice must re-read the file from the top both times:
     // the redirect (and any readahead) is scoped to the one call, nothing

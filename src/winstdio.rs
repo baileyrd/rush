@@ -2,7 +2,7 @@
 //! the Windows counterpart of the Unix-only `sys` module, scoped to exactly
 //! what the redirect machinery needs. Declared by hand rather than via
 //! `windows-sys`, for the same minimal-dependency reason `sys` sits on
-//! rusty_libc: three stable, documented kernel32 calls don't justify a crate.
+//! rusty_libc: two stable, documented kernel32 calls don't justify a crate.
 //! (Windows is the only supported non-Unix target; see docs/ARCHITECTURE.md
 //! "Windows strategy".)
 //!
@@ -25,7 +25,6 @@ pub const STD_ERROR_HANDLE: u32 = -12i32 as u32;
 unsafe extern "system" {
     fn GetStdHandle(nstdhandle: u32) -> RawHandle;
     fn SetStdHandle(nstdhandle: u32, hhandle: RawHandle) -> i32;
-    fn GetConsoleMode(hconsolehandle: RawHandle, lpmode: *mut u32) -> i32;
 }
 
 /// The std-handle slot for a shell fd, or `None` for fd 3+ — Windows has no
@@ -51,9 +50,22 @@ pub fn set(slot: u32, handle: RawHandle) -> bool {
     unsafe { SetStdHandle(slot, handle) != 0 }
 }
 
-/// Is `handle` a console (the Windows notion of "a tty")? `GetConsoleMode`
-/// succeeds only on console handles — the canonical detection idiom.
-pub fn is_console(handle: RawHandle) -> bool {
-    let mut mode = 0u32;
-    unsafe { GetConsoleMode(handle, &mut mode) != 0 }
+/// The stdin handle the process started with, captured by `main` before any
+/// redirect can swap the slot. `usize::MAX` = never captured (unit tests),
+/// treated as "not redirected".
+static STARTUP_STDIN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+pub fn capture_startup_stdin() {
+    STARTUP_STDIN.store(get(STD_INPUT_HANDLE) as usize, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Has a redirect (`read x < f`, `exec 0< f`, a here-doc) swapped the stdin
+/// slot away from the process's original handle? Distinguishes "fd 0 is a
+/// redirect target" (read it directly, unbuffered) from "fd 0 is the shell's
+/// own stdin" (read through `std::io::stdin()`, whose buffer the line editor
+/// shares — see `builtins::read_fd_byte`).
+pub fn stdin_is_redirected() -> bool {
+    let captured = STARTUP_STDIN.load(std::sync::atomic::Ordering::Relaxed);
+    captured != usize::MAX && get(STD_INPUT_HANDLE) as usize != captured
 }

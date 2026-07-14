@@ -195,6 +195,11 @@ fn builtin_stderr_and_combined_redirects_reach_the_file() {
     let _ = std::fs::remove_file(&both_path);
 }
 
+// Non-Unix only: pins the Windows `read_fd_byte` arm. (On Unix both the
+// editor and `read` do raw fd-0 reads, and their interleaving over a *pipe*
+// differs from the PTY case this scenario describes — the Unix behavior is
+// covered interactively, not reproducible through `rush_interactive`.)
+#[cfg(not(unix))]
 #[test]
 fn read_builtin_shares_the_interactive_editors_input_stream() {
     // In the interactive REPL, `read`'s input line arrives on the same

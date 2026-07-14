@@ -22,6 +22,13 @@ fn rush(src: &str) -> (String, i32) {
     rush_argv(src, &[])
 }
 
+/// A temp path spliced into shell source must be slash-separated on every
+/// platform: a bare `\` in shell text is an escape character and quote
+/// removal would eat it, and Windows' file APIs accept `/` anyway.
+fn shell_path(path: &std::path::Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
 /// Like [`rush`], but with `rush -c src [argv...]` — `argv[0]` becomes `$0`,
 /// the rest `$1`… (and so `"$@"`).
 fn rush_argv(src: &str, argv: &[&str]) -> (String, i32) {
@@ -144,22 +151,93 @@ fn pipeline_wires_stdout_to_stdin_across_two_real_processes() {
     assert_eq!(status, 0);
 }
 
-// A builtin's own redirects (`echo one > path`) are wired up via a raw
-// `dup2` around the call (`redirect_stdio`) — Unix-only, per
-// docs/ARCHITECTURE.md's G11 analysis; off Unix they're silently ignored,
-// so `echo` here would print to the test process's own stdout instead of
-// the file.
-#[cfg(unix)]
+// A builtin's own redirects (`echo one > path`) are wired up around the
+// call by `redirect_stdio` — `dup2` on Unix, a std-handle-slot swap on
+// Windows (see docs/ARCHITECTURE.md's G11 analysis).
 #[test]
 fn redirect_write_then_append_then_read_back() {
     let path = std::env::temp_dir().join(format!("rush_exec_test_redirect_{}.txt", std::process::id()));
-    let path = path.to_str().unwrap();
+    let path = shell_path(&path);
 
     let (_, status) = rush(&format!("echo one > {path}; echo two >> {path}"));
     assert_eq!(status, 0);
     assert_eq!(rush(&format!("cat < {path}")).0, "one\ntwo\n");
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn builtin_stderr_and_combined_redirects_reach_the_file() {
+    let dir = std::env::temp_dir();
+    let err_path = dir.join(format!("rush_builtin_stderr_{}.txt", std::process::id()));
+    let err_file = shell_path(&err_path);
+
+    // `2>`: a builtin's own error message lands in the file, not on the
+    // shell's stderr — `cd` to a missing directory is the canonical case.
+    let (_, status) = rush(&format!("cd rush_missing_dir_xyz 2> {err_file}"));
+    assert_eq!(status, 1);
+    assert!(
+        std::fs::read_to_string(&err_path).unwrap().contains("rush_missing_dir_xyz"),
+        "cd's error should have been redirected"
+    );
+
+    // `2>&1` after `>`: both streams into one file, bash's ordering rule.
+    let both_path = dir.join(format!("rush_builtin_both_{}.txt", std::process::id()));
+    let both_file = shell_path(&both_path);
+    rush(&format!("echo out > {both_file} 2>&1"));
+    assert_eq!(std::fs::read_to_string(&both_path).unwrap(), "out\n");
+
+    // `&>`: the shorthand spelling.
+    rush(&format!("echo amp &> {both_file}"));
+    assert_eq!(std::fs::read_to_string(&both_path).unwrap(), "amp\n");
+
+    let _ = std::fs::remove_file(&err_path);
+    let _ = std::fs::remove_file(&both_path);
+}
+
+// Non-Unix only: pins the Windows `read_fd_byte` arm. (On Unix both the
+// editor and `read` do raw fd-0 reads, and their interleaving over a *pipe*
+// differs from the PTY case this scenario describes — the Unix behavior is
+// covered interactively, not reproducible through `rush_interactive`.)
+#[cfg(not(unix))]
+#[test]
+fn read_builtin_shares_the_interactive_editors_input_stream() {
+    // In the interactive REPL, `read`'s input line arrives on the same
+    // stream the line editor reads command lines from. Off Unix `read`
+    // must go through the same `std::io::stdin()` buffer the editor uses
+    // whenever fd 0 is *not* redirected — a raw handle read here once left
+    // `read` empty-handed and handed its input line to the editor, which
+    // then tried to run `hi` as a command.
+    let (out, _) = rush_interactive("read x\nhi\necho \"[$x]\"\n");
+    assert!(out.contains("[hi]"), "read lost its line to the editor: {out:?}");
+}
+
+#[test]
+fn read_builtin_from_a_redirected_file_is_scoped_to_the_call() {
+    // `read x < file` twice must re-read the file from the top both times:
+    // the redirect (and any readahead) is scoped to the one call, nothing
+    // buffered may leak into the shell's later stdin reads.
+    let path = std::env::temp_dir().join(format!("rush_read_redir_{}.txt", std::process::id()));
+    std::fs::write(&path, "first\nsecond\n").unwrap();
+    let file = shell_path(&path);
+    let (out, _) = rush(&format!("read a < {file}; read b < {file}; echo \"[$a][$b]\""));
+    assert_eq!(out, "[first][first]\n");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn heredoc_feeds_a_builtin_and_a_bare_redirect_creates_the_file() {
+    // A here-document into an in-process builtin (`read`), no fork involved.
+    let (out, _) = rush("read x <<EOF\nfrom-heredoc\nEOF\necho got:$x");
+    assert_eq!(out, "got:from-heredoc\n");
+
+    // A redirection with no command words creates/truncates the target (C87).
+    let path = std::env::temp_dir().join(format!("rush_bare_redir_{}.txt", std::process::id()));
+    let file = shell_path(&path);
+    let (_, status) = rush(&format!("> {file}"));
+    assert_eq!(status, 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -937,9 +1015,10 @@ fn eval_builtin() {
     assert_eq!(status, 0); // the script's own last command (echo) still succeeds
 }
 
-#[cfg(unix)]
 #[test]
 fn exec_builtin() {
+    // Off Unix `exec CMD` is spawn-wait-exit rather than a true image
+    // replacement — observably the same for everything asserted here.
     // With a command: replaces the process image outright — the captured
     // stdout/exit status are the executed command's own.
     assert_eq!(rush("exec echo hello world"), ("hello world\n".to_string(), 0));
@@ -960,7 +1039,7 @@ fn exec_builtin() {
     // call) — everything printed for the rest of the script goes to the
     // file instead of rush's own stdout.
     let path = std::env::temp_dir().join(format!("rush_exec_redirect_{}.txt", std::process::id()));
-    let file = path.to_str().unwrap();
+    let file = shell_path(&path);
     let (out, status) = rush(&format!("exec > {file}; echo redirected; echo more"));
     assert_eq!(out, "");
     assert_eq!(status, 0);
@@ -970,7 +1049,7 @@ fn exec_builtin() {
     // Same for redirecting the shell's own stdin: a `read` right after
     // picks up the file's contents instead of rush's real stdin.
     let in_path = std::env::temp_dir().join(format!("rush_exec_stdin_{}.txt", std::process::id()));
-    let in_file = in_path.to_str().unwrap();
+    let in_file = shell_path(&in_path);
     std::fs::write(&in_path, "hi\n").unwrap();
     assert_eq!(
         rush(&format!("exec 0<{in_file}; read line; echo got:$line")).0,
@@ -1351,7 +1430,6 @@ fn read_backslash_escaping_and_raw_mode() {
     assert_eq!(rush_stdin("read -r x y; echo \"[$x][$y]\"", "a\\ b c\n").0, "[a\\][b c]\n");
 }
 
-#[cfg(unix)]
 #[test]
 fn while_read_loop_reads_from_a_redirected_file() {
     // The headline C7 case: `read` inside a `while` loop whose *compound*
@@ -1361,30 +1439,31 @@ fn while_read_loop_reads_from_a_redirected_file() {
     // wired to fd 0, so the loop read the shell's real stdin instead).
     let path = std::env::temp_dir().join(format!("rush_read_loop_{}.txt", std::process::id()));
     std::fs::write(&path, "a\nb\nc\n").unwrap();
-    let src = format!("while read line; do echo \"L:$line\"; done < {}", path.to_str().unwrap());
+    let src = format!("while read line; do echo \"L:$line\"; done < {}", shell_path(&path));
     assert_eq!(rush(&src).0, "L:a\nL:b\nL:c\n");
     let _ = std::fs::remove_file(&path);
 }
 
-#[cfg(unix)]
 #[test]
 fn redirect_trailing_a_compound_command_is_applied() {
     let path = std::env::temp_dir().join(format!("rush_compound_redir_{}.txt", std::process::id()));
     std::fs::write(&path, "one\ntwo\n").unwrap();
-    let file = path.to_str().unwrap();
+    let file = shell_path(&path);
 
     // A brace group's own redirect.
     assert_eq!(rush(&format!("{{ cat; }} < {file}")).0, "one\ntwo\n");
     // A subshell's own redirect.
     assert_eq!(rush(&format!("(cat) < {file}")).0, "one\ntwo\n");
-    // Still applies when the compound is also a pipeline stage.
+    // Still applies when the compound is also a pipeline stage. (Unix only:
+    // a compound as one stage of a multi-command pipeline needs fork.)
+    #[cfg(unix)]
     assert_eq!(rush(&format!("(cat) < {file} | tr a-z A-Z")).0, "ONE\nTWO\n");
     // And when the whole compound is captured via `$(...)`.
     assert_eq!(rush(&format!("x=$(cat < {file}); echo \"$x\"")).0, "one\ntwo\n");
 
     // Output redirect trailing a `while` loop.
     let out_path = std::env::temp_dir().join(format!("rush_compound_redir_out_{}.txt", std::process::id()));
-    let out_file = out_path.to_str().unwrap();
+    let out_file = shell_path(&out_path);
     rush(&format!("i=0; while [ $i -lt 2 ]; do echo hi; i=$((i+1)); done > {out_file}"));
     assert_eq!(std::fs::read_to_string(&out_path).unwrap(), "hi\nhi\n");
 
@@ -1895,7 +1974,6 @@ fn backgrounding_an_unknown_command_does_not_abort_the_script_either() {
     assert_eq!(status, 0);
 }
 
-#[cfg(unix)]
 #[test]
 fn dollar_dollar_expands_to_the_shell_pid() {
     // C41: `echo $$` used to print the literal two-character text `$$`
@@ -4020,6 +4098,27 @@ fn bashpid_and_dollar_stability() {
     // $$ stays the parent's pid, $BASHPID is the live (forked) pid.
     let (out, _) = rush(r#"echo "$(( BASHPID > 0 ))"; ( echo "$(( $$ == PARENT ))" ) 2>/dev/null; outer=$$; ( [ "$$" = "$outer" ] && echo same; [ "$BASHPID" != "$outer" ] && echo differs )"#);
     assert!(out.contains("same\n") && out.contains("differs\n"), "got: {out:?}");
+}
+
+#[test]
+fn bashpid_matches_shell_pid_at_top_level() {
+    // The cross-platform slice of C132: at top level (no subshell fork
+    // involved), `$BASHPID` is the shell's own pid — exactly `$$`. Off
+    // Unix this pins the `std::process::id()` fallback arm.
+    let (out, _) = rush(r#"[ "$BASHPID" = "$$" ] && echo match"#);
+    assert_eq!(out, "match\n");
+}
+
+#[test]
+fn recursive_function_with_command_substitution() {
+    // Windows parity (G11): function dispatch used to fail off Unix with
+    // "program not found". A recursive body exercises function dispatch,
+    // arithmetic, and `$(...)` of a shell function (which off Unix runs
+    // via the self-re-exec fallback) all at once.
+    let (out, status) = rush(
+        "fact() { if [ $1 -le 1 ]; then echo 1; else echo $(( $1 * $(fact $(($1-1))) )); fi; }; fact 5",
+    );
+    assert_eq!((out.as_str(), status), ("120\n", 0));
 }
 
 #[cfg(unix)]

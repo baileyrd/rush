@@ -2181,10 +2181,29 @@ fn read_fd_byte(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
 #[cfg(not(unix))]
 fn read_fd_byte(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     use std::io::Read as _;
-    if fd == 0 {
-        std::io::stdin().read(buf)
+    if fd != 0 {
+        return Ok(0);
+    }
+    if crate::winstdio::stdin_is_redirected() {
+        // fd 0 is a redirect target (`read x < file`, a here-doc — the
+        // std-handle swap in `exec::redirect_stdio`): read the live handle
+        // directly, unbuffered — the Windows twin of the Unix arm's
+        // borrowed-fd read. Going through `std::io::stdin()` here would
+        // fill its process-wide BufReader from the redirect target and
+        // replay the surplus to later stdin reads after the restore.
+        let handle = crate::winstdio::get(crate::winstdio::STD_INPUT_HANDLE);
+        let mut f = std::mem::ManuallyDrop::new(unsafe {
+            <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(handle)
+        });
+        f.read(buf)
     } else {
-        Ok(0)
+        // The shell's own stdin: go through std — a console needs its
+        // UTF-16 → UTF-8 decoding (`ReadConsoleW`), and on a *piped* stdin
+        // the interactive line editor reads command lines through this
+        // same shared buffer, so `read` must consume from it too, not
+        // bypass it (raw reads here made `rush -i` on a pipe hand `read`'s
+        // input line to the editor instead).
+        std::io::stdin().read(buf)
     }
 }
 

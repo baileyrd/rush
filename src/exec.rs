@@ -403,21 +403,15 @@ fn run_compound_with_redirects(rc: &RawCompound) -> Result<i32, String> {
         return run_compound(&rc.compound);
     }
     let (redirects, heredoc) = crate::expand::expand_redirects(&rc.redirects)?;
-    #[cfg(unix)]
-    {
-        // Unlike a builtin (which writes straight to the process's own fds),
-        // a compound's body can itself spawn real children (an external
-        // command, a piped stage, a subshell) that inherit fd 0/1/2 by the
-        // usual rules — dup2'ing the *shell's* fds for the duration covers
-        // both that and any builtins/`println!` output inside it uniformly.
-        let _guard = redirect_stdio(&redirects, heredoc.as_deref())?;
-        run_compound(&rc.compound)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (redirects, heredoc);
-        Err("redirects on a compound command are not supported on this platform".into())
-    }
+    // Unlike a builtin (which writes straight to the process's own fds),
+    // a compound's body can itself spawn real children (an external
+    // command, a piped stage, a subshell) that inherit fd 0/1/2 by the
+    // usual rules — redirecting the *shell's* own stdio for the duration
+    // covers both that and any builtins/`println!` output inside it
+    // uniformly (children resolve inherited stdio at spawn on both
+    // platforms: fork inheritance on Unix, `GetStdHandle` on Windows).
+    let _guard = redirect_stdio(&redirects, heredoc.as_deref())?;
+    run_compound(&rc.compound)
 }
 
 pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
@@ -944,10 +938,53 @@ pub fn exec_cmd(argv: &[String]) -> i32 {
     127
 }
 
+/// The non-Unix `exec`: Windows has no `execve`, so "replace the process
+/// image" is emulated the way bash's own Windows ports do — spawn the
+/// command, wait, and exit the shell with its status. Observably equivalent
+/// for a foreground shell (the script never continues past it; the caller
+/// sees the command's own exit code), minus true pid reuse. The no-command
+/// form is the same successful no-op as on Unix — its redirects were already
+/// made permanent by `run_builtin_foreground` disarming its guard.
 #[cfg(not(unix))]
 pub fn exec_cmd(argv: &[String]) -> i32 {
-    eprintln!("{}: process replacement is not supported on this platform", argv[0]);
-    1
+    let mut clear_env = false;
+    let mut idx = 1;
+    while let Some(flag) = argv.get(idx).map(String::as_str) {
+        match flag {
+            "-c" => clear_env = true,
+            // argv[0] surgery needs a real `execve`; be explicit rather
+            // than silently running with the wrong process name.
+            "-l" | "-a" => {
+                eprintln!("exec: {flag}: not supported on Windows");
+                return 2;
+            }
+            "--" => {
+                idx += 1;
+                break;
+            }
+            _ => break,
+        }
+        idx += 1;
+    }
+
+    let Some(program) = argv.get(idx) else {
+        return 0;
+    };
+
+    let mut command = std::process::Command::new(resolve_program(program));
+    command.args(&argv[idx + 1..]);
+    // Rebuild the environment from `vars::exported()` — same reasoning as
+    // the Unix arm's `env_clear` comment above.
+    command.env_clear();
+    if !clear_env {
+        command.envs(crate::vars::exported());
+    }
+    match command.status() {
+        // Exit without running EXIT traps: a real `exec` replaces the
+        // image, so the traps never run on Unix either.
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => std::process::exit(spawn_failure_status(program, &err)),
+    }
 }
 
 /// After running a loop body, consume one level of any pending `break`/
@@ -1356,10 +1393,7 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
         && !cmd.redirects.is_empty()
     {
         apply_assignments(&pipeline)?; // `x=1 > f` applies both effects
-        #[cfg(unix)]
-        {
-            let _guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
-        }
+        let _guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
         return Ok(0);
     }
 
@@ -1465,26 +1499,17 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
 /// *child's* fds) a builtin's redirects have to be applied to the shell's own
 /// fds — temporarily, for the duration of the call.
 fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
-    #[cfg(unix)]
-    {
-        let mut guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
-        let status = dispatch_builtin(cmd);
-        // The no-command form of `exec` (`exec > file`, `exec 3<&-`, bare
-        // `exec`) exists specifically to make its redirects permanent — the
-        // opposite of every other builtin, whose redirects are always
-        // scoped to just that one call. Disarming the guard here (instead
-        // of letting it restore on drop, as usual) is what makes that happen.
-        if cmd.argv.len() == 1 && cmd.argv.first().map(String::as_str) == Some("exec") {
-            guard.disarm();
-        }
-        Ok(status)
+    let mut guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
+    let status = dispatch_builtin(cmd);
+    // The no-command form of `exec` (`exec > file`, `exec 3<&-`, bare
+    // `exec`) exists specifically to make its redirects permanent — the
+    // opposite of every other builtin, whose redirects are always
+    // scoped to just that one call. Disarming the guard here (instead
+    // of letting it restore on drop, as usual) is what makes that happen.
+    if cmd.argv.len() == 1 && cmd.argv.first().map(String::as_str) == Some("exec") {
+        guard.disarm();
     }
-    #[cfg(not(unix))]
-    {
-        // No raw `dup2` equivalent in play here, so a builtin's redirects are
-        // silently ignored on this platform (see docs/ARCHITECTURE.md).
-        Ok(dispatch_builtin(cmd))
-    }
+    Ok(status)
 }
 
 /// Run a builtin from its expanded `Command` — every builtin but `local`/
@@ -1787,6 +1812,178 @@ impl Drop for StdioGuard {
                 }
             }
         }
+    }
+}
+
+/// The non-Unix (Windows) `redirect_stdio`: same contract as the Unix one
+/// above, different mechanism. Windows has no `dup2`/fd table — what it has
+/// is three process-global std-handle slots (`SetStdHandle`), which Rust's
+/// own stdio re-resolves on every read/write and `std::process::Command`'s
+/// inherited stdio resolves at spawn, so swapping a slot redirects builtins,
+/// `println!`, and spawned children uniformly (see `winstdio`). Only the
+/// standard descriptors exist here: a redirect naming fd 3+ is a clear
+/// runtime error rather than a silent collapse onto stdout.
+#[cfg(not(unix))]
+pub(crate) fn redirect_stdio(
+    redirects: &[Redirect],
+    heredoc: Option<&str>,
+) -> Result<StdioGuard, String> {
+    use crate::winstdio as win;
+    use std::os::windows::io::AsRawHandle;
+
+    let mut guard = StdioGuard { saved: Vec::new(), owned: Vec::new() };
+
+    for r in redirects {
+        match r {
+            Redirect::File { fd, file, mode } => {
+                // Restricted shell (C104): no output redirections.
+                if crate::vars::restricted() && !matches!(mode, RedirMode::Read) {
+                    return Err(format!("{file}: restricted: cannot redirect output"));
+                }
+                // No `/dev/tcp` pseudo-device interception here (Unix-only,
+                // `net_pseudo_device`): such a path just fails to open.
+                let f = match mode {
+                    RedirMode::Read => File::open(file).map_err(|e| format!("{file}: {e}"))?,
+                    // `<>` opens read-write without truncating, POSIX's rule.
+                    RedirMode::ReadWrite => File::options()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(file)
+                        .map_err(|e| format!("{file}: {e}"))?,
+                    RedirMode::Write | RedirMode::Clobber | RedirMode::Append => open_write(file, *mode)?,
+                };
+                guard.point(*fd as i32, f.as_raw_handle())?;
+                guard.owned.push(Box::new(f));
+            }
+            Redirect::Both { file, append } => {
+                let f = open_write(file, if *append { RedirMode::Append } else { RedirMode::Write })?;
+                // One open file in both slots — the same shared cursor a
+                // dup'd Unix descriptor pair has, so interleaved stdout and
+                // stderr writes append rather than clobber each other.
+                guard.point(1, f.as_raw_handle())?;
+                guard.point(2, f.as_raw_handle())?;
+                guard.owned.push(Box::new(f));
+            }
+            Redirect::Dup { fd, target } => {
+                let src = win::slot_for_fd(*target as i32)
+                    .ok_or_else(|| unsupported_fd(*target as i32))?;
+                guard.point(*fd as i32, win::get(src))?;
+            }
+            // `fd>&-`: nothing here can hand a builtin a genuinely closed
+            // handle — a null slot is the nearest equivalent (reads/writes
+            // fail, as on a closed fd), restored like any other swap.
+            Redirect::Close { fd } => {
+                guard.point(*fd as i32, std::ptr::null_mut())?;
+            }
+            Redirect::Move { fd, target } => {
+                let src = win::slot_for_fd(*target as i32)
+                    .ok_or_else(|| unsupported_fd(*target as i32))?;
+                guard.point(*fd as i32, win::get(src))?;
+                guard.point(*target as i32, std::ptr::null_mut())?;
+            }
+            // `{name}>file` allocates a persistent fd >= 10 — meaningless
+            // without an fd table; error rather than bind a bogus number.
+            Redirect::VarFd { name, .. } => {
+                return Err(format!(
+                    "{{{name}}}: variable-fd redirects are not supported on Windows"
+                ));
+            }
+        }
+    }
+
+    // A here-document always wins for fd 0 (same ordering as the Unix arm
+    // and `build_stage`): an anonymous pipe fed from a background thread,
+    // so a body bigger than the pipe buffer can't deadlock the shell. If
+    // the body goes unread, dropping the read end (guard drop) fails the
+    // thread's write and unblocks it.
+    if let Some(body) = heredoc {
+        let (read, mut write) = std::io::pipe().map_err(|e| e.to_string())?;
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = write.write_all(body.as_bytes());
+        });
+        guard.point(0, read.as_raw_handle())?;
+        guard.owned.push(Box::new(read));
+    }
+
+    Ok(guard)
+}
+
+#[cfg(not(unix))]
+fn unsupported_fd(fd: i32) -> String {
+    format!("{fd}: only the standard descriptors (0-2) can be redirected on Windows")
+}
+
+/// Flush Rust's buffered stdout/stderr before its std-handle slot changes
+/// hands (in either direction), so buffered output can't land on the wrong
+/// side of a redirect — `println!`'s LineWriter may hold a partial line.
+#[cfg(not(unix))]
+fn flush_std_slot(slot: u32) {
+    use std::io::Write;
+    match slot {
+        crate::winstdio::STD_OUTPUT_HANDLE => {
+            let _ = std::io::stdout().flush();
+        }
+        crate::winstdio::STD_ERROR_HANDLE => {
+            let _ = std::io::stderr().flush();
+        }
+        _ => {}
+    }
+}
+
+/// The Windows `StdioGuard`: swaps the saved std-handle slots back on drop,
+/// and only then drops the objects backing the redirects (`owned`), so a
+/// target file/pipe closes strictly after no slot references its handle.
+#[cfg(not(unix))]
+pub(crate) struct StdioGuard {
+    saved: Vec<(u32, crate::winstdio::RawHandle)>,
+    /// Keeps redirect targets (opened files, the here-doc pipe reader)
+    /// alive while a std slot points at their raw handles — `SetStdHandle`
+    /// stores a plain pointer without duplicating anything.
+    owned: Vec<Box<dyn std::any::Any>>,
+}
+
+#[cfg(not(unix))]
+impl StdioGuard {
+    /// Point `fd`'s std slot at `handle`, saving the original once per slot
+    /// so drop can restore it.
+    fn point(&mut self, fd: i32, handle: crate::winstdio::RawHandle) -> Result<(), String> {
+        let slot = crate::winstdio::slot_for_fd(fd).ok_or_else(|| unsupported_fd(fd))?;
+        flush_std_slot(slot);
+        if !self.saved.iter().any(|(s, _)| *s == slot) {
+            self.saved.push((slot, crate::winstdio::get(slot)));
+        }
+        if !crate::winstdio::set(slot, handle) {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+
+    /// Make the current redirects permanent (the no-command form of `exec`,
+    /// same contract as the Unix guard's `disarm`): drop the saved originals
+    /// without restoring, and forget the backing objects — the slots keep
+    /// referencing their handles for the life of the process.
+    fn disarm(&mut self) {
+        self.saved.clear();
+        for o in self.owned.drain(..) {
+            std::mem::forget(o);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for StdioGuard {
+    fn drop(&mut self) {
+        for (slot, handle) in self.saved.drain(..) {
+            // Flush what was written through the redirect before the slot
+            // swaps back, so buffered output lands in the target.
+            flush_std_slot(slot);
+            crate::winstdio::set(slot, handle);
+        }
+        // `owned` drops after this body — targets close post-restore.
     }
 }
 
@@ -2717,7 +2914,17 @@ fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> 
 /// plain typo). Doesn't try to match bash's own message wording, only its
 /// functional behavior, same as every other error message in this shell.
 pub(crate) fn spawn_failure_status(name: &str, err: &std::io::Error) -> i32 {
-    if err.kind() == std::io::ErrorKind::NotFound {
+    // Windows rejects `resolve_program`'s synthetic trailing-`/` path before
+    // ever looking for the file ("program path has no file name",
+    // `InvalidInput`) rather than failing the lookup with `NotFound` the way
+    // Unix does — but it's the same "PATH search already failed" case, so
+    // classify it as command-not-found too, not as "found but couldn't run".
+    #[cfg(not(unix))]
+    let not_found = err.kind() == std::io::ErrorKind::NotFound
+        || err.kind() == std::io::ErrorKind::InvalidInput;
+    #[cfg(unix)]
+    let not_found = err.kind() == std::io::ErrorKind::NotFound;
+    if not_found {
         // A trailing `/` here is (almost always) the synthetic one
         // `resolve_program`/`command_bypass` append to force a clean
         // NotFound instead of a PATH search — don't leak it into the

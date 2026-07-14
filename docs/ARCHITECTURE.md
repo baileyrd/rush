@@ -386,8 +386,14 @@ Sequences a `CommandList` and turns each pipeline into running processes:
   `redirect_stdio` temporarily `dup2`s the shell's own fd 0/1/2 to match,
   running the builtin, then restores the originals (`StdioGuard`'s `Drop`, so
   a redirect that fails partway through still restores whatever it already
-  touched). Off Unix, a builtin's redirects are silently ignored — no raw
-  `dup2` equivalent in play (see the Windows note above). This only covers a
+  touched). Off Unix, `redirect_stdio` has a Windows twin with the same
+  contract, built on the process's three std-handle slots instead of an fd
+  table: `SetStdHandle` swaps the slot for the duration and the guard swaps
+  it back (`winstdio`; Rust's stdio re-resolves `GetStdHandle` on every use,
+  and a spawned child's inherited stdio is resolved at spawn, so builtins,
+  `println!`, and children all follow the swap). Since only slots 0–2 exist,
+  a redirect naming fd 3+ (`echo hi 3>f`, `{x}>f`) is a clear runtime error
+  on Windows rather than a silent no-op. This only covers a
   builtin as the *sole* command of a pipeline — one in the middle of a
   multi-stage pipe (`echo hi | cd`) is still the pre-existing punt: rush
   tries to exec it as an external program and fails.
@@ -515,6 +521,18 @@ binary — this sandbox has no Windows machine, and a Wine install attempt
 failed on an unrelated package-repository error. Unnecessary for the
 job-control conclusion above, though, since that's decided statically by
 which code compiles in, not by anything only observable at runtime.)
+
+Within that foreground-only ceiling, native Windows is at parity with the
+Unix build for the everyday shell loop (verified natively on Windows 11):
+builtin and function dispatch, `$$`/`$BASHPID`, pipes between builtins and
+externals, and redirects — on externals via `Stdio` as everywhere, on
+builtins/compounds via `redirect_stdio`'s std-handle-slot twin (`winstdio`,
+see the single-command fast path section above). `exec CMD` is emulated as
+spawn-wait-exit (no `execve` to replace the image with); its no-command
+redirect-permanence form works as on Unix. Deliberately not there: anything
+needing fork (a compound as one stage of a multi-command pipeline, `coproc`),
+fds 3+ / `{name}>` varfd redirects (no fd table — these error, loudly), and
+all of job control per the above.
 
 Implements the parts that need POSIX process groups and signals, via the `libc`
 crate, following the classic glibc job-control structure:

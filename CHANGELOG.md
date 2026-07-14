@@ -69,6 +69,39 @@ git history for the commit-by-commit narrative.
   multi-command pipeline (e.g. `(cmd) | grep x`) — only a pipeline that is a
   single compound is supported today.
 
+## [Unreleased] — since 0.1.2
+
+### Native Windows: foreground-shell parity
+Verified natively on Windows 11 (previously only cross-compiled); the goal is
+bash-minus-job-control in the foreground, and the everyday loop now matches
+the Unix build:
+- **Builtin/compound redirects work on Windows** (`echo hi > f`, `pwd 2>e`,
+  `read x < f`, `while …; done < f`, here-docs into builtins, bare `> f`).
+  `redirect_stdio` grew a Windows twin with the same guard contract, built on
+  the process's three std-handle slots (`SetStdHandle`, via the new
+  `winstdio` facade — hand-declared kernel32 externs, no new dependency)
+  instead of `dup2`. Since only slots 0–2 exist, a redirect naming fd 3+ or a
+  `{name}>` varfd is a clear runtime error on Windows, not a silent no-op.
+- **`read` under a redirect reads the live handle unbuffered** off Unix, so
+  `read x < f` is scoped to the call — nothing buffered leaks into later
+  stdin reads (mirrors the Unix borrowed-fd read).
+- **`exec` works off Unix**: the no-command form makes its redirects
+  permanent exactly as on Unix; `exec CMD` is emulated as spawn-wait-exit
+  (Windows has no `execve`), with `-l`/`-a` reported as unsupported.
+- **Command-not-found reports 127 correctly on Windows** — the synthetic
+  trailing-`/` not-found path surfaces as `InvalidInput` there, which
+  `spawn_failure_status` now classifies as "command not found" rather than
+  the generic 126 error.
+- **`$BASHPID`** gets a `std::process::id()` arm off Unix (no fork there, so
+  it always equals `$$`).
+- Earlier fixes this cycle (PATHEXT-aware resolution, PATH seeding, the
+  `$(...)` self-re-exec fallback) already made dispatch and `$$` work; the
+  integration suite now pins all of it cross-platform (builtin redirects,
+  `read` from pipes and files, recursive functions, `$$`/`$BASHPID`, `exec`).
+- Still deliberately out on Windows: job control (`&`, `fg`/`bg`, Ctrl-Z),
+  `coproc`, compounds as one stage of a multi-command pipeline, and fd 3+ —
+  see docs/ARCHITECTURE.md "Windows strategy (G11)".
+
 ## [Unreleased] — since 0.1.1
 
 ### Packaging & release (G1–G4)

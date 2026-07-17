@@ -84,6 +84,28 @@ jobs:
       - name: clippy (libc-backend)
         run: cargo clippy --all-targets --no-default-features --features libc-backend
 
+  bench-check:
+    # Not a real benchmark run (numbers from a shared CI runner aren't
+    # trustworthy for perf tracking) — just compiles benches/shell_bench.rs
+    # and runs each benchmark for ~1 sample so a future change can't
+    # silently break the bench harness itself (e.g. by changing a
+    # signature `benches/shell_bench.rs` relies on) unnoticed. Run
+    # `cargo bench` locally for real numbers.
+    name: benchmark build check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo bench --bench shell_bench -- --sample-size 10 --measurement-time 1 --warm-up-time 1
+
   deny:
     # Supply-chain hygiene: known-vulnerable/yanked advisories, disallowed
     # licenses, and (via deny.toml's [sources]) git dependencies from

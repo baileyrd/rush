@@ -10,9 +10,9 @@ repository = "https://github.com/baileyrd/rush"
 # `[[ $s =~ regex ]]` (C56). A minimal POSIX-ERE engine (parser + Pike VM,
 # linear-time, zero deps) built to replace the `regex` crate here; v1 keeps
 # the crate's leftmost-first semantics, differentially tested against it.
-# Pinned to the v0.3.0 release commit (see rusty_regx's CHANGELOG) so
+# Pinned to the v0.4.0 release commit (see rusty_regx's CHANGELOG) so
 # engine updates are deliberate version bumps, not a floating branch.
-rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "ccaf652743619b81d9d32ef6222943940c5deeb6" }
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3" }
 # The line editor (formerly src/editor.rs, extracted to its own crate):
 # raw-mode terminal, emacs + vi keymaps, kill ring, undo, history search,
 # bracketed paste, $RPS1 right prompt. rush drives it through its `Hooks`

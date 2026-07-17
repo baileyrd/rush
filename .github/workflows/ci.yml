@@ -106,6 +106,39 @@ jobs:
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo bench --bench shell_bench -- --sample-size 10 --measurement-time 1 --warm-up-time 1
 
+  coverage:
+    # Informational only — no external service (Codecov et al.) and no
+    # pass/fail threshold, just visibility into what fraction of src/ the
+    # existing test suite (145 unit + 224 integration) actually exercises,
+    # which nothing in this repo previously reported at all. The lcov
+    # report is uploaded as a build artifact; the summary table also
+    # prints straight to the job log.
+    name: coverage (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        run: |
+          cargo llvm-cov --no-clean --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
   deny:
     # Supply-chain hygiene: known-vulnerable/yanked advisories, disallowed
     # licenses, and (via deny.toml's [sources]) git dependencies from

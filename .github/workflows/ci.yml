@@ -95,3 +95,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  fuzz-smoke:
+    # Not a real fuzzing campaign (that belongs in a scheduled/manual job
+    # with real wall-clock budget) — just enough of a run (a few seconds
+    # per target) to catch the harness itself bit-rotting silently, the
+    # same failure mode the libc-backend job above exists to catch for
+    # that feature. fuzz/ links `rush` as a library (src/lib.rs) and
+    # exercises lexer::lex/parser::parse, arith::eval, and
+    # glob::match_component directly, in-process — rush's three
+    # hand-rolled, adversarial-input-facing components with no
+    # third-party parser behind them.
+    name: fuzz targets build & smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Smoke run each target
+        run: |
+          set -e
+          for target in lex_parse arith glob_match; do
+            cargo fuzz run "$target" -- -max_total_time=10 -max_len=256
+          done

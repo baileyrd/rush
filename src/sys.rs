@@ -77,6 +77,12 @@ mod imp {
         SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIG_DFL,
         SIG_IGN, STDIN_FILENO, WCONTINUED, WNOHANG, WUNTRACED,
     };
+    // `RLIMIT_RTTIME` (`ulimit -R`, C135) is Linux-only in the `libc` crate,
+    // so it's not available when this shared module backs a non-Linux Unix
+    // target — only when it's standing in for `rusty_libc` via
+    // `libc-backend` on Linux itself.
+    #[cfg(target_os = "linux")]
+    pub use libc::RLIMIT_RTTIME;
 
     /// errno as an `io::Error`; glibc's TLS `errno` in this backend.
     pub fn last_os_error() -> std::io::Error {

@@ -201,7 +201,7 @@ fn echo(argv: &[String]) -> i32 {
 /// "%s-%d\n" a 1 b 2 c` is `a-1`, `b-2`, `c-0`.
 /// The `%(fmt)T` strftime subset, exposed for the prompt's `\t`-family
 /// escapes (C125).
-pub(crate) fn strftime_utc(fmt: &str, epoch: i64) -> String {
+pub fn strftime_utc(fmt: &str, epoch: i64) -> String {
     printf::strftime(fmt, epoch)
 }
 
@@ -560,7 +560,7 @@ mod printf {
 
     /// A strftime subset for `%(fmt)T` (C99), UTC: civil date via the
     /// days-from-epoch algorithm, no timezone database.
-    pub(crate) fn strftime(fmt: &str, epoch: i64) -> String {
+    pub fn strftime(fmt: &str, epoch: i64) -> String {
         const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June",
             "July", "August", "September", "October", "November", "December"];
         const DAYS: [&str; 7] =
@@ -1024,6 +1024,17 @@ fn current_dir_string() -> Option<String> {
     std::env::current_dir().ok().map(|p| p.display().to_string())
 }
 
+/// Mirror the stack into `$DIRSTACK`, bash's own array view of it —
+/// `DIRSTACK[0]` is always the current directory, the rest follow `dirs`'
+/// order — full paths, unlike `dirs`' own `~`-abbreviated display. Called
+/// after every mutation (`cd`, `pushd`, `popd`, `dirs -c`) since the
+/// current-directory slot tracks `cd` too, not just the stack itself.
+pub fn sync_dirstack() {
+    let mut entries = vec![current_dir_string().unwrap_or_default()];
+    DIR_STACK.with(|s| entries.extend(s.borrow().iter().rev().cloned()));
+    crate::vars::set_array("DIRSTACK", entries);
+}
+
 /// `pushd [dir]` (C72): with a dir, cd there and push the old cwd; with
 /// none, swap the top two entries — printing the stack either way, like
 /// bash.
@@ -1051,6 +1062,7 @@ fn pushd_cmd(argv: &[String]) -> i32 {
             }
         }
     }
+    sync_dirstack();
     println!("{}", dirs_display());
     0
 }
@@ -1072,6 +1084,7 @@ fn popd_cmd(argv: &[String]) -> i32 {
             eprintln!("popd: +{n}: directory stack index out of range");
             return 1;
         }
+        sync_dirstack();
         println!("{}", dirs_display());
         return 0;
     }
@@ -1092,6 +1105,7 @@ fn dirs_cmd(argv: &[String]) -> i32 {
     match argv.get(1).map(String::as_str) {
         Some("-c") => {
             DIR_STACK.with(|s| s.borrow_mut().clear());
+            sync_dirstack();
             0
         }
         Some("-v") => {
@@ -1252,6 +1266,7 @@ fn cd(argv: &[String]) -> i32 {
     if let Ok(dir) = std::env::current_dir() {
         crate::vars::set("PWD", &dir.display().to_string());
     }
+    sync_dirstack();
     if going_back {
         println!("{target}");
     }
@@ -1642,7 +1657,7 @@ fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-pub(crate) fn read_reply_line() -> (String, bool) {
+pub fn read_reply_line() -> (String, bool) {
     let (line, _protected, status) = read_logical_line(&ReadOpts::default());
     (String::from_utf8_lossy(&line).into_owned(), status != 0)
 }
@@ -2014,7 +2029,7 @@ fn test_primary(a: &[&str], pos: &mut usize) -> Result<bool, String> {
 /// unary-only inside `[[`, where the flat `-a` combinator doesn't exist)
 /// and `-h`/`-L` (symlink — `symlink_metadata`, so a dangling link still
 /// reports true, same as bash).
-pub(crate) fn cond_unary(op: &str, s: &str) -> Result<bool, String> {
+pub fn cond_unary(op: &str, s: &str) -> Result<bool, String> {
     use std::path::Path;
     match op {
         "-a" => Ok(Path::new(s).exists()),
@@ -2432,7 +2447,7 @@ fn shift_cmd(argv: &[String]) -> i32 {
 /// flattened into a plain string, so `expand::expand_simple` parses each
 /// declaration itself into `decls` ahead of time (see `Command::
 /// local_decls`'s own doc comment).
-pub(crate) fn local_from_decls(
+pub fn local_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,
 ) -> i32 {
@@ -2511,7 +2526,7 @@ pub(crate) fn local_from_decls(
 /// filtered — bash's formats). `-f` reports existence by status; printing
 /// a function's *source* needs an AST unparser rush doesn't have yet, a
 /// documented narrowing (existence checks — its most common use — work).
-pub(crate) fn declare_print(argv: &[String]) -> i32 {
+pub fn declare_print(argv: &[String]) -> i32 {
     let mode = argv[1].as_str();
     let names = &argv[2..];
     match mode {
@@ -2567,7 +2582,7 @@ pub(crate) fn declare_print(argv: &[String]) -> i32 {
 
 /// `export NAME=(...)` (C132): apply the declarations (creating arrays/
 /// scalars) via the shared decl path, then mark each name exported.
-pub(crate) fn export_from_decls(
+pub fn export_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,
 ) -> i32 {
@@ -2578,7 +2593,7 @@ pub(crate) fn export_from_decls(
     status
 }
 
-pub(crate) fn declare_from_decls(
+pub fn declare_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,
 ) -> i32 {
@@ -2643,7 +2658,7 @@ pub(crate) fn declare_from_decls(
 /// variable in bash's own `declare -r name="value"` format. Routed through
 /// the same decl path as `local`/`declare` so array literals
 /// (`readonly arr=(a b)`) survive, and so `-a`/`-A` work.
-pub(crate) fn readonly_from_decls(
+pub fn readonly_from_decls(
     decls: &[(String, Option<crate::vars::AssignOp>)],
     attrs: crate::vars::Attrs,
 ) -> i32 {
@@ -2878,7 +2893,7 @@ fn classify_all(name: &str) -> Vec<Kind> {
 /// Search `$PATH` for an executable file named `name`. A `name` containing
 /// `/` is treated as an explicit path (checked directly, not searched for)
 /// rather than a `$PATH` lookup.
-pub(crate) fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
+pub fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
     // `vars::get` alone — no `std::env` fallback (C36/C40): falling back
     // would resurrect `PATH`'s original, inherited value after `unset`.
     resolve_in_path_string(name, crate::vars::get("PATH"))
@@ -2889,7 +2904,7 @@ pub(crate) fn resolve_in_path(name: &str) -> Option<std::path::PathBuf> {
 /// (possibly compromised or customized) `$PATH`. The same "/bin:/usr/bin"
 /// real bash's `command -p` uses here (its `confstr(_CS_PATH)` value on
 /// Linux, verified via `getconf PATH`).
-pub(crate) fn resolve_in_default_path(name: &str) -> Option<std::path::PathBuf> {
+pub fn resolve_in_default_path(name: &str) -> Option<std::path::PathBuf> {
     resolve_in_path_string(name, Some("/bin:/usr/bin".to_string()))
 }
 
@@ -2899,7 +2914,7 @@ pub(crate) fn resolve_in_default_path(name: &str) -> Option<std::path::PathBuf> 
 /// (`C:\lib.sh`, no `/` in sight) isn't misread as a `$PATH`-searched
 /// command name. `MAIN_SEPARATOR` is `/` on Unix too, so this reduces to a
 /// single check there.
-pub(crate) fn looks_like_path(name: &str) -> bool {
+pub fn looks_like_path(name: &str) -> bool {
     name.contains('/') || name.contains(std::path::MAIN_SEPARATOR)
 }
 

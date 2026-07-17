@@ -307,7 +307,7 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
 /// here-doc body (kept separate since it feeds stdin rather than naming a
 /// target file) — shared by simple commands and compound commands, since a
 /// redirect can trail either (`echo hi > f`, `while …; done < f`).
-pub(crate) fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Option<String>), String> {
+pub fn expand_redirects(raw: &[RawRedirect]) -> Result<(Vec<Redirect>, Option<String>), String> {
     let mut redirects = Vec::with_capacity(raw.len());
     let mut heredoc = None;
     for r in raw {
@@ -1139,7 +1139,7 @@ impl Splitter {
 /// arrive via `$var` — `p="*.txt"; [[ foo.txt = $p ]]` is true in bash,
 /// verified), while quoted/literal parts are backslash-escaped so they
 /// only ever match themselves (`[[ $x = "a"* ]]` needs a literal `a`).
-pub(crate) fn expand_cond_pattern(word: &Word) -> Result<String, String> {
+pub fn expand_cond_pattern(word: &Word) -> Result<String, String> {
     let mut pattern = String::new();
     for (i, part) in word.iter().enumerate() {
         match part {
@@ -1160,7 +1160,7 @@ pub(crate) fn expand_cond_pattern(word: &Word) -> Result<String, String> {
 /// common `p="^a.c$"; [[ $s =~ $p ]]` idiom), while quoted/literal parts
 /// match themselves (`[[ abc =~ "a.c" ]]` is false in bash — verified —
 /// because the quoted `.` is literal).
-pub(crate) fn expand_cond_regex(word: &Word) -> Result<String, String> {
+pub fn expand_cond_regex(word: &Word) -> Result<String, String> {
     let mut pattern = String::new();
     for (i, part) in word.iter().enumerate() {
         match part {
@@ -1201,7 +1201,7 @@ fn escape_meta_into(pattern: &mut String, s: &str) {
 /// Expand a word's parts into one string with `$`/`$(...)`/quote handling
 /// but no word-splitting and no globbing — `local x=$v`-style values, and
 /// (C55) `[[ ]]` operands, which is the whole point of `[[`.
-pub(crate) fn expand_word(word: &Word) -> Result<String, String> {
+pub fn expand_word(word: &Word) -> Result<String, String> {
     let mut out = String::new();
     for (i, part) in word.iter().enumerate() {
         match part {
@@ -1332,10 +1332,10 @@ fn passwd_home(user: &str) -> Option<String> {
 }
 
 /// Scan a string for `$VAR`, `${VAR}`, and `$(...)`, expanding each in place.
-/// `pub(crate)`, not just private: also used directly for `$PS3` (`select`'s
+/// `pub`, not just private: also used directly for `$PS3` (`select`'s
 /// prompt undergoes ordinary `$`/command-substitution expansion, unlike
 /// `$PS1`'s own bespoke backslash-escape codes in `main.rs`).
-pub(crate) fn expand_dollars(text: &str) -> Result<String, String> {
+pub fn expand_dollars(text: &str) -> Result<String, String> {
     expand_dollars_impl(text, false)
 }
 
@@ -1347,7 +1347,7 @@ pub(crate) fn expand_dollars(text: &str) -> Result<String, String> {
 /// literal text `<(echo hi)`), unlike `$(...)`, which *does* still expand
 /// inside double quotes — so this is deliberately a separate function from
 /// `expand_dollars` rather than a flag threaded through every call site.
-pub(crate) fn expand_unquoted(text: &str) -> Result<String, String> {
+pub fn expand_unquoted(text: &str) -> Result<String, String> {
     expand_dollars_impl(text, true)
 }
 
@@ -1386,7 +1386,7 @@ impl Chunks {
 /// As [`expand_dollars`], but for unquoted argv text: process substitution
 /// allowed, and the result arrives as (text, from_expansion) chunks — see
 /// [`Chunks`].
-pub(crate) fn expand_unquoted_chunks(text: &str) -> Result<Vec<(String, bool)>, String> {
+pub fn expand_unquoted_chunks(text: &str) -> Result<Vec<(String, bool)>, String> {
     expand_dollars_chunks(text, true)
 }
 
@@ -1702,7 +1702,7 @@ fn resolve_subscript_text(expr: &str) -> Result<String, String> {
 /// is the last element of `a=(x y z)` and `a[-1]=Q` overwrites it.
 /// Still-negative after that (out of range) is `None`, the same "nothing
 /// there" outcome an ordinary out-of-range index already has.
-pub(crate) fn eval_index(name: &str, expr: &str) -> Option<usize> {
+pub fn eval_index(name: &str, expr: &str) -> Option<usize> {
     let v = crate::arith::eval(expr).ok()?;
     if v >= 0 {
         return usize::try_from(v).ok();
@@ -1729,7 +1729,7 @@ fn read_subscript(name: &str, expr: &str) -> Result<Option<String>, String> {
 
 /// What `unset 'arr[subscript]'` targets, once `subscript` is resolved
 /// against `arr`'s actual current type.
-pub(crate) enum UnsetTarget {
+pub enum UnsetTarget {
     Index(String, usize),
     Key(String, String),
 }
@@ -1742,7 +1742,7 @@ pub(crate) enum UnsetTarget {
 /// mean the shell itself never touched it — `unset`'s own subscript is
 /// evaluated independently of ordinary shell quoting/expansion) and the
 /// same associative-vs-indexed type check as everywhere else.
-pub(crate) fn parse_array_unset_index(text: &str) -> Result<Option<UnsetTarget>, String> {
+pub fn parse_array_unset_index(text: &str) -> Result<Option<UnsetTarget>, String> {
     let Some((name, Subscript::Index(expr))) = parse_subscript(text) else {
         return Ok(None);
     };
@@ -2303,7 +2303,7 @@ fn at_transform(value: &str, op: &str) -> Option<String> {
         "P" => {
             // Full prompt expansion: escapes, then `promptvars`-style
             // `$`-expansion — same two passes the live prompt gets.
-            let escaped = crate::expand_ps1(value);
+            let escaped = expand_ps1(value);
             expand_dollars(&escaped).unwrap_or(escaped)
         }
         _ => return None,
@@ -2336,7 +2336,7 @@ fn shell_quote(value: &str) -> String {
 
 /// `${v@E}` (C60): interpret backslash escapes the way `$'...'` would.
 /// Also used by the lexer for `$'...'` ANSI-C quoting itself.
-pub(crate) fn ansi_unescape(value: &str) -> String {
+pub fn ansi_unescape(value: &str) -> String {
     // Consume up to `max` characters matching `pred` and parse them in
     // `radix` — the shared shape of `\xHH`, `\nnn`, `\uXXXX`, `\UXXXXXXXX`.
     fn take_number(
@@ -2553,7 +2553,7 @@ fn expand_braced_word(src: &str, unquoted: bool) -> Result<String, String> {
 /// double-quoted values (`declare -- x="5"` — unlike `${v@A}`, which
 /// single-quotes), `--` for a flagless scalar, and the assoc form's
 /// trailing space inside the parens (`([k]="1" )`).
-pub(crate) fn declare_p_line(name: &str) -> String {
+pub fn declare_p_line(name: &str) -> String {
     fn dq(v: &str) -> String {
         let mut out = String::from("\"");
         for c in v.chars() {
@@ -2853,6 +2853,167 @@ fn home_dir() -> Option<String> {
     crate::vars::get("HOME")
         .or_else(|| std::env::var("HOME").ok())
         .or_else(|| std::env::var("USERPROFILE").ok())
+}
+
+/// A small, rush-specific escape set (not the full bash set): `\w`/`\W` (cwd,
+/// cwd basename), `\u`/`\h` (user, host), `\$` (`#` for root, else `$`), `\?`
+/// (last exit status — bash has no equivalent; real PS1s get this via a
+/// command substitution instead), and the wider bash set (C125): `\e`/`\a`
+/// escape/bell, `\[`/`\]` (dropped — the editor is ANSI-width-aware, so
+/// the non-printing markers aren't needed), time/date (`\t \T \@ \A \d
+/// \D{fmt}` — fmt ignored, `\d`-style output), `\j` (job count), `\!`/`\#`
+/// (history/command number), `\s`/`\v`/`\V` (shell name/version), `\nnn`
+/// octal, `\n`, `\\`. An unrecognized escape is kept literal (backslash and
+/// all) rather than silently dropped. Lives here (not `main.rs`) because
+/// `${v@P}` (`at_transform` above) needs it too, not just the live prompt.
+pub fn expand_ps1(ps1: &str) -> String {
+    let mut out = String::new();
+    let mut chars = ps1.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('w') => out.push_str(&cwd_string_trimmed()),
+            Some('W') => out.push_str(&cwd_basename()),
+            Some('u') => out.push_str(&username()),
+            Some('h') => out.push_str(&hostname_short()),
+            Some('H') => out.push_str(&hostname()),
+            Some('$') => out.push(prompt_char()),
+            Some('?') => out.push_str(&crate::vars::last_status().to_string()),
+            Some('n') => out.push('\n'),
+            Some('e') => out.push('\x1b'),
+            Some('a') => out.push('\x07'),
+            Some('r') => out.push('\r'),
+            // Non-printing-span markers: the editor measures ANSI widths
+            // itself, so these simply vanish instead of rendering as
+            // literal `\[`/`\]` garbage (C125).
+            Some('[') | Some(']') => {}
+            Some('t') => out.push_str(&prompt_time("%H:%M:%S")),
+            Some('T') => out.push_str(&prompt_time("%I:%M:%S")),
+            Some('@') => out.push_str(&prompt_time("%I:%M %p")),
+            Some('A') => out.push_str(&prompt_time("%H:%M")),
+            Some('d') => out.push_str(&prompt_time("%a %b %e")),
+            Some('D') => {
+                // `\D{fmt}` — strftime with the given format.
+                let mut fmt = String::new();
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    for fc in chars.by_ref() {
+                        if fc == '}' {
+                            break;
+                        }
+                        fmt.push(fc);
+                    }
+                }
+                out.push_str(&prompt_time(if fmt.is_empty() { "%a %b %e %H:%M:%S" } else { &fmt }));
+            }
+            Some('j') => {
+                #[cfg(unix)]
+                out.push_str(&crate::job::count().to_string());
+                #[cfg(not(unix))]
+                out.push('0');
+            }
+            Some('!') | Some('#') => {
+                out.push_str(&(crate::builtins::history_entries().len() + 1).to_string())
+            }
+            Some('s') => out.push_str("rush"),
+            Some('v') | Some('V') => out.push_str(env!("CARGO_PKG_VERSION")),
+            Some('l') => out.push_str("tty"),
+            Some(d @ '0'..='7') => {
+                let mut n = d.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    match chars.peek().and_then(|c| c.to_digit(8)) {
+                        Some(x) => {
+                            n = n * 8 + x;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                out.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+            }
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// `\t`-family time escapes: strftime via `printf %(fmt)T`'s shared
+/// formatter would be ideal, but it lives in `builtins`' private module —
+/// a tiny UTC formatter here mirrors it for the prompt's needs.
+fn prompt_time(fmt: &str) -> String {
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::builtins::strftime_utc(fmt, epoch)
+}
+
+/// `\w` honoring `$PROMPT_DIRTRIM` (C127): keep only the last N path
+/// components, `~`-abbreviating `$HOME` first like bash.
+fn cwd_string_trimmed() -> String {
+    let mut cwd = cwd_string();
+    if let Some(home) =
+        crate::vars::get("HOME").filter(|h| !h.is_empty() && cwd.starts_with(h.as_str()))
+    {
+        cwd = format!("~{}", &cwd[home.len()..]);
+    }
+    let trim =
+        crate::vars::get("PROMPT_DIRTRIM").and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0);
+    if let Some(n) = trim {
+        let parts: Vec<&str> = cwd.split('/').collect();
+        if parts.len() > n + 1 {
+            let kept = &parts[parts.len() - n..];
+            let lead = if cwd.starts_with('~') { "~/.../" } else { ".../" };
+            return format!("{lead}{}", kept.join("/"));
+        }
+    }
+    cwd
+}
+
+fn hostname_short() -> String {
+    hostname().split('.').next().unwrap_or_default().to_string()
+}
+
+/// The current directory as a plain display string — also `main.rs`'s own
+/// `default_prompt` fallback when `$PS1` isn't set.
+pub fn cwd_string() -> String {
+    std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into())
+}
+
+fn cwd_basename() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "/".into())
+}
+
+fn username() -> String {
+    crate::vars::get("USER").or_else(|| crate::vars::get("USERNAME")).unwrap_or_else(|| "user".into())
+}
+
+fn hostname() -> String {
+    // `vars::get` — `HOSTNAME` is seeded at startup from the kernel
+    // (C106), so this works on the common Linux setups where the
+    // environment variable isn't exported.
+    crate::vars::get("HOSTNAME").unwrap_or_else(|| "host".into())
+}
+
+#[cfg(unix)]
+fn prompt_char() -> char {
+    if unsafe { crate::sys::getuid() } == 0 { '#' } else { '$' }
+}
+
+#[cfg(not(unix))]
+fn prompt_char() -> char {
+    '$'
 }
 
 #[cfg(test)]

@@ -1936,6 +1936,31 @@ fn unknown_command_reports_127_instead_of_aborting_the_script() {
     assert!(err.contains("totallynonexistentcmd_c37"), "got: {err:?}");
 }
 
+#[test]
+fn command_not_found_handle_hook() {
+    // The bash/zsh `command_not_found_handle` convention: when defined, a
+    // failed lookup calls it with the command's own argv instead of
+    // rush's usual "command not found" message, and its own status wins.
+    let (out, status) = rush(
+        r#"command_not_found_handle() { echo "handle: $1 $2 $3"; return 42; }; frobnicate a b"#,
+    );
+    assert_eq!(out, "handle: frobnicate a b\n");
+    assert_eq!(status, 42);
+
+    // rush's own "command not found" message is suppressed once a handler
+    // exists — the handler owns diagnostics, matching bash.
+    let (err, _) = rush_stderr(
+        r#"command_not_found_handle() { echo "custom: $1"; }; totallynonexistentcmd_cnfh"#,
+    );
+    assert!(!err.contains("command not found"), "got: {err:?}");
+
+    // With no handler defined, behavior is unchanged: rush's own message,
+    // status 127.
+    let (out, status) = rush("frobnicate_unhandled; echo status=$?");
+    assert_eq!(out, "status=127\n");
+    assert_eq!(status, 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn unknown_command_still_triggers_errexit() {
@@ -3555,6 +3580,46 @@ fn standard_variables_seeded() {
         .output()
         .expect("spawn rush");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "6\n");
+}
+
+#[test]
+fn bash_version_compat_vars() {
+    // BASH_VERSION/BASH_VERSINFO (compat shim): scripts that gate
+    // bash-only syntax behind `[ -n "$BASH_VERSION" ]` should see rush as
+    // "bash 5.2", the version its own capability-gap tracking verifies
+    // parity against. BASH_VERSINFO is readonly; BASH_VERSION isn't.
+    let (out, _) = rush(r#"echo "$BASH_VERSION"; echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}""#);
+    assert_eq!(out, "5.2.21(1)-release\n5.2.21\n");
+
+    let (out, code) = rush("BASH_VERSINFO=(9 9 9); echo unreachable");
+    assert_eq!(out, "");
+    assert_eq!(code, 1);
+
+    let (out, _) = rush("BASH_VERSION=fake; echo $BASH_VERSION");
+    assert_eq!(out, "fake\n");
+}
+
+#[test]
+fn dirstack_variable_tracks_pushd_popd_and_cd() {
+    let dir = std::env::temp_dir().join(format!("rush_dirstack_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    let a = dir.join("a");
+    let a_display = a.display();
+    let b = dir.join("b");
+    let b_display = b.display();
+
+    // DIRSTACK[0] is always the current directory, even with no pushd yet.
+    let (out, _) = rush(&format!(r#"cd "{a_display}"; echo "${{DIRSTACK[0]}}""#));
+    assert_eq!(out, format!("{a_display}\n"));
+
+    // pushd prepends the old cwd behind the new one; popd removes it again.
+    let (out, _) = rush(&format!(
+        r#"cd "{a_display}" && pushd "{b_display}" >/dev/null && echo "${{DIRSTACK[@]}}" && popd >/dev/null && echo "${{DIRSTACK[@]}}""#
+    ));
+    assert_eq!(out, format!("{b_display} {a_display}\n{a_display}\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(unix)]

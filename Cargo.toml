@@ -38,6 +38,16 @@ libc = "0.2"
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+# benches/shell_bench.rs — throughput for the lexer/parser, arithmetic
+# evaluator, glob matcher, and variable expansion (see src/lib.rs, which
+# exists so this and fuzz/ can link those modules in-process).
+criterion = "0.5"
+
+[[bench]]
+name = "shell_bench"
+harness = false
+
 [features]
 # rush's `sys` facade — and the line editor's — are backed by the hand-rolled
 # rusty_libc crate by default. That is Linux-only, so the backend is actually

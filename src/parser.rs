@@ -164,7 +164,7 @@ const COND_UNARY_OPS: &[&str] =
 /// Recursive-descent parse of a lexed `[[ ... ]]` interior:
 /// `or := and (\'||\' and)*`, `and := not (\'&&\' not)*`,
 /// `not := \'!\' not | \'(\' or \')\' | primary`.
-pub(crate) fn parse_cond_expr(toks: &[lexer::CondTok]) -> Result<CondAst, ParseError> {
+pub fn parse_cond_expr(toks: &[lexer::CondTok]) -> Result<CondAst, ParseError> {
     let mut pos = 0;
     let ast = cond_or(toks, &mut pos)?;
     if pos != toks.len() {
@@ -356,7 +356,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-pub(crate) const RESERVED: &[&str] = &[
+pub const RESERVED: &[&str] = &[
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "in", "case",
     "esac", "select", "coproc", "{", "}",
 ];

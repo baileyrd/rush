@@ -15,9 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux exercises the Unix job-control path (job.rs); Windows exercises
-        # the foreground-only fallback.
-        os: [ubuntu-latest, windows-latest]
+        # Linux exercises the Unix job-control path (job.rs) on the default
+        # rusty_libc backend; macOS exercises the same job-control path but
+        # on the libc-crate backend (the only option there — rusty_libc is
+        # Linux-only, see Cargo.toml); Windows exercises the foreground-only
+        # fallback.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +46,32 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+  libc-backend:
+    # The `--no-default-features --features libc-backend` escape hatch
+    # (Cargo.toml) forces the plain-libc backend on Linux too, instead of
+    # the default rusty_libc one — real, documented, shipped surface area
+    # that the `test` job above never exercises. Built and tested here so
+    # it can't silently bit-rot the way it once did (see git history:
+    # RLIMIT_RTTIME was wired into the rusty_libc backend's re-export list
+    # but never the plain-libc one, breaking this feature outright).
+    name: libc-backend feature (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-libc-backend-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --verbose --no-default-features --features libc-backend
+      - name: Test
+        run: cargo test --verbose --no-default-features --features libc-backend
+
   clippy:
     name: clippy (Linux, includes job.rs)
     runs-on: ubuntu-latest
@@ -52,3 +81,104 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --all-targets
+      - name: clippy (libc-backend)
+        run: cargo clippy --all-targets --no-default-features --features libc-backend
+
+  bench-check:
+    # Not a real benchmark run (numbers from a shared CI runner aren't
+    # trustworthy for perf tracking) — just compiles benches/shell_bench.rs
+    # and runs each benchmark for ~1 sample so a future change can't
+    # silently break the bench harness itself (e.g. by changing a
+    # signature `benches/shell_bench.rs` relies on) unnoticed. Run
+    # `cargo bench` locally for real numbers.
+    name: benchmark build check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo bench --bench shell_bench -- --sample-size 10 --measurement-time 1 --warm-up-time 1
+
+  coverage:
+    # Informational only — no external service (Codecov et al.) and no
+    # pass/fail threshold, just visibility into what fraction of src/ the
+    # existing test suite (145 unit + 224 integration) actually exercises,
+    # which nothing in this repo previously reported at all. The lcov
+    # report is uploaded as a build artifact; the summary table also
+    # prints straight to the job log.
+    name: coverage (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        run: |
+          cargo llvm-cov --no-clean --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+  deny:
+    # Supply-chain hygiene: known-vulnerable/yanked advisories, disallowed
+    # licenses, and (via deny.toml's [sources]) git dependencies from
+    # anywhere other than rush's own three sibling crates — relevant here
+    # specifically because rusty_regx/rusty_lines/rusty_libc are pulled
+    # straight from GitHub rather than crates.io.
+    name: cargo-deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  fuzz-smoke:
+    # Not a real fuzzing campaign (that belongs in a scheduled/manual job
+    # with real wall-clock budget) — just enough of a run (a few seconds
+    # per target) to catch the harness itself bit-rotting silently, the
+    # same failure mode the libc-backend job above exists to catch for
+    # that feature. fuzz/ links `rush` as a library (src/lib.rs) and
+    # exercises lexer::lex/parser::parse, arith::eval, and
+    # glob::match_component directly, in-process — rush's three
+    # hand-rolled, adversarial-input-facing components with no
+    # third-party parser behind them.
+    name: fuzz targets build & smoke run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Smoke run each target
+        run: |
+          set -e
+          for target in lex_parse arith glob_match; do
+            cargo fuzz run "$target" -- -max_total_time=10 -max_len=256
+          done

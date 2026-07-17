@@ -115,6 +115,26 @@ Job control (`&`, Ctrl-Z, `fg`/`bg`, `jobs`) is **Unix only** — it relies on
 POSIX process groups and signals. On other platforms the shell runs foreground
 commands only and `&` is rejected.
 
+## Packaging & Installation
+
+- **[docs/rush.1](docs/rush.1)** — man page (invocation flags, startup
+  files, builtins, special variables). Render locally with
+  `man docs/rush.1` (or `man ./docs/rush.1` if it's not on `$MANPATH`);
+  installed automatically by the Homebrew formula below, and packaged
+  alongside the binary in every tagged release's tarball/zip.
+- **[completions/](completions)** — bash/zsh completion for `rush`'s own
+  invocation flags (`rush <TAB>` at your regular shell's prompt) — not
+  to be confused with rush's own, much larger in-shell completion engine
+  (`src/completion.rs`) for commands typed *inside* rush.
+- **[packaging/homebrew/rush.rb](packaging/homebrew/rush.rb)** — a
+  Homebrew formula for a personal tap (`brew tap baileyrd/rush … && brew
+  install rush`); not in homebrew-core given the project's own
+  "experimental" status.
+- Tagged releases (`.github/workflows/release.yml`) publish prebuilt
+  binaries for Linux (x86_64), macOS (arm64 and x86_64), and Windows
+  (x64) — each archive bundles the binary, `LICENSE`, the man page, and
+  the completion scripts.
+
 ## Documentation
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture, data-flow
@@ -130,6 +150,7 @@ commands only and `&` is rejected.
 
 ```
 src/
+  lib.rs        module tree root (pub mod ...) — main.rs, fuzz/, and benches/ all link against it
   main.rs       entry point: argv dispatch (script / -c / REPL), read→parse→run loop
   completion.rs tab completion: builtins/$PATH in command position, files elsewhere
   lexer.rs      tokenizer: input string → Vec<Token> (words keep their quoting)
@@ -147,4 +168,11 @@ src/
 
 tests/
   exec_behavior.rs   black-box coverage of exec.rs's runtime, against the compiled binary
+
+fuzz/       cargo-fuzz targets (lex+parse, arith, glob) — `cargo +nightly fuzz run <target>`
+benches/    criterion throughput benchmarks — `cargo bench`
+docs/rush.1        man page
+completions/       bash/zsh completion for rush's own invocation flags
+packaging/homebrew/rush.rb   Homebrew formula (personal tap)
+deny.toml   cargo-deny config (advisories/licenses/bans/sources) — `cargo deny check`
 ```

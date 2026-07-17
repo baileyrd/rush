@@ -464,6 +464,36 @@ fn main() -> std::io::Result<()> {
         },
     );
     vars::set("RUSH_VERSION", env!("CARGO_PKG_VERSION"));
+    // `$BASH_VERSION`/`$BASH_VERSINFO` (compat shim): plenty of real-world
+    // scripts gate bash-only syntax behind `[ -n "$BASH_VERSION" ]` or
+    // inspect `$BASH_VERSINFO` for a minimum version before using it, and
+    // silently fall back to a POSIX-only path under any other shell —
+    // rush qualifies for neither check today. `docs/CAPABILITY_GAPS.md`
+    // verifies rush's own parity against bash 5.2 specifically, so that's
+    // the version reported here: an honest "if it works on bash 5.2, it
+    // should work here" signal, not a claim to *be* bash — `$RUSH_VERSION`
+    // still identifies the real shell. `BASH_VERSINFO` is readonly,
+    // matching bash; `BASH_VERSION` stays a plain assignable variable,
+    // also matching bash (scripts do sometimes override it to force a
+    // compat path).
+    vars::set("BASH_VERSION", "5.2.21(1)-release");
+    vars::set_array(
+        "BASH_VERSINFO",
+        vec![
+            "5".to_string(),
+            "2".to_string(),
+            "21".to_string(),
+            "1".to_string(),
+            "release".to_string(),
+            vars::get("MACHTYPE").unwrap_or_default(),
+        ],
+    );
+    vars::set_attrs("BASH_VERSINFO", vars::Attrs { readonly: true, ..Default::default() });
+    // `$DIRSTACK` (bash's array view of the `pushd`/`popd` stack):
+    // `DIRSTACK[0]` is always the current directory even before any
+    // `pushd`, so seed it once at startup rather than waiting for the
+    // first stack mutation.
+    builtins::sync_dirstack();
     // Functions exported by a parent shell (`BASH_FUNC_name%%` entries,
     // C98) become defined functions.
     builtins::import_functions();

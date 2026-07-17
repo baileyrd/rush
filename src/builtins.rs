@@ -1024,6 +1024,17 @@ fn current_dir_string() -> Option<String> {
     std::env::current_dir().ok().map(|p| p.display().to_string())
 }
 
+/// Mirror the stack into `$DIRSTACK`, bash's own array view of it —
+/// `DIRSTACK[0]` is always the current directory, the rest follow `dirs`'
+/// order — full paths, unlike `dirs`' own `~`-abbreviated display. Called
+/// after every mutation (`cd`, `pushd`, `popd`, `dirs -c`) since the
+/// current-directory slot tracks `cd` too, not just the stack itself.
+pub(crate) fn sync_dirstack() {
+    let mut entries = vec![current_dir_string().unwrap_or_default()];
+    DIR_STACK.with(|s| entries.extend(s.borrow().iter().rev().cloned()));
+    crate::vars::set_array("DIRSTACK", entries);
+}
+
 /// `pushd [dir]` (C72): with a dir, cd there and push the old cwd; with
 /// none, swap the top two entries — printing the stack either way, like
 /// bash.
@@ -1051,6 +1062,7 @@ fn pushd_cmd(argv: &[String]) -> i32 {
             }
         }
     }
+    sync_dirstack();
     println!("{}", dirs_display());
     0
 }
@@ -1072,6 +1084,7 @@ fn popd_cmd(argv: &[String]) -> i32 {
             eprintln!("popd: +{n}: directory stack index out of range");
             return 1;
         }
+        sync_dirstack();
         println!("{}", dirs_display());
         return 0;
     }
@@ -1092,6 +1105,7 @@ fn dirs_cmd(argv: &[String]) -> i32 {
     match argv.get(1).map(String::as_str) {
         Some("-c") => {
             DIR_STACK.with(|s| s.borrow_mut().clear());
+            sync_dirstack();
             0
         }
         Some("-v") => {
@@ -1252,6 +1266,7 @@ fn cd(argv: &[String]) -> i32 {
     if let Ok(dir) = std::env::current_dir() {
         crate::vars::set("PWD", &dir.display().to_string());
     }
+    sync_dirstack();
     if going_back {
         println!("{target}");
     }

@@ -179,7 +179,7 @@ fn spawn_pipeline(pipeline: &Pipeline) -> Result<SpawnOutcome, String> {
                     // cover.
                     Err(e) if i == 0 && is_last => {
                         return Ok(SpawnOutcome::Immediate(crate::exec::spawn_failure_status(
-                            &cmd.argv[0],
+                            &cmd.argv,
                             &e,
                         )));
                     }

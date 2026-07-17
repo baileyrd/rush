@@ -983,7 +983,7 @@ pub fn exec_cmd(argv: &[String]) -> i32 {
         // Exit without running EXIT traps: a real `exec` replaces the
         // image, so the traps never run on Unix either.
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        Err(err) => std::process::exit(spawn_failure_status(program, &err)),
+        Err(err) => std::process::exit(spawn_failure_status(&argv[idx..], &err)),
     }
 }
 
@@ -2457,7 +2457,7 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
             // `job::spawn_pipeline` for why that narrower case isn't
             // covered here too.
             Err(e) if i == 0 && is_last => {
-                return Ok((spawn_failure_status(&cmd.argv[0], &e), captured));
+                return Ok((spawn_failure_status(&cmd.argv, &e), captured));
             }
             Err(e) => return Err(format!("{}: {e}", cmd.argv[0])),
         };
@@ -2905,6 +2905,23 @@ fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> 
     }
 }
 
+/// `command_not_found_handle` (the bash/zsh convention Debian/Ubuntu's own
+/// bash uses for its "did you mean `apt install foo`?" suggestions): if the
+/// script or interactive session has defined a function by this exact name,
+/// a standalone command that fails to resolve calls it — with the failed
+/// command's own argv, `$1` the command name and the rest its arguments,
+/// exactly bash's own convention — instead of rush printing its usual
+/// "command not found" and returning 127. The handler is responsible for
+/// its own diagnostic and exit status, same as real bash. Returns `None`
+/// (fall through to the ordinary 127 path) when no such function exists.
+fn command_not_found_handle(argv: &[String]) -> Option<i32> {
+    crate::func::get("command_not_found_handle")?;
+    let mut call_argv = Vec::with_capacity(argv.len() + 1);
+    call_argv.push("command_not_found_handle".to_string());
+    call_argv.extend_from_slice(argv);
+    call_function(&call_argv).ok()
+}
+
 /// Prints the usual "command not found"/"found but couldn't run it"-style
 /// message for a failed spawn and returns the matching POSIX exit status —
 /// 127 specifically for "no such command" (`io::ErrorKind::NotFound`), 126
@@ -2913,7 +2930,11 @@ fn clone_or_materialize(sink: &mut Sink, _real_pipe_read: &mut Option<File>) -> 
 /// real bash: `126` for `/some/dir` or a non-executable file, `127` for a
 /// plain typo). Doesn't try to match bash's own message wording, only its
 /// functional behavior, same as every other error message in this shell.
-pub(crate) fn spawn_failure_status(name: &str, err: &std::io::Error) -> i32 {
+/// `argv` is the failed command's own argv (`argv[0]` the name) — needed,
+/// not just the name, so a 127 can be handed to `command_not_found_handle`
+/// with the original arguments intact.
+pub(crate) fn spawn_failure_status(argv: &[String], err: &std::io::Error) -> i32 {
+    let name = &argv[0];
     // Windows rejects `resolve_program`'s synthetic trailing-`/` path before
     // ever looking for the file ("program path has no file name",
     // `InvalidInput`) rather than failing the lookup with `NotFound` the way
@@ -2928,8 +2949,14 @@ pub(crate) fn spawn_failure_status(name: &str, err: &std::io::Error) -> i32 {
         // A trailing `/` here is (almost always) the synthetic one
         // `resolve_program`/`command_bypass` append to force a clean
         // NotFound instead of a PATH search — don't leak it into the
-        // diagnostic.
-        eprintln!("rush: {}: command not found", name.strip_suffix('/').unwrap_or(name));
+        // diagnostic or the handler's own `$1`.
+        let clean_name = name.strip_suffix('/').unwrap_or(name).to_string();
+        let mut clean_argv = argv.to_vec();
+        clean_argv[0] = clean_name.clone();
+        if let Some(status) = command_not_found_handle(&clean_argv) {
+            return status;
+        }
+        eprintln!("rush: {clean_name}: command not found");
         127
     } else {
         eprintln!("rush: {name}: {err}");

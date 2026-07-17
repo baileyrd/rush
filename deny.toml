@@ -12,6 +12,14 @@ targets = [
     { triple = "x86_64-pc-windows-msvc" },
     { triple = "aarch64-apple-darwin" },
 ]
+# criterion (benches/shell_bench.rs, dev-only — never shipped in the
+# actual rush binary) pulls in `regex` transitively, which the [bans]
+# `deny` list below bans for the *product* dependency graph (the `=~`
+# engine swap, C56). Excluded here rather than dropping the ban, since
+# the ban's whole point is that rush's own shipped code never
+# reintroduces `regex` — a benchmark harness dependency doing so isn't
+# the same risk.
+exclude = ["criterion"]
 
 [advisories]
 # Fail the build on a known security advisory (RUSTSEC) for anything in

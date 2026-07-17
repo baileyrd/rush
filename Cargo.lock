@@ -35,8 +35,8 @@ dependencies = [
 
 [[package]]
 name = "rusty_regx"
-version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_regx?branch=main#6c8f6a26ac7fc61f8586a942a4cb9a7835ad8d97"
+version = "0.2.0"
+source = "git+https://github.com/baileyrd/rusty_regx?rev=eb278bd839a62a1a4fbbb4d34a357884e47f4a0d#eb278bd839a62a1a4fbbb4d34a357884e47f4a0d"
 
 [[package]]
 name = "unicode-width"

@@ -9,26 +9,13 @@
 //! background and stopped jobs are managed with real job control (`fg`/`bg`/
 //! `jobs`, Ctrl-Z); other platforms run foreground-only.
 
-mod alias;
-mod arith;
-mod builtins;
-mod completion;
-mod exec;
-mod expand;
-mod func;
-mod glob;
-mod history_expand;
-#[cfg(unix)]
-mod job;
-mod lexer;
-mod parser;
-#[cfg(unix)]
-mod sys;
-mod trap;
-mod unparse;
-mod vars;
-#[cfg(not(unix))]
-mod winstdio;
+// Every module lives in the `rush` lib crate (`src/lib.rs`) now — pulled
+// in here as a glob import so the rest of this file's bare `vars::`/
+// `builtins::`/… paths (and `mod tests`' `use super::*`) keep resolving
+// exactly as they did when these were local `mod` declarations. Split out
+// so `fuzz/`/`benches/` can link against the same modules directly,
+// in-process, instead of through a subprocess.
+use rush::*;
 
 use std::path::PathBuf;
 
@@ -155,12 +142,12 @@ fn rc_path() -> Option<PathBuf> {
 /// is seeded into it at startup (C36), and falling back to `std::env::var`
 /// on top would resurrect its original value even after `unset` (C40).
 fn prompt() -> String {
-    match crate::vars::get("PS1") {
+    match vars::get("PS1") {
         // After the escape pass, `$(...)`/`${...}` expand too (bash's
         // default `promptvars`, C126) — how every git-branch-in-prompt
         // setup works.
         Some(ps1) => {
-            let escaped = expand_ps1(&ps1);
+            let escaped = expand::expand_ps1(&ps1);
             expand::expand_dollars(&escaped).unwrap_or(escaped)
         }
         None => default_prompt(),
@@ -170,9 +157,9 @@ fn prompt() -> String {
 /// `$PS2` with the same escape + `$` expansion as `$PS1` (C127) — the
 /// continuation prompt used to be a hardcoded `"> "`.
 fn prompt_ps2() -> String {
-    match crate::vars::get("PS2") {
+    match vars::get("PS2") {
         Some(ps2) => {
-            let escaped = expand_ps1(&ps2);
+            let escaped = expand::expand_ps1(&ps2);
             expand::expand_dollars(&escaped).unwrap_or(escaped)
         }
         None => "> ".to_string(),
@@ -193,167 +180,7 @@ fn run_prompt_command() {
 }
 
 fn default_prompt() -> String {
-    format!("{} $ ", cwd_string())
-}
-
-/// A small, rush-specific escape set (not the full bash set): `\w`/`\W` (cwd,
-/// cwd basename), `\u`/`\h` (user, host), `\$` (`#` for root, else `$`), `\?`
-/// (last exit status — bash has no equivalent; real PS1s get this via a
-/// command substitution instead), and the wider bash set (C125): `\e`/`\a`
-/// escape/bell, `\[`/`\]` (dropped — the editor is ANSI-width-aware, so
-/// the non-printing markers aren't needed), time/date (`\t \T \@ \A \d
-/// \D{fmt}` — fmt ignored, `\d`-style output), `\j` (job count), `\!`/`\#`
-/// (history/command number), `\s`/`\v`/`\V` (shell name/version), `\nnn`
-/// octal, `\n`, `\\`. An unrecognized escape is kept literal (backslash and
-/// all) rather than silently dropped.
-pub(crate) fn expand_ps1(ps1: &str) -> String {
-    let mut out = String::new();
-    let mut chars = ps1.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('w') => out.push_str(&cwd_string_trimmed()),
-            Some('W') => out.push_str(&cwd_basename()),
-            Some('u') => out.push_str(&username()),
-            Some('h') => out.push_str(&hostname_short()),
-            Some('H') => out.push_str(&hostname()),
-            Some('$') => out.push(prompt_char()),
-            Some('?') => out.push_str(&crate::vars::last_status().to_string()),
-            Some('n') => out.push('\n'),
-            Some('e') => out.push('\x1b'),
-            Some('a') => out.push('\x07'),
-            Some('r') => out.push('\r'),
-            // Non-printing-span markers: the editor measures ANSI widths
-            // itself, so these simply vanish instead of rendering as
-            // literal `\[`/`\]` garbage (C125).
-            Some('[') | Some(']') => {}
-            Some('t') => out.push_str(&prompt_time("%H:%M:%S")),
-            Some('T') => out.push_str(&prompt_time("%I:%M:%S")),
-            Some('@') => out.push_str(&prompt_time("%I:%M %p")),
-            Some('A') => out.push_str(&prompt_time("%H:%M")),
-            Some('d') => out.push_str(&prompt_time("%a %b %e")),
-            Some('D') => {
-                // `\D{fmt}` — strftime with the given format.
-                let mut fmt = String::new();
-                if chars.peek() == Some(&'{') {
-                    chars.next();
-                    for fc in chars.by_ref() {
-                        if fc == '}' {
-                            break;
-                        }
-                        fmt.push(fc);
-                    }
-                }
-                out.push_str(&prompt_time(if fmt.is_empty() { "%a %b %e %H:%M:%S" } else { &fmt }));
-            }
-            Some('j') => {
-                #[cfg(unix)]
-                out.push_str(&job::count().to_string());
-                #[cfg(not(unix))]
-                out.push('0');
-            }
-            Some('!') | Some('#') => {
-                out.push_str(&(builtins::history_entries().len() + 1).to_string())
-            }
-            Some('s') => out.push_str("rush"),
-            Some('v') | Some('V') => out.push_str(env!("CARGO_PKG_VERSION")),
-            Some('l') => out.push_str("tty"),
-            Some(d @ '0'..='7') => {
-                let mut n = d.to_digit(8).unwrap();
-                for _ in 0..2 {
-                    match chars.peek().and_then(|c| c.to_digit(8)) {
-                        Some(x) => {
-                            n = n * 8 + x;
-                            chars.next();
-                        }
-                        None => break,
-                    }
-                }
-                out.push(char::from_u32(n).unwrap_or('\u{fffd}'));
-            }
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-/// `\t`-family time escapes: strftime via `printf %(fmt)T`'s shared
-/// formatter would be ideal, but it lives in `builtins`' private module —
-/// a tiny UTC formatter here mirrors it for the prompt's needs.
-fn prompt_time(fmt: &str) -> String {
-    let epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    builtins::strftime_utc(fmt, epoch)
-}
-
-/// `\w` honoring `$PROMPT_DIRTRIM` (C127): keep only the last N path
-/// components, `~`-abbreviating `$HOME` first like bash.
-fn cwd_string_trimmed() -> String {
-    let mut cwd = cwd_string();
-    if let Some(home) = vars::get("HOME").filter(|h| !h.is_empty() && cwd.starts_with(h.as_str())) {
-        cwd = format!("~{}", &cwd[home.len()..]);
-    }
-    let trim = vars::get("PROMPT_DIRTRIM").and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0);
-    if let Some(n) = trim {
-        let parts: Vec<&str> = cwd.split('/').collect();
-        if parts.len() > n + 1 {
-            let kept = &parts[parts.len() - n..];
-            let lead = if cwd.starts_with('~') { "~/.../" } else { ".../" };
-            return format!("{lead}{}", kept.join("/"));
-        }
-    }
-    cwd
-}
-
-fn hostname_short() -> String {
-    hostname().split('.').next().unwrap_or_default().to_string()
-}
-
-fn cwd_string() -> String {
-    std::env::current_dir()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "?".into())
-}
-
-fn cwd_basename() -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "/".into())
-}
-
-fn username() -> String {
-    vars::get("USER")
-        .or_else(|| vars::get("USERNAME"))
-        .unwrap_or_else(|| "user".into())
-}
-
-fn hostname() -> String {
-    // `vars::get` — `HOSTNAME` is seeded at startup from the kernel
-    // (C106), so this works on the common Linux setups where the
-    // environment variable isn't exported.
-    vars::get("HOSTNAME").unwrap_or_else(|| "host".into())
-}
-
-#[cfg(unix)]
-fn prompt_char() -> char {
-    if unsafe { crate::sys::getuid() } == 0 { '#' } else { '$' }
-}
-
-#[cfg(not(unix))]
-fn prompt_char() -> char {
-    '$'
+    format!("{} $ ", expand::cwd_string())
 }
 
 fn main() -> std::io::Result<()> {
@@ -371,7 +198,7 @@ fn main() -> std::io::Result<()> {
     // rather than panicking).
     #[cfg(unix)]
     unsafe {
-        crate::sys::signal(crate::sys::SIGPIPE, crate::sys::SIG_DFL);
+        sys::signal(sys::SIGPIPE, sys::SIG_DFL);
     }
     // `TERM`/`HUP` traps (C21) need to work in every mode, not just
     // interactively — the target use case (a container's PID 1 catching
@@ -427,14 +254,14 @@ fn main() -> std::io::Result<()> {
     // environment loop above, so a stale inherited `PPID` from a parent
     // shell's environment can't shadow the real value.
     #[cfg(unix)]
-    vars::set("PPID", &unsafe { crate::sys::getppid() }.to_string());
+    vars::set("PPID", &unsafe { sys::getppid() }.to_string());
 
     // The standard identity/platform variables (C106), seeded like PPID
     // (after the environment loop, so stale inherited copies can't shadow
     // the real values). `UID`/`EUID` are readonly, same as bash.
     #[cfg(unix)]
     {
-        let uid = unsafe { crate::sys::getuid() }.to_string();
+        let uid = unsafe { sys::getuid() }.to_string();
         vars::set("UID", &uid);
         vars::set("EUID", &uid); // sys carries no geteuid; same value
         for name in ["UID", "EUID"] {
@@ -885,7 +712,7 @@ fn interactive() -> std::io::Result<()> {
                         // complete command is read, before it executes —
                         // same expansion as PS1.
                         if let Some(ps0) = vars::get("PS0").filter(|p| !p.is_empty()) {
-                            let escaped = expand_ps1(&ps0);
+                            let escaped = expand::expand_ps1(&ps0);
                             print!("{}", expand::expand_dollars(&escaped).unwrap_or(escaped));
                             use std::io::Write as _;
                             let _ = std::io::stdout().flush();
@@ -956,38 +783,38 @@ mod tests {
 
     #[test]
     fn literal_text_passes_through() {
-        assert_eq!(expand_ps1("plain > "), "plain > ");
+        assert_eq!(expand::expand_ps1("plain > "), "plain > ");
     }
 
     #[test]
     fn ansi_and_bracket_escapes() {
         // C125: `\e` becomes ESC and `\[`/`\]` vanish — the standard
         // colored PS1 used to render as literal `\[\e[32m\]` garbage.
-        assert_eq!(expand_ps1(r"\[\e[32m\]x\[\e[0m\]"), "\x1b[32mx\x1b[0m");
-        assert_eq!(expand_ps1(r"\a\r"), "\x07\r");
-        assert_eq!(expand_ps1(r"\007"), "\x07");
-        assert_eq!(expand_ps1(r"\s"), "rush");
+        assert_eq!(expand::expand_ps1(r"\[\e[32m\]x\[\e[0m\]"), "\x1b[32mx\x1b[0m");
+        assert_eq!(expand::expand_ps1(r"\a\r"), "\x07\r");
+        assert_eq!(expand::expand_ps1(r"\007"), "\x07");
+        assert_eq!(expand::expand_ps1(r"\s"), "rush");
     }
 
     #[test]
     fn newline_and_backslash_escapes() {
-        assert_eq!(expand_ps1(r"a\nb"), "a\nb");
-        assert_eq!(expand_ps1(r"a\\b"), r"a\b");
+        assert_eq!(expand::expand_ps1(r"a\nb"), "a\nb");
+        assert_eq!(expand::expand_ps1(r"a\\b"), r"a\b");
     }
 
     #[test]
     fn unknown_escape_kept_literal() {
-        assert_eq!(expand_ps1(r"\z"), r"\z");
+        assert_eq!(expand::expand_ps1(r"\z"), r"\z");
     }
 
     #[test]
     fn trailing_backslash_kept_literal() {
-        assert_eq!(expand_ps1(r"end\"), r"end\");
+        assert_eq!(expand::expand_ps1(r"end\"), r"end\");
     }
 
     #[test]
     fn exit_status_escape() {
         vars::set_last_status(42);
-        assert_eq!(expand_ps1(r"[\?]"), "[42]");
+        assert_eq!(expand::expand_ps1(r"[\?]"), "[42]");
     }
 }

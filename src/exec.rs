@@ -414,7 +414,7 @@ fn run_compound_with_redirects(rc: &RawCompound) -> Result<i32, String> {
     run_compound(&rc.compound)
 }
 
-pub(crate) fn run_compound(compound: &Compound) -> Result<i32, String> {
+pub fn run_compound(compound: &Compound) -> Result<i32, String> {
     match compound {
         // `[[ expr ]]` (C55): 0 when true, 1 when false, 2 on an
         // evaluation error (bad operator, unfinished `=~`) — bash's own
@@ -1555,7 +1555,7 @@ fn with_prefix_assignments<F: FnOnce() -> R, R>(cmd: &Command, run: F) -> R {
 /// Run a builtin or function from a forked pipeline-stage child (C82):
 /// functions shadow builtins, same precedence as the foreground path.
 /// The caller has already wired fds and applied redirects.
-pub(crate) fn run_stage_command_in_child(cmd: &Command) -> i32 {
+pub fn run_stage_command_in_child(cmd: &Command) -> i32 {
     with_prefix_assignments(cmd, || {
         if cmd.argv.first().is_some_and(|n| crate::func::exists(n)) {
             return call_function(&cmd.argv).unwrap_or(1);
@@ -1597,7 +1597,7 @@ fn dispatch_builtin(cmd: &Command) -> i32 {
 /// `job::spawn_compound_stage`). Unix only: needs a real `dup`/`dup2` to save
 /// and restore descriptors that outlive this call.
 #[cfg(unix)]
-pub(crate) fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<StdioGuard, String> {
+pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<StdioGuard, String> {
     use std::os::unix::io::AsRawFd;
 
     let mut guard = StdioGuard { saved: Vec::new() };
@@ -1776,7 +1776,7 @@ fn set_cloexec(f: &File) -> Result<(), String> {
 /// dropped — including on an early return via `?`, so a redirect that fails
 /// partway through never leaves the shell talking to the wrong fd.
 #[cfg(unix)]
-pub(crate) struct StdioGuard {
+pub struct StdioGuard {
     saved: Vec<(i32, i32)>,
 }
 
@@ -1824,7 +1824,7 @@ impl Drop for StdioGuard {
 /// standard descriptors exist here: a redirect naming fd 3+ is a clear
 /// runtime error rather than a silent collapse onto stdout.
 #[cfg(not(unix))]
-pub(crate) fn redirect_stdio(
+pub fn redirect_stdio(
     redirects: &[Redirect],
     heredoc: Option<&str>,
 ) -> Result<StdioGuard, String> {
@@ -1938,7 +1938,7 @@ fn flush_std_slot(slot: u32) {
 /// and only then drops the objects backing the redirects (`owned`), so a
 /// target file/pipe closes strictly after no slot references its handle.
 #[cfg(not(unix))]
-pub(crate) struct StdioGuard {
+pub struct StdioGuard {
     saved: Vec<(u32, crate::winstdio::RawHandle)>,
     /// Keeps redirect targets (opened files, the here-doc pipe reader)
     /// alive while a std slot points at their raw handles — `SetStdHandle`
@@ -2285,7 +2285,7 @@ fn capture_via_self_reexec(cmd: &Command) -> Result<(i32, String), String> {
 /// dispatch — the only difference is *how* isolation is achieved (a real
 /// process here, `fork` there).
 #[cfg(not(unix))]
-pub(crate) fn run_internal_capture(argv: Vec<String>) -> i32 {
+pub fn run_internal_capture(argv: Vec<String>) -> i32 {
     let cmd = Command {
         argv,
         redirects: Vec::new(),
@@ -2321,7 +2321,7 @@ pub(crate) fn run_internal_capture(argv: Vec<String>) -> i32 {
 /// `File` is stashed in `PENDING_PROC_SUBS` rather than dropped here, for
 /// `close_pending_proc_subs` to close once that's safe to do.
 #[cfg(unix)]
-pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, String> {
+pub fn process_substitute(src: &str, write_side: bool) -> Result<String, String> {
     use std::os::unix::io::AsRawFd;
 
     let list = crate::parser::parse(src).map_err(|e| e.to_string())?;
@@ -2378,7 +2378,7 @@ pub(crate) fn process_substitute(src: &str, write_side: bool) -> Result<String, 
 
 /// No `fork` on this platform.
 #[cfg(not(unix))]
-pub(crate) fn process_substitute(_src: &str, _write_side: bool) -> Result<String, String> {
+pub fn process_substitute(_src: &str, _write_side: bool) -> Result<String, String> {
     Err("process substitution is not supported on this platform".into())
 }
 
@@ -2504,7 +2504,7 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
 /// non-zero status among all stages, or 0 if every stage succeeded —
 /// verified directly against real bash (not "the first failure", nor "any
 /// failure" — specifically the one closest to the end).
-pub(crate) fn pipeline_status(stage_statuses: &[i32]) -> i32 {
+pub fn pipeline_status(stage_statuses: &[i32]) -> i32 {
     if crate::vars::pipefail() {
         stage_statuses.iter().rev().find(|&&s| s != 0).copied().unwrap_or(0)
     } else {
@@ -2575,7 +2575,7 @@ fn prefix_env_value(name: &str, op: &crate::vars::AssignOp) -> Option<String> {
     }
 }
 
-pub(crate) fn build_stage(
+pub fn build_stage(
     cmd: &Command,
     stdin_src: Option<Stdio>,
     is_last: bool,
@@ -2933,7 +2933,7 @@ fn command_not_found_handle(argv: &[String]) -> Option<i32> {
 /// `argv` is the failed command's own argv (`argv[0]` the name) — needed,
 /// not just the name, so a 127 can be handed to `command_not_found_handle`
 /// with the original arguments intact.
-pub(crate) fn spawn_failure_status(argv: &[String], err: &std::io::Error) -> i32 {
+pub fn spawn_failure_status(argv: &[String], err: &std::io::Error) -> i32 {
     let name = &argv[0];
     // Windows rejects `resolve_program`'s synthetic trailing-`/` path before
     // ever looking for the file ("program path has no file name",
@@ -2968,7 +2968,7 @@ pub(crate) fn spawn_failure_status(argv: &[String], err: &std::io::Error) -> i32
 /// across two descriptors (`stdout` and `stderr`) before spawn — something
 /// `Stdio::piped()` can't do, since it only exposes the pipe to `std` internals.
 #[cfg(unix)]
-pub(crate) fn make_pipe() -> Result<(File, File), String> {
+pub fn make_pipe() -> Result<(File, File), String> {
     use std::os::unix::io::FromRawFd;
 
     let mut fds = [0i32; 2];
@@ -3012,7 +3012,7 @@ fn open_write(file: &str, mode: crate::parser::RedirMode) -> Result<File, String
 /// `None` and this would be a no-op regardless; making it a compile-time no-op
 /// keeps the thread out of the Linux build entirely.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
+pub fn feed_heredoc(child: &mut Child, cmd: &Command) {
     if let Some(body) = &cmd.heredoc {
         if let Some(mut stdin) = child.stdin.take() {
             let body = body.clone();
@@ -3027,13 +3027,13 @@ pub(crate) fn feed_heredoc(child: &mut Child, cmd: &Command) {
 /// Linux no-op: the here-doc is already the child's stdin (a memfd), so there
 /// is nothing to feed and no thread to spawn. See the non-Linux variant.
 #[cfg(target_os = "linux")]
-pub(crate) fn feed_heredoc(_child: &mut Child, _cmd: &Command) {}
+pub fn feed_heredoc(_child: &mut Child, _cmd: &Command) {}
 
 /// A human-readable rendering of a pipeline, for the `jobs` listing. Only the
 /// Unix job runner uses it. A compound stage isn't reconstructed back to
 /// source text (its body is a full `CommandList`) — just labeled by kind.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn pipeline_text(pipeline: &Pipeline) -> String {
+pub fn pipeline_text(pipeline: &Pipeline) -> String {
     pipeline
         .commands
         .iter()

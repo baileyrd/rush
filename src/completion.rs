@@ -274,7 +274,7 @@ pub fn highlight_line(line: &str) -> String {
 /// command position — pure logic, unit-testable apart from the key-event
 /// plumbing in `AbbrSpaceHandler`. Returns the byte offset the word
 /// starts at and its expansion.
-pub(crate) fn abbr_expansion(line: &str, pos: usize) -> Option<(usize, String)> {
+pub fn abbr_expansion(line: &str, pos: usize) -> Option<(usize, String)> {
     let start = line[..pos]
         .rfind(char::is_whitespace)
         .map(|i| i + 1)

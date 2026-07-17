@@ -466,9 +466,9 @@ pub fn reap_background() {
 // ---- builtins: jobs / fg / bg ------------------------------------------------
 
 /// Names dispatched by `builtin`, for `builtins::is_builtin`/`all_names`.
-pub(crate) const NAMES: &[&str] = &["jobs", "fg", "bg", "kill", "wait", "disown"];
+pub const NAMES: &[&str] = &["jobs", "fg", "bg", "kill", "wait", "disown"];
 
-pub(crate) fn is_builtin(name: &str) -> bool {
+pub fn is_builtin(name: &str) -> bool {
     NAMES.contains(&name)
 }
 
@@ -755,7 +755,7 @@ pub fn ids() -> Vec<usize> {
 /// The signal-name table `kill` (and `kill -l`) uses (C64) — expanded
 /// from the original seven names to the full set a script plausibly
 /// sends, each mapped to its real `libc` constant.
-pub(crate) const SIGNAL_TABLE: &[(&str, c_int)] = &[
+pub const SIGNAL_TABLE: &[(&str, c_int)] = &[
     ("HUP", crate::sys::SIGHUP),
     ("INT", crate::sys::SIGINT),
     ("QUIT", crate::sys::SIGQUIT),
@@ -1012,7 +1012,7 @@ fn reclaim_terminal() {
     give_terminal(shell_pgid);
 }
 
-pub(crate) fn job_control_enabled() -> bool {
+pub fn job_control_enabled() -> bool {
     STATE.with(|s| s.borrow().job_control)
 }
 
@@ -1024,7 +1024,7 @@ fn state_label(state: JobState) -> &'static str {
     }
 }
 
-pub(crate) fn exit_code(status: c_int) -> i32 {
+pub fn exit_code(status: c_int) -> i32 {
     if wifexited(status) {
         crate::sys::WEXITSTATUS(status)
     } else if wifsignaled(status) {

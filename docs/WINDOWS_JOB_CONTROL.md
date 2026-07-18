@@ -4,17 +4,17 @@ Originally written as a design doc, not yet implemented — scoping closing
 Windows' job-control gap without writing the implementation itself, staged
 so review and CI feedback could happen incrementally rather than in one
 large unverifiable patch. **Milestones 1–4 of the staging plan below have
-since landed**: `src/winjob.rs`, backed by
+since landed, plus `disown`**: `src/winjob.rs`, backed by
 [rusty_win32](https://github.com/baileyrd/rusty_win32)'s `job`/`process`
 modules (Job Objects, `CreateProcessW`-with-`CREATE_SUSPENDED`) rather than
 the originally-sketched hand-rolled FFI, since that crate now exists and
 already provides exactly these primitives, verified independently against
-real `windows-latest` CI. `cmd &`/`jobs`/`wait`/`kill`/`$!` all work now,
-for a single external command; see `winjob.rs`'s own module doc for its
-remaining, narrower-than-full scope (no pipelines, no backgrounded
-builtins/functions, no `disown` yet). The rest of this document — the
-design rationale, "Deliberately out of scope", and the staging plan's own
-step-by-step detail — is otherwise unchanged from the original design pass.
+real `windows-latest` CI. `cmd &`/`jobs`/`wait`/`kill`/`disown`/`$!` all
+work now, for a single external command; see `winjob.rs`'s own module doc
+for its remaining, narrower-than-full scope (no pipelines, no backgrounded
+builtins/functions). The rest of this document — the design rationale,
+"Deliberately out of scope", and the staging plan's own step-by-step
+detail — is otherwise unchanged from the original design pass.
 
 **Scope decision (already made, not this document's to revisit):** background
 jobs only — `cmd &`, `jobs`, `wait`, `kill`, a real `$!`. Explicitly *not* in
@@ -253,7 +253,8 @@ session. Concretely:
    `CreateProcessW`-with-`CREATE_SUSPENDED`/`ResumeThread`, so duplicating
    those declarations in rush itself would've been pure redundancy.
    `$!`/`jobs`/`\j` work; `wait pid`/`wait %n`/`kill`/`disown` don't exist
-   yet (`jobs` is the only builtin `winjob::NAMES` lists so far).
+   yet at this step (`jobs` is the only builtin `winjob::NAMES` lists so
+   far — steps 2–3 and the "Still open" note below add the rest).
    `tests/windows_job_control.rs` covers this: backgrounding returns
    immediately and is listed, `$!` is the backgrounded pid, and background
    pipelines/builtins are rejected outright rather than silently doing the
@@ -289,10 +290,41 @@ session. Concretely:
    no Stopped state (no Ctrl-Z).
 5. Only then: evaluate whether the polling-based done-detection from step 1
    is worth upgrading to the I/O-completion-port approach, based on whatever
-   real usage/perf signal shows up. Still open, along with `disown` (never
-   explicitly staged above, but listed in the original `winjob.rs` surface
-   sketch) and the `wait -n` polling-vs-`WaitForMultipleObjects` question
-   step 2 flagged.
+   real usage/perf signal shows up. Still open, along with the `wait -n`
+   polling-vs-`WaitForMultipleObjects` question step 2 flagged.
+
+**`disown`** (never explicitly staged above as its own numbered step, but
+listed in the original `winjob.rs` surface sketch) is **done**, and turned
+out to need a real primitive addition, not just table bookkeeping: a job
+created with kill-on-close ties its member process's lifetime to the job
+handle staying open in *this* process, which closes implicitly at the
+owning process's own exit — so simply dropping a `winjob.rs` table entry
+and closing its handles the way `job.rs`'s own Unix `disown_cmd` does
+(where a pid is already independent of anything the shell holds) would
+kill the process on the spot, or at the latest when the shell itself
+exits. `rusty_win32` gained `job::clear_kill_on_close` (the reverse of
+`set_kill_on_close`) specifically so `disown` can reverse that limit
+before releasing the handles — the actual "detach" operation here.
+`tests/windows_job_control.rs::disown_detaches_the_job_while_the_shell_is_still_running`
+proves the reversal actually takes effect, checked from *within* the
+still-running shell right after `disown` runs.
+
+**Known caveat, found via real CI rather than assumed:** an earlier
+version of that test tried to prove survival from *outside* the `rush -c`
+process, after it had already exited — the stronger claim `disown` is
+really for. It failed consistently on `windows-latest`, even though
+`clear_kill_on_close` never reported an error and the process was
+confirmed alive moments earlier from inside the shell. The likely
+explanation: `clear_kill_on_close` only clears kill-on-close on the job
+*this shell created*; it can't detach a process from an *ambient* job the
+shell's own process might already be nested in (Windows automatically
+nests every child a job member spawns into that same job too), and
+GitHub Actions' Windows runners are documented to wrap each step's
+process tree in exactly such a job for orphan cleanup. There's no
+portable way to detect or opt out of this from inside the shell, so
+`disown`'s test coverage only asserts what's actually attributable to
+`winjob.rs`/`rusty_win32`'s own code, not the sandbox a background job
+happens to run under — see `winjob.rs::disown_cmd`'s own doc comment.
 
 Each step above should be its own PR — small enough for CI's after-the-fact
 signal to be a meaningful check, in keeping with why this was scoped as a

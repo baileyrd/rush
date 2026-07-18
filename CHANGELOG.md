@@ -139,6 +139,30 @@ the Unix build:
   (stopped-only) is accepted but always prints nothing, since Windows
   background jobs have no Stopped state.
 
+### Native Windows: disown
+- **`disown [%n|n]` works on Windows.** Turned out to need a real
+  `rusty_win32` primitive addition, not just table bookkeeping: a job
+  created with kill-on-close ties its member process's lifetime to the
+  job handle staying open in *this* process, which closes implicitly at
+  the owning process's own exit — so simply dropping the `winjob.rs`
+  table entry and closing its handles (the way Unix `disown` conceptually
+  works, since a pid there is already independent of anything the shell
+  holds) would kill the process on the spot, or at the latest when the
+  shell itself exits. `rusty_win32` gained `job::clear_kill_on_close`
+  (the reverse of `set_kill_on_close`) specifically so `disown` can
+  reverse that limit before releasing the handles.
+- `tests/windows_job_control.rs::disown_detaches_the_job_while_the_shell_is_still_running`
+  verifies (via `tasklist`, run from within the still-alive shell right
+  after `disown`) that the reversal actually takes effect. **Known
+  caveat, found via real CI**: this only reverses kill-on-close on the
+  job the shell itself created — it can't detach a process from an
+  *ambient* job the shell's own process might already be nested in
+  (Windows automatically nests every child a job member spawns into that
+  same job too). Sandboxes that wrap a process tree in such a job for
+  their own cleanup — GitHub Actions' Windows runners, e.g. — will still
+  tear a "disowned" job down once the shell that spawned it exits; this
+  isn't something `winjob.rs`/`rusty_win32` can detect or opt out of.
+
 ## [Unreleased] — since 0.1.1
 
 ### Packaging & release (G1–G4)

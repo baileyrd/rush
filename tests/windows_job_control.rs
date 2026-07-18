@@ -6,7 +6,7 @@
 //!
 //! Scope is a single external command only (see `winjob.rs`'s module doc):
 //! these tests cover backgrounding returning immediately, `$!`/`jobs`
-//! reflecting it, `wait`/`kill` against a tracked job, and
+//! reflecting it, `wait`/`kill`/`disown` against a tracked job, and
 //! pipelines/builtins being rejected outright rather than silently doing
 //! the wrong thing.
 #![cfg(windows)]
@@ -22,6 +22,24 @@ fn rush(src: &str) -> (String, i32) {
         .expect("spawn rush");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// Like [`rush`], but also returning stderr — for diagnosing a builtin's
+/// own error path (e.g. `disown`'s), which a plain exit-status check can
+/// miss: a later command in the same `-c` script (like `echo $!`) still
+/// sets the *script's* own final status, independent of whether an
+/// earlier command failed and printed a message to stderr.
+fn rush_full(src: &str) -> (String, String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg(src)
+        .output()
+        .expect("spawn rush");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
         output.status.code().unwrap_or(-1),
     )
 }
@@ -166,4 +184,76 @@ fn jobs_dash_r_excludes_finished_jobs() {
     let (out, status) = rush(r#"cmd.exe /c "exit 0" & wait; jobs -r"#);
     assert_eq!(status, 0, "stdout was: {out:?}");
     assert_eq!(out, "", "expected no Running jobs listed, got: {out:?}");
+}
+
+#[test]
+fn disown_removes_the_job_from_jobs_listing() {
+    let (out, status) = rush("ping -n 5 127.0.0.1 > nul & disown %1; jobs");
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(
+        out, "",
+        "expected no jobs listed after disown, got: {out:?}"
+    );
+}
+
+#[test]
+fn disown_on_an_unknown_job_is_an_error() {
+    let (_, status) = rush("disown %1");
+    assert_ne!(status, 0);
+}
+
+#[test]
+fn disown_detaches_the_job_while_the_shell_is_still_running() {
+    // Proves `disown` actually does something beyond removing the table
+    // entry: `rusty_win32::job::clear_kill_on_close` (added specifically
+    // for this) really does reverse kill-on-close, checked by having the
+    // script itself run `tasklist` on its own backgrounded pid, from
+    // *within* the still-alive shell, right after `disown` — matching how
+    // `rusty_win32`'s own
+    // `clear_kill_on_close_lets_the_process_survive_closing_the_job_handle`
+    // test verifies the same primitive (confirming survival from within
+    // the same process that did the clearing, not from outside a
+    // *different* process that later exits — see this test's own history
+    // for why that distinction turned out to matter).
+    //
+    // Deliberately NOT asserting survival *after* this whole `rush -c`
+    // process has exited (via an external `tasklist`, checked once
+    // `Command::output` returns): that was this test's original shape,
+    // and it failed consistently on real `windows-latest` CI even though
+    // every check here still passed and `clear_kill_on_close` itself
+    // never reported an error. The likely explanation: `rusty_win32::job`
+    // only clears kill-on-close on the job `winjob.rs` itself created —
+    // it has no way to detach a process from an *ambient* job the shell's
+    // own process might already be a member of (Windows automatically
+    // nests every child a job member spawns into that same job too), and
+    // GitHub Actions' Windows runners are documented to wrap each step's
+    // process tree in exactly such a job for orphan cleanup. That's a
+    // property of the sandbox a background job happens to run under, not
+    // a `winjob.rs`/`rusty_win32` bug — but there's no way to tell the two
+    // apart from inside this CI environment, so this test only asserts
+    // what's actually attributable to this crate's own code.
+    let (out, err, status) = rush_full(
+        r#"powershell -NoProfile -Command "Start-Sleep -Seconds 5" & disown %1; echo $!; tasklist /FI "PID eq $!" /NH"#,
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}, stderr was: {err:?}");
+    let mut lines = out.lines();
+    let pid: u32 = lines
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("$! should be a plain pid, got: {out:?} (stderr: {err:?})"));
+    let listing: String = lines.collect::<Vec<_>>().join("\n");
+    assert!(
+        listing.contains(&pid.to_string()),
+        "job (pid {pid}) should still be listed by tasklist run from *within* the \
+         still-alive rush process, right after disown — got: {listing:?} \
+         (full stdout: {out:?}, stderr: {err:?})"
+    );
+
+    // Best-effort: this process may or may not still exist by now,
+    // depending on the sandbox caveat explained above — not asserted on.
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
 }

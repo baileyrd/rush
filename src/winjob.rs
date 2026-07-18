@@ -6,11 +6,11 @@
 //! primitive that lets a process be assigned to a job *before* its main
 //! thread — or anything it later spawns — runs a single instruction.
 //!
-//! **Milestones 1–4 of the design doc's staging plan are implemented.** A
-//! single external command only — no pipelines, no compound stages, no
-//! backgrounding a builtin or function — each rejected with a plain error
-//! rather than silently doing something wrong. `disown` isn't implemented
-//! yet.
+//! **Milestones 1–4 of the design doc's staging plan, plus `disown`, are
+//! implemented.** A single external command only — no pipelines, no
+//! compound stages, no backgrounding a builtin or function — each
+//! rejected with a plain error rather than silently doing something
+//! wrong.
 //!
 //! `fg`/`bg`/Ctrl-Z terminal hand-off are permanently out of scope (see the
 //! design doc's "Deliberately out of scope" section) — Windows consoles
@@ -25,9 +25,10 @@ use crate::exec::{Pipeline, Stage};
 
 struct JobEntry {
     id: usize,
-    /// Owns kill-on-close semantics: closing this handle (e.g. on shell
-    /// exit, once that's wired up) kills every process in it, including
-    /// any grandchild the backgrounded command spawned itself.
+    /// Owns kill-on-close semantics: closing this handle (including
+    /// implicitly, at plain shell exit) kills every process in it,
+    /// including any grandchild the backgrounded command spawned itself —
+    /// unless [`disown_cmd`] has explicitly reversed that first.
     job: rusty_win32::RawHandle,
     process: rusty_win32::RawHandle,
     pid: u32,
@@ -57,8 +58,8 @@ thread_local! {
 }
 
 /// Names dispatched by [`builtin`], for `builtins::other_is_builtin`/
-/// `other_names`. `disown` isn't implemented yet.
-pub const NAMES: &[&str] = &["jobs", "wait", "kill"];
+/// `other_names`.
+pub const NAMES: &[&str] = &["jobs", "wait", "kill", "disown"];
 
 pub fn is_builtin(name: &str) -> bool {
     NAMES.contains(&name)
@@ -71,6 +72,7 @@ pub fn builtin(argv: &[String]) -> Option<i32> {
         "jobs" => Some(jobs_cmd(argv)),
         "wait" => Some(wait_cmd(argv)),
         "kill" => Some(kill_cmd(argv)),
+        "disown" => Some(disown_cmd(argv)),
         _ => None,
     }
 }
@@ -505,6 +507,72 @@ fn kill_cmd(argv: &[String]) -> i32 {
         }
     }
     status
+}
+
+/// `disown [%n|n]` — drop a job from the shell's job table (the most
+/// recent not-yet-finished one when no spec is given, matching
+/// `job.rs::disown_cmd`'s own `select_index` fallback) without
+/// terminating it.
+///
+/// Unlike Unix — where a pid is already independent of anything the shell
+/// holds, so "stop tracking it" is the *entire* operation — a Windows job
+/// created with kill-on-close ties its member process's lifetime to the
+/// job handle staying open in *this* process. Simply dropping the table
+/// entry and closing the handles the way Unix `disown` conceptually does
+/// would kill the process on the spot (or, if the handles were merely
+/// leaked instead, when the shell itself later exits and the OS closes
+/// them anyway) — the opposite of what `disown` is for. So this explicitly
+/// reverses kill-on-close first (`rusty_win32::job::clear_kill_on_close`,
+/// added specifically for this) before releasing the handles, which is
+/// the actual "detach" operation on this platform.
+///
+/// **Known caveat**, confirmed via real Windows CI rather than assumed:
+/// this only clears kill-on-close on the job *this shell created* for its
+/// own tracking. If the shell's own process is itself already a member of
+/// some *ambient* job (Windows automatically nests every child a job
+/// member spawns into that same job too — not something a caller opts
+/// into), a disowned process can still die once the shell's own process
+/// exits, because that ambient job's own kill-on-close (if any) is
+/// untouched by anything this function does. Environments that wrap a
+/// process tree in such a job for their own cleanup purposes — GitHub
+/// Actions' Windows runners, e.g. — will still tear down a "disowned" job
+/// once the shell that spawned it exits. There's no portable way to
+/// detect or opt out of this from inside the shell.
+fn disown_cmd(argv: &[String]) -> i32 {
+    let idx = STATE.with(|s| {
+        let s = s.borrow();
+        match argv.get(1) {
+            Some(spec) => {
+                let id: usize = spec.trim_start_matches('%').parse().ok()?;
+                s.jobs.iter().position(|j| j.id == id)
+            }
+            None => s.jobs.iter().rposition(|j| j.exit_code.is_none()),
+        }
+    });
+    let Some(idx) = idx else {
+        eprintln!("disown: current: no such job");
+        return 1;
+    };
+    let job = STATE.with(|s| s.borrow_mut().jobs.remove(idx));
+    // SAFETY: `job.job` is a valid, currently-open Job Object handle this
+    // entry exclusively owned until it was just removed from the table
+    // above.
+    if let Err(e) = unsafe { rusty_win32::job::clear_kill_on_close(job.job) } {
+        eprintln!("disown: {}", std::io::Error::from(e));
+        // Couldn't make it safe to detach — put it back rather than lose
+        // track of (and leak) it silently.
+        STATE.with(|s| s.borrow_mut().jobs.push(job));
+        return 1;
+    }
+    // SAFETY: `job.process`/`job.job` are both valid, each closed exactly
+    // once — safe now that kill-on-close no longer applies to either, and
+    // a plain process handle never carries kill-on-close semantics of its
+    // own regardless (closing it was always just dropping a reference).
+    unsafe {
+        let _ = rusty_win32::handle::close(job.process);
+        let _ = rusty_win32::handle::close(job.job);
+    }
+    0
 }
 
 /// `jobs [-l|-p|-r|-s]` — matching `job.rs::jobs_cmd`'s flag set, except

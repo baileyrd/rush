@@ -529,13 +529,13 @@ Objects, a genuinely different primitive from POSIX process groups, not a
 port of `job.rs`'s `libc` calls. `fg`/`bg` terminal hand-off, Ctrl-Z,
 process substitution, and `coproc` are explicitly out of that scope — each a
 separately hard problem the design doc explains individually. **Milestones
-1–4 of that design have since landed** as `src/winjob.rs`
+1–4 of that design, plus `disown`, have since landed** as `src/winjob.rs`
 (`#[cfg(not(unix))]`, alongside `job.rs`'s `#[cfg(unix)]`), backed by the
 [rusty_win32](https://github.com/baileyrd/rusty_win32) crate's `job`/
-`process` modules — `&`/`jobs`/`wait`/`kill`/`$!` all work for a single
-background external command; `disown`/pipelines/backgrounded builtins
-don't yet (see `winjob.rs`'s own module doc, and the design doc's
-"Suggested staging" for what remains). So the "foreground-only,
+`process` modules — `&`/`jobs`/`wait`/`kill`/`disown`/`$!` all work for a
+single background external command; pipelines/backgrounded builtins don't
+(see `winjob.rs`'s own module doc, and the design doc's "Suggested
+staging" for what remains). So the "foreground-only,
 unconditionally, by construction" conclusion above no longer holds in
 full: Windows still has
 no `job.rs`-style process-group/terminal-control job control (that part of

@@ -297,11 +297,13 @@ session. Concretely:
    (see `winjob.rs::jobs_cmd`'s own doc comment). `-s` (stopped-only)
    is accepted but always prints nothing — Windows background jobs have
    no Stopped state (no Ctrl-Z).
-5. Only then: evaluate whether the polling-based done-detection from step 1
-   is worth upgrading to the I/O-completion-port approach, based on whatever
-   real usage/perf signal shows up. Still open; the `wait -n`
-   polling-vs-`WaitForMultipleObjects` question step 2 flagged is no
-   longer part of this — `wait_any` closed it.
+5. Evaluated, not pursued: the polling-based done-detection from step 1
+   isn't worth upgrading to an I/O-completion-port approach — the poll only
+   ever runs at most once per prompt (or, under
+   `docs/ASYNC_JOB_NOTIFICATIONS.md`'s proposal, once per ~200ms idle tick),
+   never in a hot loop, so there's no real cost IOCP would actually recover.
+   The `wait -n` polling-vs-`WaitForMultipleObjects` question step 2
+   flagged is separately closed — `wait_any` did that.
 
 **`disown`** (never explicitly staged above as its own numbered step, but
 listed in the original `winjob.rs` surface sketch) is **done**, and turned

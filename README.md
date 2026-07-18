@@ -8,10 +8,10 @@ A small, bash-compatible shell written in Rust — built to grow into a daily-us
 has a growing test suite, but it hasn't been hardened as a daily-driver shell
 yet — treat it as a project to explore and contribute to, not (yet) a drop-in
 `chsh` replacement. Full job control (`fg`/`bg`, Ctrl-Z, process groups) is
-**Unix only**; on Windows, `cmd &`/`jobs`/`$!` work for a single external
-command (via Windows Job Objects, see `docs/WINDOWS_JOB_CONTROL.md`), but
-`wait`/`kill`/`disown`, backgrounded pipelines/builtins, and `fg`/`bg`/Ctrl-Z
-don't yet.
+**Unix only**; on Windows, `cmd &`/`jobs`/`wait`/`kill %n`/`$!` work for a
+single external command (via Windows Job Objects, see
+`docs/WINDOWS_JOB_CONTROL.md`), but `disown`, backgrounded pipelines/
+builtins, and `fg`/`bg`/Ctrl-Z don't yet.
 
 `rush` reads a command line, lexes and parses it, expands it, then executes the
 result. It covers most of the core POSIX shell language: pipelines and
@@ -73,7 +73,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Control flow | ✅ | `if`/`while`/`until`/`for`/`select` (`for`/`select x; do` with no `in` iterates `"$@"`), C-style `for ((init;cond;update))`, `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`, `local [name[=value]]…` for function-scoped variables; brace groups `{ …; }` |
 | Subshells | ✅ | `( … )` forks a real child on Unix (genuine isolation, incl. `exit`); state save/restore fallback elsewhere |
-| Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`/`wait`, `$!`) | ✅ | **Full support Unix only** — process groups, terminal hand-off, signals (`libc`). **Windows**: `&`/`jobs`/`$!` for a single external command via Windows Job Objects (`rusty_win32`); `wait`/`kill`/`disown`/`fg`/`bg`/Ctrl-Z not yet — see `docs/WINDOWS_JOB_CONTROL.md` |
+| Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`/`wait`, `$!`) | ✅ | **Full support Unix only** — process groups, terminal hand-off, signals (`libc`). **Windows**: `&`/`jobs`/`wait`/`kill %n`/`$!` for a single external command via Windows Job Objects (`rusty_win32`); `disown`/`fg`/`bg`/Ctrl-Z not yet — see `docs/WINDOWS_JOB_CONTROL.md` |
 
 ## Build & Run
 
@@ -166,8 +166,8 @@ src/
   vars.rs       shell state outliving a command: $?, variables, positional params, flow control
   exec.rs       runtime: sequence the list, run compounds, spawn processes, wire fds
   job.rs        Unix job control: process groups, terminal, signals, fg/bg/jobs/kill
-  winjob.rs     Windows background jobs: Job Objects (rusty_win32), &/jobs/$! (not fg/bg/kill/wait yet)
-  builtins.rs   in-process commands: cd, pwd, echo, export, test, … (+ jobs/fg/bg/kill on Unix, jobs on Windows)
+  winjob.rs     Windows background jobs: Job Objects (rusty_win32), &/jobs/wait/kill/$! (not fg/bg/disown yet)
+  builtins.rs   in-process commands: cd, pwd, echo, export, test, … (+ jobs/fg/bg/kill on Unix, jobs/wait/kill on Windows)
 
 tests/
   exec_behavior.rs        black-box coverage of exec.rs's runtime, against the compiled binary

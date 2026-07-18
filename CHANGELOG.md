@@ -122,6 +122,23 @@ the Unix build:
   `std::env::set_var`, so a background job spawned after an `export`/`unset`
   needs its own from-scratch environment block, not inherited-by-default.
 
+### Native Windows: wait/kill/jobs flags (milestones 2–4 of docs/WINDOWS_JOB_CONTROL.md)
+- **`wait [-n] [-p var] [pid|%job ...]` works on Windows** for jobs tracked
+  by `winjob.rs`, via `WaitForSingleObject` on the tracked process handle
+  directly. A `REAPED` map (mirroring `job.rs`'s own) lets a second `wait`
+  on an already-settled pid still report its status.
+- **`kill [-SIG] %n` works on Windows** via `TerminateJobObject`. Windows
+  has no real signal delivery, so unlike the Unix builtin the requested
+  signal can't actually be honored — every kill reports the same
+  conventional exit code (128+15) back through `wait`/`$?` regardless of
+  which flag was given. Only `%n` job-spec targets are supported, not a
+  bare pid (no raw `TerminateProcess` in `rusty_win32` to reach an
+  arbitrary process by pid).
+- **`jobs` gained `-p`/`-r`/`-s`** (`-l` and multi-job listing already
+  worked). `-n` (changed-since-last-notification) isn't implemented; `-s`
+  (stopped-only) is accepted but always prints nothing, since Windows
+  background jobs have no Stopped state.
+
 ## [Unreleased] — since 0.1.1
 
 ### Packaging & release (G1–G4)

@@ -4,10 +4,11 @@
 //! `rush()` helper uses, kept in a separate file since this is a
 //! platform-specific milestone easier to find and grow on its own.
 //!
-//! Milestone 1's scope (see `winjob.rs`'s module doc): a single external
-//! command only. These tests exercise exactly that — backgrounding
-//! returning immediately, `$!`/`jobs` reflecting it, and pipelines/builtins
-//! being rejected outright rather than silently doing the wrong thing.
+//! Scope is a single external command only (see `winjob.rs`'s module doc):
+//! these tests cover backgrounding returning immediately, `$!`/`jobs`
+//! reflecting it, `wait`/`kill` against a tracked job, and
+//! pipelines/builtins being rejected outright rather than silently doing
+//! the wrong thing.
 #![cfg(windows)]
 
 use std::process::Command;
@@ -85,4 +86,84 @@ fn jobs_lists_multiple_background_jobs_by_id() {
     assert_eq!(status, 0, "stdout was: {out:?}");
     assert!(out.contains("[1]"), "expected job [1] listed, got: {out:?}");
     assert!(out.contains("[2]"), "expected job [2] listed, got: {out:?}");
+}
+
+#[test]
+fn wait_on_dollar_bang_reports_the_exit_status() {
+    // `cmd.exe /c exit N` finishes essentially instantly and reports a
+    // known, exact exit code — `wait` blocks synchronously on it, so this
+    // is fully deterministic (no race the way a ping-timing assertion
+    // would be).
+    let (out, status) = rush(r#"cmd.exe /c "exit 5" & wait $!; echo $?"#);
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(out.trim(), "5");
+}
+
+#[test]
+fn wait_on_job_spec_reports_the_exit_status() {
+    let (out, status) = rush(r#"cmd.exe /c "exit 7" & wait %1; echo $?"#);
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(out.trim(), "7");
+}
+
+#[test]
+fn bare_wait_always_returns_zero_and_settles_the_job() {
+    // Bare `wait` (no operands) always succeeds regardless of what the
+    // background job itself exited with — matching `job.rs`'s own
+    // semantics. After it returns, the job's state is settled (no more
+    // race with `jobs`' own poll), so asserting Done here is safe, unlike
+    // the ping-based `jobs_lists_multiple_background_jobs_by_id` test.
+    let (out, status) = rush(r#"cmd.exe /c "exit 9" & wait; echo $?; jobs"#);
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    let mut lines = out.lines();
+    assert_eq!(
+        lines.next(),
+        Some("0"),
+        "bare wait's own status, got: {out:?}"
+    );
+    assert!(
+        out.contains("Done"),
+        "expected the job to show Done, got: {out:?}"
+    );
+}
+
+#[test]
+fn kill_terminates_the_job() {
+    // `ping`'s multi-second delay stands in for "still running enough
+    // that kill has something to actually terminate" — the assertion is
+    // that `wait %1` afterward reports the conventional killed-exit-code
+    // (128+15) rather than ping's own eventual (different) exit status,
+    // proving the process was actually torn down early via
+    // `TerminateJobObject`, not merely left to finish on its own.
+    let (out, status) = rush(
+        "ping -n 30 127.0.0.1 > nul & \
+         kill %1; \
+         wait %1; echo $?",
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(out.trim(), "143");
+}
+
+#[test]
+fn kill_on_an_unknown_job_is_an_error() {
+    let (_, status) = rush("kill %1");
+    assert_ne!(status, 0);
+}
+
+#[test]
+fn jobs_dash_p_lists_only_pids() {
+    let (out, status) = rush(r#"cmd.exe /c "exit 0" & jobs -p"#);
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    let pid: u32 = out
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("jobs -p should print a bare pid, got: {out:?}"));
+    assert!(pid > 0);
+}
+
+#[test]
+fn jobs_dash_r_excludes_finished_jobs() {
+    let (out, status) = rush(r#"cmd.exe /c "exit 0" & wait; jobs -r"#);
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(out, "", "expected no Running jobs listed, got: {out:?}");
 }

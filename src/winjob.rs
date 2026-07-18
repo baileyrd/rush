@@ -6,11 +6,11 @@
 //! primitive that lets a process be assigned to a job *before* its main
 //! thread — or anything it later spawns — runs a single instruction.
 //!
-//! **Milestone 1 (this file's current state, see the design doc's staging
-//! plan): a single external command only.** No pipelines, no compound
-//! stages, no backgrounding a builtin or function — each rejected with a
-//! plain error rather than silently doing something wrong. `wait`/`kill`/
-//! `disown`/multi-job `jobs -l` parity are follow-up milestones.
+//! **Milestones 1–4 of the design doc's staging plan are implemented.** A
+//! single external command only — no pipelines, no compound stages, no
+//! backgrounding a builtin or function — each rejected with a plain error
+//! rather than silently doing something wrong. `disown` isn't implemented
+//! yet.
 //!
 //! `fg`/`bg`/Ctrl-Z terminal hand-off are permanently out of scope (see the
 //! design doc's "Deliberately out of scope" section) — Windows consoles
@@ -47,11 +47,18 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
+    // Every pid this shell has itself waited to completion via `wait`,
+    // `jobs`, or the per-prompt reap, with its exit code — so `wait` can
+    // still report a background job's status even after something else
+    // already reaped/pruned it, matching `job.rs`'s own `REAPED` map (see
+    // its doc comment for why: waiting twice on the same pid still works).
+    static REAPED: RefCell<std::collections::HashMap<u32, i32>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// Names dispatched by [`builtin`], for `builtins::other_is_builtin`/
-/// `other_names`. Grows as `wait`/`kill`/`disown` land (see the module doc).
-pub const NAMES: &[&str] = &["jobs"];
+/// `other_names`. `disown` isn't implemented yet.
+pub const NAMES: &[&str] = &["jobs", "wait", "kill"];
 
 pub fn is_builtin(name: &str) -> bool {
     NAMES.contains(&name)
@@ -62,6 +69,8 @@ pub fn is_builtin(name: &str) -> bool {
 pub fn builtin(argv: &[String]) -> Option<i32> {
     match argv.first().map(String::as_str)? {
         "jobs" => Some(jobs_cmd(argv)),
+        "wait" => Some(wait_cmd(argv)),
+        "kill" => Some(kill_cmd(argv)),
         _ => None,
     }
 }
@@ -78,8 +87,8 @@ pub fn count() -> usize {
 }
 
 /// Run `pipeline` in the background: spawn it suspended, put it in a fresh
-/// Job Object, resume it, and record it. See the module doc for milestone
-/// 1's scope — anything beyond a single external command is a plain error,
+/// Job Object, resume it, and record it. See the module doc for the
+/// single-external-command scope — anything beyond that is a plain error,
 /// not a silent narrowing.
 pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
     let [Stage::Simple(cmd)] = pipeline.commands.as_slice() else {
@@ -229,18 +238,51 @@ pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
 /// further children would need `job::process_ids`/completion ports to
 /// track accurately, a follow-up.
 fn refresh_all() {
-    STATE.with(|s| {
-        for j in &mut s.borrow_mut().jobs {
+    let newly_done: Vec<(u32, u32)> = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let mut done = Vec::new();
+        for j in &mut s.jobs {
             if j.exit_code.is_none() {
                 // SAFETY: `j.process` is a valid, currently-open handle
                 // this job entry owns exclusively until closed by
                 // `reap_background`.
                 if let Ok(Some(code)) = unsafe { rusty_win32::process::wait(j.process, Some(0)) } {
                     j.exit_code = Some(code);
+                    done.push((j.pid, code));
                 }
             }
         }
+        done
     });
+    REAPED.with(|r| {
+        let mut r = r.borrow_mut();
+        for (pid, code) in newly_done {
+            r.insert(pid, code as i32);
+        }
+    });
+}
+
+/// Block on `process` (which must belong to job `pid`) until it exits,
+/// recording the exit code in both the job table (if the entry is still
+/// there) and [`REAPED`] (so a later `wait` on the same pid still reports
+/// it even once the job table entry itself is gone).
+fn wait_and_record(pid: u32, process: rusty_win32::RawHandle) -> i32 {
+    // SAFETY: `process` is a valid, currently-open handle — callers look
+    // it up from a live `JobEntry` (or, for `-n`, poll it before it's
+    // pruned) immediately before calling this.
+    let code = unsafe { rusty_win32::process::wait(process, None) }
+        .ok()
+        .flatten()
+        .unwrap_or(1) as i32;
+    STATE.with(|s| {
+        if let Some(j) = s.borrow_mut().jobs.iter_mut().find(|j| j.pid == pid) {
+            j.exit_code = Some(code as u32);
+        }
+    });
+    REAPED.with(|r| {
+        r.borrow_mut().insert(pid, code);
+    });
+    code
 }
 
 /// Report and drop finished background jobs — called once before each
@@ -262,11 +304,230 @@ pub fn reap_background() {
     });
 }
 
+/// `wait [-n] [-p var] [pid|%job ...]` — block until the given background
+/// jobs/pids (or, with none given, every one this shell knows about)
+/// finish. With no operands this always succeeds (status 0); with one or
+/// more, blocks on each in turn and reports the *last* one's own exit
+/// status. Mirrors `job.rs::wait_cmd`'s argument handling; `-f` (accepted
+/// there as a no-op, since `job.rs`'s own plain wait already does full
+/// termination) has no Windows equivalent to matter for, so it's simply
+/// not recognized here.
+fn wait_cmd(argv: &[String]) -> i32 {
+    let mut next = false;
+    let mut pid_var: Option<String> = None;
+    let mut targets: Vec<&String> = Vec::new();
+    let mut args = argv[1..].iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-n" => next = true,
+            "-p" => match args.next() {
+                Some(name) => pid_var = Some(name.clone()),
+                None => {
+                    eprintln!("wait: -p: option requires an argument");
+                    return 2;
+                }
+            },
+            _ => targets.push(arg),
+        }
+    }
+    if let Some(name) = &pid_var {
+        crate::vars::unset(name); // bash: unset until something is reaped
+    }
+    if next {
+        let (pid, status) = wait_next();
+        if let (Some(name), Some(pid)) = (&pid_var, pid) {
+            crate::vars::set(name, &pid.to_string());
+        }
+        return status;
+    }
+    if targets.is_empty() {
+        wait_all();
+        return 0;
+    }
+    let mut status = 0;
+    for target in &targets {
+        status = wait_one(target);
+    }
+    status
+}
+
+/// `wait -n`: block until any currently-tracked job exits, record it, and
+/// return its pid and exit status; 127 when there's nothing left to wait
+/// for. Windows has no `WaitForMultipleObjects` wrapper in `rusty_win32`
+/// yet, so this polls every not-yet-finished job's handle in turn — the
+/// same "poll with a zero timeout" primitive `refresh_all` already uses,
+/// just looped with a short sleep between sweeps instead of a single pass.
+fn wait_next() -> (Option<u32>, i32) {
+    loop {
+        let pending: Vec<(u32, rusty_win32::RawHandle)> = STATE.with(|s| {
+            s.borrow()
+                .jobs
+                .iter()
+                .filter(|j| j.exit_code.is_none())
+                .map(|j| (j.pid, j.process))
+                .collect()
+        });
+        if pending.is_empty() {
+            return (None, 127);
+        }
+        for (pid, process) in pending {
+            // SAFETY: `process` was read from a live `JobEntry` just above;
+            // nothing else closes a job's process handle except
+            // `reap_background`, which only runs between prompts, not
+            // concurrently with this loop (single-threaded shell).
+            if let Ok(Some(code)) = unsafe { rusty_win32::process::wait(process, Some(0)) } {
+                let code = code as i32;
+                STATE.with(|s| {
+                    if let Some(j) = s.borrow_mut().jobs.iter_mut().find(|j| j.pid == pid) {
+                        j.exit_code = Some(code as u32);
+                    }
+                });
+                REAPED.with(|r| {
+                    r.borrow_mut().insert(pid, code);
+                });
+                return (Some(pid), code);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Block until every job this shell currently knows isn't finished has
+/// finished, silently (unlike a completion notice, `wait` never prints one
+/// itself — that's `reap_background`'s job, at the next prompt).
+fn wait_all() {
+    loop {
+        let next = STATE.with(|s| {
+            s.borrow()
+                .jobs
+                .iter()
+                .find(|j| j.exit_code.is_none())
+                .map(|j| (j.pid, j.process))
+        });
+        let Some((pid, process)) = next else { break };
+        wait_and_record(pid, process);
+    }
+}
+
+/// Wait for one `wait` operand — a `%job` spec or a bare pid — returning
+/// its exit status (or a `wait`-specific error status if it names nothing
+/// real).
+fn wait_one(target: &str) -> i32 {
+    if let Some(spec) = target.strip_prefix('%') {
+        let found = spec.parse::<usize>().ok().and_then(|id| {
+            STATE.with(|s| {
+                s.borrow()
+                    .jobs
+                    .iter()
+                    .find(|j| j.id == id)
+                    .map(|j| (j.pid, j.process))
+            })
+        });
+        let Some((pid, process)) = found else {
+            eprintln!("wait: {target}: no such job");
+            return 127;
+        };
+        return wait_and_record(pid, process);
+    }
+
+    let Ok(pid) = target.parse::<u32>() else {
+        eprintln!("wait: `{target}': not a pid or valid job spec");
+        return 1;
+    };
+    if let Some(code) = REAPED.with(|r| r.borrow().get(&pid).copied()) {
+        return code;
+    }
+    let process = STATE.with(|s| {
+        s.borrow()
+            .jobs
+            .iter()
+            .find(|j| j.pid == pid)
+            .map(|j| j.process)
+    });
+    let Some(process) = process else {
+        eprintln!("wait: pid {pid} is not a child of this shell");
+        return 127;
+    };
+    wait_and_record(pid, process)
+}
+
+/// `kill [-SIG|-s SIG] %job ...` — terminate a tracked background job via
+/// its Job Object. Windows has no real signal delivery, so unlike
+/// `job.rs::kill_cmd`'s Unix counterpart the requested signal name/number
+/// can't actually be honored beyond "terminate it" — the flag is still
+/// accepted (so a script written for portability, e.g. `kill -9 %1`,
+/// doesn't hard-error over a distinction Windows genuinely can't make),
+/// but every kill reports the same conventional exit code back through
+/// `wait`/`$?` (128 + 15, matching what an ordinary `kill`-via-SIGTERM
+/// would report on Unix). A bare pid (no `%` prefix) isn't supported:
+/// `rusty_win32` has no raw `TerminateProcess`, only `TerminateJobObject`,
+/// which needs a job handle — something only a `%n`-tracked entry has.
+fn kill_cmd(argv: &[String]) -> i32 {
+    const KILLED_EXIT_CODE: u32 = 128 + 15;
+
+    let mut start = 1;
+    if argv.get(1).map(String::as_str) == Some("-s") {
+        if argv.get(2).is_none() {
+            eprintln!("kill: -s: option requires an argument");
+            return 1;
+        }
+        start = 3;
+    } else if argv.get(1).is_some_and(|a| a.starts_with('-')) {
+        start = 2;
+    }
+    if argv.len() <= start {
+        eprintln!("kill: usage: kill [-signal] %job ...");
+        return 1;
+    }
+
+    let mut status = 0;
+    for target in &argv[start..] {
+        let Some(spec) = target.strip_prefix('%') else {
+            eprintln!("kill: {target}: bare pids are not supported on this platform yet — use %n");
+            status = 1;
+            continue;
+        };
+        let Some(id) = spec.parse::<usize>().ok() else {
+            eprintln!("kill: %{spec}: no such job");
+            status = 1;
+            continue;
+        };
+        let job = STATE.with(|s| s.borrow().jobs.iter().find(|j| j.id == id).map(|j| j.job));
+        let Some(job) = job else {
+            eprintln!("kill: %{id}: no such job");
+            status = 1;
+            continue;
+        };
+        // SAFETY: `job` is a valid handle this job entry still owns.
+        if let Err(e) = unsafe { rusty_win32::job::terminate(job, KILLED_EXIT_CODE) } {
+            eprintln!("kill: %{id}: {}", std::io::Error::from(e));
+            status = 1;
+        }
+    }
+    status
+}
+
+/// `jobs [-l|-p|-r|-s]` — matching `job.rs::jobs_cmd`'s flag set, except
+/// `-n` (changed-since-last-notification only): that needs per-job
+/// notified-state bookkeeping this module doesn't keep (every job here is
+/// either still running or freshly finished and about to be pruned by the
+/// next `reap_background`, so there's no persistent "already told you"
+/// state to filter on the way `job.rs`'s does). `-s` (stopped only) always
+/// prints nothing — Windows background jobs have no Stopped state (no
+/// Ctrl-Z) — but is still accepted rather than rejected, for the same
+/// portability reason `kill`'s signal flags are accepted without being
+/// honorable.
 fn jobs_cmd(argv: &[String]) -> i32 {
     let mut long = false;
+    let mut pids_only = false;
+    let mut running_only = false;
+    let mut stopped_only = false;
     for arg in &argv[1..] {
         match arg.as_str() {
             "-l" => long = true,
+            "-p" => pids_only = true,
+            "-r" => running_only = true,
+            "-s" => stopped_only = true,
             other => {
                 eprintln!("jobs: {other}: invalid option");
                 return 2;
@@ -276,11 +537,15 @@ fn jobs_cmd(argv: &[String]) -> i32 {
     refresh_all();
     STATE.with(|s| {
         for j in &s.borrow().jobs {
-            let label = if j.exit_code.is_some() {
-                "Done"
-            } else {
-                "Running"
-            };
+            let done = j.exit_code.is_some();
+            if stopped_only || (running_only && done) {
+                continue;
+            }
+            if pids_only {
+                println!("{}", j.pid);
+                continue;
+            }
+            let label = if done { "Done" } else { "Running" };
             if long {
                 println!("[{}]  {} {}\t{}", j.id, j.pid, label, j.cmd);
             } else {

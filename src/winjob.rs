@@ -550,10 +550,15 @@ fn wait_cmd(argv: &[String]) -> i32 {
 
 /// `wait -n`: block until any currently-tracked job exits, record it, and
 /// return its pid and exit status; 127 when there's nothing left to wait
-/// for. Windows has no `WaitForMultipleObjects` wrapper in `rusty_win32`
-/// yet, so this polls every not-yet-finished job's handle in turn — the
-/// same "poll with a zero timeout" primitive `refresh_all` already uses,
-/// just looped with a short sleep between sweeps instead of a single pass.
+/// for. Blocks on every not-yet-finished job's handle at once via
+/// `rusty_win32::process::wait_any` (`WaitForMultipleObjects`) rather than
+/// polling — the follow-up `docs/WINDOWS_JOB_CONTROL.md` flagged once that
+/// wrapper existed. `WaitForMultipleObjects` caps at
+/// [`rusty_win32::process::MAXIMUM_WAIT_OBJECTS`] (64) handles per call:
+/// this shell's own job table is realistically never that large, but the
+/// rare overflow still falls back to a short-sleep poll across sweeps
+/// (the old, always-correct-if-coarser behavior) rather than silently
+/// ignoring anything past the 64th tracked job.
 fn wait_next() -> (Option<u32>, i32) {
     loop {
         let pending: Vec<(u32, rusty_win32::RawHandle)> = STATE.with(|s| {
@@ -567,25 +572,34 @@ fn wait_next() -> (Option<u32>, i32) {
         if pending.is_empty() {
             return (None, 127);
         }
-        for (pid, process) in pending {
-            // SAFETY: `process` was read from a live `JobEntry` just above;
-            // nothing else closes a job's process handle except
-            // `reap_background`, which only runs between prompts, not
-            // concurrently with this loop (single-threaded shell).
-            if let Ok(Some(code)) = unsafe { rusty_win32::process::wait(process, Some(0)) } {
-                let code = code as i32;
-                STATE.with(|s| {
-                    if let Some(j) = s.borrow_mut().jobs.iter_mut().find(|j| j.pid == pid) {
-                        j.exit_code = Some(code as u32);
-                    }
-                });
-                REAPED.with(|r| {
-                    r.borrow_mut().insert(pid, code);
-                });
-                return (Some(pid), code);
-            }
+        let overflow = pending.len() > rusty_win32::process::MAXIMUM_WAIT_OBJECTS;
+        let batch: Vec<rusty_win32::RawHandle> = pending
+            .iter()
+            .take(rusty_win32::process::MAXIMUM_WAIT_OBJECTS)
+            .map(|(_, process)| *process)
+            .collect();
+        // A real timeout only in the overflow case, so a sweep that misses
+        // the tail (jobs 65+) comes back around instead of blocking
+        // forever on a batch that might never include the one that exits.
+        let timeout = overflow.then_some(20);
+        // SAFETY: every handle in `batch` was read from a live `JobEntry`
+        // just above; nothing else closes a job's process handle except
+        // `reap_background`, which only runs between prompts, not
+        // concurrently with this loop (single-threaded shell).
+        if let Ok(Some((index, code))) = unsafe { rusty_win32::process::wait_any(&batch, timeout) }
+        {
+            let code = code as i32;
+            let pid = pending[index].0;
+            STATE.with(|s| {
+                if let Some(j) = s.borrow_mut().jobs.iter_mut().find(|j| j.pid == pid) {
+                    j.exit_code = Some(code as u32);
+                }
+            });
+            REAPED.with(|r| {
+                r.borrow_mut().insert(pid, code);
+            });
+            return (Some(pid), code);
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 

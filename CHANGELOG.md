@@ -192,6 +192,19 @@ the Unix build:
   covering both the pipe ends and any redirect target, rather than only
   the pipe ends.
 
+### Native Windows: `wait -n` via `WaitForMultipleObjects`
+- **`wait -n` now blocks on every tracked background job at once**
+  instead of polling. `rusty_win32` gained `process::wait_any`, a
+  `WaitForMultipleObjects(..., FALSE, ...)` wrapper mirroring
+  `process::wait`'s own timeout convention over a slice of handles; the
+  `wait/kill/jobs` milestone's short-sleep polling loop for `-n` — flagged
+  there as a follow-up once such a wrapper existed — is gone.
+  `WaitForMultipleObjects` caps at 64 handles per call: `wait_next`
+  batches the first 64 tracked jobs into one blocking call and falls back
+  to the old short-sleep poll across sweeps only in that (realistically
+  never-hit) overflow case, rather than silently ignoring anything past
+  the 64th tracked job.
+
 ## [Unreleased] — since 0.1.1
 
 ### Packaging & release (G1–G4)

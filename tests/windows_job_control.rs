@@ -207,6 +207,36 @@ fn wait_on_job_spec_reports_the_exit_status() {
 }
 
 #[test]
+fn wait_dash_n_reports_whichever_job_finishes_first() {
+    // A long-running job (%1) and one that finishes almost instantly
+    // (%2): `wait -n` should report the fast one without waiting on the
+    // slow one at all — proving it's actually blocking on the whole set
+    // via `rusty_win32::process::wait_any` (`WaitForMultipleObjects`),
+    // not just the first job in the table. The still-running job is left
+    // for the shell's own kill-on-close job teardown at process exit
+    // (the same pattern `background_command_returns_immediately_and_is_listed`
+    // and `dollar_bang_is_the_backgrounded_pid` already rely on), no
+    // explicit `kill`/`wait` needed here.
+    let (out, status) = rush(
+        "ping -n 30 127.0.0.1 > nul & \
+         cmd.exe /c \"exit 4\" & \
+         wait -n; echo $?; \
+         jobs",
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    let mut lines = out.lines();
+    assert_eq!(
+        lines.next(),
+        Some("4"),
+        "expected the fast job's own exit code from wait -n, got: {out:?}"
+    );
+    assert!(
+        out.contains("Running"),
+        "expected the still-running job listed, got: {out:?}"
+    );
+}
+
+#[test]
 fn bare_wait_always_returns_zero_and_settles_the_job() {
     // Bare `wait` (no operands) always succeeds regardless of what the
     // background job itself exited with — matching `job.rs`'s own

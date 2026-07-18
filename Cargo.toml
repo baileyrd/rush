@@ -19,9 +19,12 @@ rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "6466cd2d87
 # trait (completion, hints, highlighting, abbreviations, vi-mode flag).
 rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", branch = "main", default-features = false }
 
-# Job control (signals, wait, process groups, fds, rlimit) is Unix-only and
-# goes through the `sys` facade. The backend is target-driven (see the cfgs in
+# Unix job control (signals, wait, process groups, fds, rlimit) goes through
+# the `sys` facade. The backend is target-driven (see the cfgs in
 # src/sys.rs): rusty_libc on Linux by default, the libc crate on other Unix.
+# Windows background jobs (`winjob`, below) are a separate mechanism on a
+# separate crate — see that module's own doc comment for why it isn't a
+# port of `job.rs`'s libc calls.
 
 # Linux: rusty_libc is the default backend; libc only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -32,6 +35,14 @@ libc = { version = "0.2", optional = true }
 # Linux-only), so libc is a plain dependency there.
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 libc = "0.2"
+
+# Windows: `winjob`'s background-job support (`docs/WINDOWS_JOB_CONTROL.md`)
+# is built directly on rusty_win32's Job Object / suspended-spawn
+# primitives, not std::process::Command (no stable way to reach a
+# std::process::Child's thread handle for the suspend-then-assign-to-job
+# sequencing that needs).
+[target.'cfg(windows)'.dependencies]
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", branch = "main", features = ["std"] }
 
 # The integration tests drive the built binary and also make a few syscalls of
 # their own, so they always need libc.

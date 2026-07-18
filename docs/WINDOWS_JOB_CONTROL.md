@@ -1,13 +1,20 @@
-# Windows background jobs — a design doc, not yet implemented
+# Windows background jobs
 
-Written in response to a review request to scope closing Windows' job-control
-gap, without writing the implementation itself: the Win32 FFI this needs is
-hard to get right blind, and this session has no Windows machine to verify
-against interactively — only after-the-fact build/test signal from CI's
-`windows-latest` runner. This document is the foundation for a future
-session (or a human contributor) to implement against, staged so review and
-CI feedback can happen incrementally rather than in one large unverifiable
-patch.
+Originally written as a design doc, not yet implemented — scoping closing
+Windows' job-control gap without writing the implementation itself, staged
+so review and CI feedback could happen incrementally rather than in one
+large unverifiable patch. **Milestone 1 of the staging plan below has since
+landed**: `src/winjob.rs`, backed by
+[rusty_win32](https://github.com/baileyrd/rusty_win32)'s `job`/`process`
+modules (Job Objects, `CreateProcessW`-with-`CREATE_SUSPENDED`) rather than
+the originally-sketched hand-rolled FFI, since that crate now exists and
+already provides exactly these primitives, verified independently against
+real `windows-latest` CI. See `winjob.rs`'s own module doc for its current,
+narrower-than-full scope (a single external command only — no pipelines, no
+backgrounded builtins/functions, no `wait`/`kill`/`disown` yet). The rest of
+this document — the design rationale, the staging plan's remaining
+milestones, and "deliberately out of scope" — is otherwise unchanged from
+the original design pass.
 
 **Scope decision (already made, not this document's to revisit):** background
 jobs only — `cmd &`, `jobs`, `wait`, `kill`, a real `$!`. Explicitly *not* in
@@ -83,32 +90,38 @@ lifetime/resource management) are different concepts that happen to share a
 name. The proposed design uses one Windows Job Object per shell job — a
 clean 1:1 mapping, not a coincidence to paper over.
 
-## Proposed shape: a new `src/winjob.rs`, mirroring `job.rs`'s surface
+## Shape as implemented: `src/winjob.rs`, mirroring `job.rs`'s surface
 
 Not a shared module with `job.rs` — the implementations have nothing in
 common at the syscall level, same reasoning `sys.rs` splits by backend
-already documents. A new `#[cfg(not(unix))] mod winjob;` alongside the
-existing `#[cfg(unix)] mod job;` in `lib.rs`, matching the same public
-surface `exec.rs`/`builtins.rs` already call through so the call sites don't
-need `cfg`-splitting themselves beyond what they already have:
+already documents. `#[cfg(not(unix))] pub mod winjob;` sits alongside the
+existing `#[cfg(unix)] pub mod job;` in `lib.rs`, matching the same public
+surface `exec.rs`/`builtins.rs` call through so the call sites don't need
+`cfg`-splitting themselves beyond what they already have. Milestone 1's
+actual surface (see `winjob.rs` for the up-to-date signatures as later
+milestones grow it):
 
 ```rust
-// src/winjob.rs — sketch, not implemented
 pub fn run_background(pipeline: &Pipeline) -> Result<(), String> { .. }
-pub fn is_builtin(name: &str) -> bool { .. }      // "jobs" | "wait" | "kill" | "disown"
+pub fn is_builtin(name: &str) -> bool { .. }      // "jobs" so far; wait/kill/disown land with their milestones
 pub fn builtin(argv: &[String]) -> Option<i32> { .. }
 pub fn ids() -> Vec<usize> { .. }
 pub fn count() -> usize { .. }
-pub fn job_control_enabled() -> bool { .. }        // always false — see below
+pub fn reap_background() { .. }                    // called each prompt, main.rs's non-Unix counterpart to job::reap_background
 ```
 
-`exec::run_background`'s `#[cfg(not(unix))]` arm becomes `winjob::run_background`
-instead of the current `Err(...)`; `builtins.rs`'s `other_is_builtin`/
-`other_names` (currently `#[cfg(not(unix))]` → empty) route to `winjob`
-instead. `job_control_enabled()` should stay `false` on Windows even after
-this lands — that flag gates `fg`/`bg`/Ctrl-Z UI surface this design
+`exec::run_background`'s `#[cfg(not(unix))]` arm calls `winjob::run_background`
+instead of the original `Err(...)` stub; `builtins.rs`'s `other_is_builtin`/
+`other_names`/`other_builtin` route to `winjob` instead of their original
+empty/`None` stubs. No `job_control_enabled()` was added to `winjob`'s own
+surface: nothing outside `job.rs` itself calls that function generically
+(every call site is already `#[cfg(unix)]`-gated), so there was nothing to
+route to it — whether to announce `[id] pid` interactively is decided
+directly from `vars::interactive()` at the one call site that needs it
+instead. That flag gates `fg`/`bg`/Ctrl-Z UI surface this design
 deliberately doesn't implement (see below), not background-job capability
-itself.
+itself, so its absence here doesn't foreclose adding it later if `fg`/`bg`
+ever do land.
 
 ### Per-job state
 
@@ -129,7 +142,12 @@ A `JobEntry`-equivalent needs, per backgrounded job:
   thread; a first cut could reasonably start with polling (bash-for-Windows
   ports like MSYS2's own bash do exactly this for `$!`/`wait` fallbacks) and
   upgrade later — call this out explicitly in whatever PR lands it, don't
-  silently ship polling as if it were the final design.
+  silently ship polling as if it were the final design. **As implemented**:
+  `winjob.rs` took the polling first cut (`GetExitCodeProcess` via
+  `rusty_win32::process::wait` with a zero timeout, on the directly-spawned
+  process only — not yet the whole job subtree via `process_ids`), exactly
+  as this section anticipated; the completion-port upgrade remains a
+  follow-up, unstarted.
 
 ### `wait` semantics
 
@@ -226,18 +244,36 @@ session. Concretely:
 
 ## Suggested staging (smallest reviewable increments)
 
-1. `winjob.rs` skeleton + `CreateJobObjectW`/`AssignProcessToJobObject`
-   FFI declarations (hand-rolled `#[link(name = "kernel32")]`, matching
-   `winstdio.rs`'s existing convention — no new crate dependency), wired to
-   `exec::run_background` for the single-external-command case only. A new
-   Windows-only integration test (subprocess-driven, no ConPTY needed yet)
-   asserting `sleep_like_cmd &; echo done` returns immediately and `jobs`
-   shows one entry.
-2. `wait`/`$!`/exit status, via `WaitForSingleObject` on the tracked handle.
+1. **Done.** `winjob.rs` skeleton, wired to `exec::run_background` for the
+   single-external-command case only. Built on `rusty_win32::job`/
+   `rusty_win32::process` (that crate's own `job`/`process` modules,
+   verified independently on real `windows-latest` CI) rather than the
+   hand-rolled FFI originally sketched here — it now exists and already
+   provides `CreateJobObjectW`/`AssignProcessToJobObject`/
+   `CreateProcessW`-with-`CREATE_SUSPENDED`/`ResumeThread`, so duplicating
+   those declarations in rush itself would've been pure redundancy.
+   `$!`/`jobs`/`\j` work; `wait pid`/`wait %n`/`kill`/`disown` don't exist
+   yet (`jobs` is the only builtin `winjob::NAMES` lists so far).
+   `tests/windows_job_control.rs` covers this: backgrounding returns
+   immediately and is listed, `$!` is the backgrounded pid, and background
+   pipelines/builtins are rejected outright rather than silently doing the
+   wrong thing (the narrowing this section anticipated, confirmed
+   necessary and implemented as such — a background builtin would indeed
+   race `winstdio`'s process-global std-handle slots against the
+   foreground shell).
+2. `wait`/exit status, via `WaitForSingleObject` on the tracked handle.
+   (`$!` itself already works — that part of this milestone shipped in
+   step 1 above, since `spawn_suspended` naturally hands back the pid
+   `vars::set_last_bg_pid` needs regardless of whether `wait` can block on
+   it yet.)
 3. `kill %n` via `TerminateJobObject`.
 4. `jobs -l`/multi-job listing parity with the Unix builtin's own output
    format (reuse `job.rs`'s display formatting logic where it's already
-   platform-neutral, rather than reimplementing it).
+   platform-neutral, rather than reimplementing it). `winjob.rs`'s `jobs`
+   already supports `-l` and multiple concurrent jobs as of step 1; this
+   step is about closing any remaining formatting/flag gaps against
+   `job.rs`'s own output (e.g. `-r`/`-s`/`-n` filtering), not building the
+   feature from scratch.
 5. Only then: evaluate whether the polling-based done-detection from step 1
    is worth upgrading to the I/O-completion-port approach, based on whatever
    real usage/perf signal shows up.

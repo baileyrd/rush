@@ -1,7 +1,8 @@
 # cargo-deny configuration — supply-chain hygiene for a dependency graph
-# that includes three git-pinned sibling crates (rusty_regx, rusty_lines,
-# rusty_libc), all from the same author as rush itself. Run locally with
-# `cargo deny check`, or see .github/workflows/ci.yml for the CI job.
+# that includes four git-pinned sibling crates (rusty_regx, rusty_lines,
+# rusty_libc, rusty_win32), all from the same author as rush itself. Run
+# locally with `cargo deny check`, or see .github/workflows/ci.yml for the
+# CI job.
 #
 # https://embarkstudios.github.io/cargo-deny/
 
@@ -47,8 +48,9 @@ confidence-threshold = 0.8
 # tighten to "deny" once the graph is small enough to keep at exactly one
 # version per crate.
 multiple-versions = "warn"
-# rush's own three sibling crates (rusty_regx, rusty_lines, rusty_libc,
-# all first-party, same author, see Cargo.toml's own comments on each) are
+# rush's own sibling crates (rusty_regx, rusty_lines, rusty_libc,
+# rusty_win32, all first-party, same author, see Cargo.toml's own comments
+# on each) are
 # deliberate git dependencies with no crates.io `version =` requirement —
 # exactly what this lint flags as a "wildcard" dependency, but here it's
 # the intended architecture (actively co-developed alongside rush itself,
@@ -66,12 +68,13 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The three sibling crates this project pulls straight from GitHub instead
-# of crates.io (see Cargo.toml's own comments on each) — anything else
-# over git is unreviewed and should fail the build until it's added here
+# The sibling crates this project pulls straight from GitHub instead of
+# crates.io (see Cargo.toml's own comments on each) — anything else over
+# git is unreviewed and should fail the build until it's added here
 # deliberately.
 allow-git = [
     "https://github.com/baileyrd/rusty_regx",
     "https://github.com/baileyrd/rusty_lines",
     "https://github.com/baileyrd/rusty_libc",
+    "https://github.com/baileyrd/rusty_win32",
 ]

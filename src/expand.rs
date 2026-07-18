@@ -2913,7 +2913,7 @@ pub fn expand_ps1(ps1: &str) -> String {
                 #[cfg(unix)]
                 out.push_str(&crate::job::count().to_string());
                 #[cfg(not(unix))]
-                out.push('0');
+                out.push_str(&crate::winjob::count().to_string());
             }
             Some('!') | Some('#') => {
                 out.push_str(&(crate::builtins::history_entries().len() + 1).to_string())

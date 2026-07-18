@@ -107,8 +107,8 @@ fn other_is_builtin(name: &str) -> bool {
 }
 
 #[cfg(not(unix))]
-fn other_is_builtin(_name: &str) -> bool {
-    false
+fn other_is_builtin(name: &str) -> bool {
+    crate::winjob::is_builtin(name)
 }
 
 #[cfg(unix)]
@@ -118,7 +118,7 @@ fn other_names() -> &'static [&'static str] {
 
 #[cfg(not(unix))]
 fn other_names() -> &'static [&'static str] {
-    &[]
+    crate::winjob::NAMES
 }
 
 /// `echo [-n] [args...]` — join args with spaces; `-n` suppresses the newline.
@@ -988,8 +988,8 @@ fn other_builtin(argv: &[String]) -> Option<i32> {
 }
 
 #[cfg(not(unix))]
-fn other_builtin(_argv: &[String]) -> Option<i32> {
-    None
+fn other_builtin(argv: &[String]) -> Option<i32> {
+    crate::winjob::builtin(argv)
 }
 
 thread_local! {

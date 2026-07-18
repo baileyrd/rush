@@ -98,9 +98,29 @@ the Unix build:
   `$(...)` self-re-exec fallback) already made dispatch and `$$` work; the
   integration suite now pins all of it cross-platform (builtin redirects,
   `read` from pipes and files, recursive functions, `$$`/`$BASHPID`, `exec`).
-- Still deliberately out on Windows: job control (`&`, `fg`/`bg`, Ctrl-Z),
+- Still deliberately out on Windows: `fg`/`bg`/Ctrl-Z terminal hand-off,
   `coproc`, compounds as one stage of a multi-command pipeline, and fd 3+ —
-  see docs/ARCHITECTURE.md "Windows strategy (G11)".
+  see docs/ARCHITECTURE.md "Windows strategy (G11)". Background jobs
+  (`&`) are handled separately below.
+
+### Native Windows: background jobs (milestone 1 of docs/WINDOWS_JOB_CONTROL.md)
+- **`cmd &` works on Windows** for a single external command — spawned
+  suspended, assigned to a Windows Job Object (kill-on-close), then resumed,
+  via the new `rusty_win32`-backed `src/winjob.rs`
+  (`#[cfg(not(unix))]`, `job.rs`'s Windows counterpart — a genuinely
+  different mechanism, not a port of its POSIX process-group/signal calls,
+  which have no Windows target). `$!` and `jobs`/`jobs -l` (multiple
+  concurrent jobs) work; `wait`/`kill`/`disown` don't yet.
+- A background pipeline or a backgrounded builtin/function is a clear,
+  immediate error rather than silently running only part of the command, or
+  racing `winstdio`'s process-global std-handle slots against the
+  foreground shell — an explicit, narrower first slice (see `winjob.rs`'s
+  own module doc and `docs/WINDOWS_JOB_CONTROL.md`'s staging plan for the
+  follow-up milestones).
+- `rusty_win32` gained `process::environment_block`/an environment override
+  on `spawn_suspended` to support this: rush's `vars` module never syncs to
+  `std::env::set_var`, so a background job spawned after an `export`/`unset`
+  needs its own from-scratch environment block, not inherited-by-default.
 
 ## [Unreleased] — since 0.1.1
 

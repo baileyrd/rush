@@ -393,6 +393,7 @@ dependencies = [
  "rusty_libc",
  "rusty_lines",
  "rusty_regx",
+ "rusty_win32",
 ]
 
 [[package]]
@@ -420,6 +421,11 @@ dependencies = [
 name = "rusty_regx"
 version = "0.4.0"
 source = "git+https://github.com/baileyrd/rusty_regx?rev=6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3#6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3"
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_win32?branch=main#723f2a8a915d5806c69f1ae7d8b44c27fbfa2d35"
 
 [[package]]
 name = "same-file"

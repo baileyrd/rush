@@ -218,24 +218,45 @@ fn disown_lets_the_job_survive_shell_exit() {
     // "still alive a moment after backgrounding it" the way
     // `kill_terminates_the_job` does — a sleep doesn't depend on the CI
     // runner's loopback network stack behaving like a normal machine's.
+    //
+    // The script itself also checks `tasklist` on its own backgrounded
+    // pid, from *within* the still-running shell, right after `disown` —
+    // isolating whether a from-outside-only check ever failing means the
+    // job dies right when `disown` runs (a bug in `disown` itself) versus
+    // specifically when the shell exits afterward (a narrower bug in
+    // whatever ties the child's lifetime to the parent's, since `disown`
+    // itself would then have visibly worked for as long as the shell it
+    // ran in stayed alive).
     let (out, err, status) = rush_full(
-        r#"powershell -NoProfile -Command "Start-Sleep -Seconds 5" & disown %1; echo $!"#,
+        r#"powershell -NoProfile -Command "Start-Sleep -Seconds 5" & disown %1; echo $!; tasklist /FI "PID eq $!" /NH"#,
     );
     assert_eq!(status, 0, "stdout was: {out:?}, stderr was: {err:?}");
-    let pid: u32 = out
+    let mut lines = out.lines();
+    let pid: u32 = lines
+        .next()
+        .unwrap_or_default()
         .trim()
         .parse()
         .unwrap_or_else(|_| panic!("$! should be a plain pid, got: {out:?} (stderr: {err:?})"));
+    let internal_listing: String = lines.collect::<Vec<_>>().join("\n");
+    assert!(
+        internal_listing.contains(&pid.to_string()),
+        "job (pid {pid}) should still be listed by tasklist run from *within* the \
+         still-alive rush process, right after disown — got: {internal_listing:?} \
+         (full stdout: {out:?}, stderr: {err:?})"
+    );
 
-    let listing = Command::new("tasklist")
+    let external_listing = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()
         .expect("spawn tasklist");
-    let listing = String::from_utf8_lossy(&listing.stdout);
+    let external_listing = String::from_utf8_lossy(&external_listing.stdout);
     assert!(
-        listing.contains(&pid.to_string()),
-        "disowned job (pid {pid}) should still be running after the shell exited, \
-         tasklist said: {listing:?} (disown's own stderr, if any: {err:?})"
+        external_listing.contains(&pid.to_string()),
+        "disowned job (pid {pid}) should still be running after the shell exited \
+         (it was confirmed still running, from inside that same shell, right after \
+         disown — see the internal tasklist check above), external tasklist said: \
+         {external_listing:?}"
     );
 
     // The process would finish on its own in a few more seconds

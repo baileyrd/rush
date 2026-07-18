@@ -271,13 +271,17 @@ session. Concretely:
    `WaitForSingleObject` (`rusty_win32::process::wait` with an infinite
    timeout) on the tracked process handle directly — mirrors
    `job.rs::wait_cmd`'s own argument handling almost exactly. `wait -n`
-   (no `WaitForMultipleObjects` wrapper in `rusty_win32` yet) polls every
-   not-yet-finished job's handle in a short-sleep loop instead — the same
-   zero-timeout-poll primitive `refresh_all` already used, just repeated;
-   a real `WaitForMultipleObjects`-based version remains a follow-up if
-   `-n`'s polling latency ever matters in practice. A `REAPED` map
-   (matching `job.rs`'s own) lets a second `wait` on an already-settled pid
-   still report its status.
+   blocks on every not-yet-finished job's handle at once via
+   `rusty_win32::process::wait_any` (`WaitForMultipleObjects(...,
+   FALSE, ...)`, added specifically for this) rather than the short-sleep
+   polling loop the first cut used — the follow-up this section originally
+   flagged as open, now closed. `WaitForMultipleObjects` caps at 64
+   handles per call; `wait_next` batches the first 64 tracked jobs into
+   one blocking call and falls back to a short-sleep poll across sweeps
+   only in that (realistically never-hit) overflow case, rather than
+   silently ignoring anything past the 64th. A `REAPED` map (matching
+   `job.rs`'s own) lets a second `wait` on an already-settled pid still
+   report its status.
 3. **Done.** `kill [-SIG|-s SIG] %n` via `TerminateJobObject`, with a fixed
    conventional exit code (128+15) reported back through `wait`/`$?` for
    every kill — Windows has no real signal delivery, so *which* signal was
@@ -295,8 +299,9 @@ session. Concretely:
    no Stopped state (no Ctrl-Z).
 5. Only then: evaluate whether the polling-based done-detection from step 1
    is worth upgrading to the I/O-completion-port approach, based on whatever
-   real usage/perf signal shows up. Still open, along with the `wait -n`
-   polling-vs-`WaitForMultipleObjects` question step 2 flagged.
+   real usage/perf signal shows up. Still open; the `wait -n`
+   polling-vs-`WaitForMultipleObjects` question step 2 flagged is no
+   longer part of this — `wait_any` closed it.
 
 **`disown`** (never explicitly staged above as its own numbered step, but
 listed in the original `winjob.rs` surface sketch) is **done**, and turned

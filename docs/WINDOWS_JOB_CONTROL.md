@@ -359,6 +359,27 @@ of a pipeline up front, before touching any OS resources, so this fails
 loudly and immediately rather than silently running only the external
 stages or leaving the pipeline half-wired.
 
+Real `windows-latest` CI caught a genuine bug in the first cut of this:
+a stage's own explicit redirect (`findstr ... > file`) silently never
+reached the spawned child, even though the pipe-to-pipe wiring between
+stages worked fine. The cause: a Windows `HANDLE` starts non-inheritable
+regardless of how it was created (`rusty_win32::handle`'s own doc
+comment) — `spawn_stage` already marked the pipe-boundary handles
+(`stdin_src`/`stdout_dst`) inheritable before spawning, but never did the
+same for a handle `exec::redirect_stdio` itself opened for an explicit
+stage redirect, since that mechanism was previously only ever exercised
+for builtins (no child process, so inheritability was moot) or the
+foreground path (which spawns via `std::process::Command`, a completely
+different, already-correct mechanism). This was the first test to check
+a backgrounded pipeline stage's actual redirected *content* rather than
+just its exit code, which is why it went uncaught through every earlier
+milestone. Fixed by having `spawn_stage` capture each std slot's value
+before this stage touches anything, then — right before spawning — mark
+inheritable whichever slot(s) now differ from that baseline, covering
+both the pipe ends and anything `redirect_stdio` opened, while leaving a
+slot still at its baseline (the shell's own real stdio, untouched by
+this stage) alone.
+
 Each step above should be its own PR — small enough for CI's after-the-fact
 signal to be a meaningful check, in keeping with why this was scoped as a
 design doc rather than one large implementation this session.

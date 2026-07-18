@@ -182,6 +182,15 @@ the Unix build:
 - Per-stage exit-status tracking (a Windows `${PIPESTATUS[@]}`
   equivalent) isn't attempted — `wait`/`kill`/`jobs` only need the last
   stage's own status to work correctly on the pipeline as a whole.
+- Fixed a bug real `windows-latest` CI caught: a stage's own explicit
+  redirect (`findstr ... > file`) silently never reached the spawned
+  child, because a Windows `HANDLE` starts non-inheritable regardless of
+  how it was created — `spawn_stage` marked the pipe-boundary handles
+  inheritable before spawning but missed a handle `redirect_stdio` itself
+  opened for an explicit redirect. Fixed by marking inheritable whichever
+  std slot(s) actually changed from this stage's own pre-spawn baseline,
+  covering both the pipe ends and any redirect target, rather than only
+  the pipe ends.
 
 ## [Unreleased] — since 0.1.1
 

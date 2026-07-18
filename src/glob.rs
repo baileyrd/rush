@@ -322,6 +322,15 @@ fn match_extglob(kind: char, alts: &[Vec<char>], p: &[char], rest: usize, s: &[c
         '!' => (si..=s.len()).any(|k| !alt_matches(si, k) && matches(p, rest, s, k)),
         // `*` / `+`: repetitions. Try the tail at every point reachable by
         // consuming zero (`*` only) or more alternative-matched chunks.
+        //
+        // `from` (with `min_done` always true past the first step) is
+        // memoized: without it, this is plain graph reachability over
+        // `0..=s.len()` positions explored by unbounded backtracking, which
+        // revisits the same `from` through every distinct chunk-split path
+        // that reaches it — exponential in `s.len()` for adversarial
+        // patterns (e.g. nested `*(...)`/`?(...)` fuzzed input that hung a
+        // fuzz run for 30 minutes). Caching each `from` the first time it's
+        // resolved caps total work at O(s.len()^2 * alt-match cost).
         '*' | '+' => {
             fn reachable(
                 alt_matches: &dyn Fn(usize, usize) -> bool,
@@ -330,15 +339,25 @@ fn match_extglob(kind: char, alts: &[Vec<char>], p: &[char], rest: usize, s: &[c
                 s: &[char],
                 from: usize,
                 min_done: bool,
+                memo: &mut [Option<bool>],
             ) -> bool {
+                if min_done && let Some(cached) = memo[from] {
+                    return cached;
+                }
                 if min_done && matches(p, rest, s, from) {
+                    memo[from] = Some(true);
                     return true;
                 }
                 // Consume one more non-empty alternative-matched chunk.
-                ((from + 1)..=s.len())
-                    .any(|k| alt_matches(from, k) && reachable(alt_matches, p, rest, s, k, true))
+                let result = ((from + 1)..=s.len())
+                    .any(|k| alt_matches(from, k) && reachable(alt_matches, p, rest, s, k, true, memo));
+                if min_done {
+                    memo[from] = Some(result);
+                }
+                result
             }
-            reachable(&alt_matches, p, rest, s, si, kind == '*')
+            let mut memo = vec![None; s.len() + 1];
+            reachable(&alt_matches, p, rest, s, si, kind == '*', &mut memo)
         }
         _ => false,
     }
@@ -526,6 +545,24 @@ mod tests {
 
         // An unterminated group falls back to literal characters.
         assert!(match_component("a@(b", "a@(b"));
+    }
+
+    /// A fuzzer-found input (`glob_match` target) that hung for 30 minutes
+    /// pre-fix: nested `?(...)`/`*(...)` groups matched against themselves
+    /// drove `match_extglob`'s `*`/`+` reachability search into unmemoized
+    /// exponential backtracking. Must resolve near-instantly either way.
+    #[test]
+    fn nested_star_extglob_does_not_blow_up() {
+        let s: String = [
+            63u8, 40, 63, 40, 42, 63, 40, 42, 40, 42, 41, 1, 0, 41, 49, 63, 42, 63, 40, 63, 40, 42, 63,
+            40, 42, 40, 42, 41, 1, 0, 41, 49, 63, 42, 35, 35,
+        ]
+        .into_iter()
+        .map(|b| b as char)
+        .collect();
+        let start = std::time::Instant::now();
+        let _ = match_component(&s, &s);
+        assert!(start.elapsed().as_secs() < 5, "match_component took too long: pathological backtracking regressed");
     }
 
     #[test]

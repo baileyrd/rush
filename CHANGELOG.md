@@ -163,6 +163,26 @@ the Unix build:
   tear a "disowned" job down once the shell that spawned it exits; this
   isn't something `winjob.rs`/`rusty_win32` can detect or opt out of.
 
+### Native Windows: backgrounded pipelines of external commands
+- **`cmd1 | cmd2 | ... &` works on Windows** for pipelines of external
+  commands — the narrowing the first Windows background-job milestone
+  originally accepted as a first cut. Every stage spawns suspended,
+  connected by real anonymous pipes (`rusty_win32::handle::create_pipe`),
+  gets assigned to the *same* Job Object as it goes, and is resumed — the
+  same "assign before resume" guarantee the single-stage case already had,
+  just applied per stage. `$!` and the process `wait`/`jobs` poll are the
+  pipeline's *last* stage, matching bash's own convention; `kill %n`
+  reaches every stage at once via the shared job.
+- **A builtin, function, or compound command as a pipeline stage remains
+  rejected** — confirmed as a **permanent** limitation, not a staging
+  gap: Windows has no `fork()` for it to run in a background child the
+  way `job.rs`'s Unix `spawn_builtin_stage`/`spawn_compound_stage` do.
+  Validated up front, before any OS resources are touched, so this fails
+  loudly rather than silently running only the external stages.
+- Per-stage exit-status tracking (a Windows `${PIPESTATUS[@]}`
+  equivalent) isn't attempted — `wait`/`kill`/`jobs` only need the last
+  stage's own status to work correctly on the pipeline as a whole.
+
 ## [Unreleased] — since 0.1.1
 
 ### Packaging & release (G1–G4)

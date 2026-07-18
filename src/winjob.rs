@@ -6,11 +6,13 @@
 //! primitive that lets a process be assigned to a job *before* its main
 //! thread — or anything it later spawns — runs a single instruction.
 //!
-//! **Milestones 1–4 of the design doc's staging plan, plus `disown`, are
-//! implemented.** A single external command only — no pipelines, no
-//! compound stages, no backgrounding a builtin or function — each
-//! rejected with a plain error rather than silently doing something
-//! wrong.
+//! **Milestones 1–4 of the design doc's staging plan, plus `disown` and
+//! pipelines of external commands, are implemented.** A pipeline stage
+//! that's a builtin, function, or compound command is a plain error, not
+//! a silent narrowing: Windows has no `fork()` for it to run in a
+//! background child the way `job.rs`'s Unix
+//! `spawn_builtin_stage`/`spawn_compound_stage` do — that's a permanent
+//! limitation of this platform, not a staging gap.
 //!
 //! `fg`/`bg`/Ctrl-Z terminal hand-off are permanently out of scope (see the
 //! design doc's "Deliberately out of scope" section) — Windows consoles
@@ -88,40 +90,54 @@ pub fn count() -> usize {
     STATE.with(|s| s.borrow().jobs.len())
 }
 
-/// Run `pipeline` in the background: spawn it suspended, put it in a fresh
-/// Job Object, resume it, and record it. See the module doc for the
-/// single-external-command scope — anything beyond that is a plain error,
-/// not a silent narrowing.
+/// Run `pipeline` in the background: spawn every stage suspended
+/// (connected by real pipes, for a multi-stage pipeline), put them all in
+/// one fresh Job Object, resume each, and record the whole pipeline as a
+/// single job. Every stage must be an external command — a builtin,
+/// function, or compound command as a stage is a plain error, not a
+/// silent narrowing, since Windows has no `fork()` for it to run in a
+/// background child the way `job.rs`'s Unix
+/// `spawn_builtin_stage`/`spawn_compound_stage` do.
 pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
-    let [Stage::Simple(cmd)] = pipeline.commands.as_slice() else {
-        return Err("background pipelines are not supported on this platform yet".into());
-    };
-    if cmd
-        .argv
-        .first()
-        .is_some_and(|n| crate::func::exists(n) || crate::builtins::is_builtin(n))
-    {
-        return Err(
-            "backgrounding a builtin or function is not supported on this platform yet".into(),
-        );
+    let mut cmds: Vec<&crate::exec::Command> = Vec::with_capacity(pipeline.commands.len());
+    for stage in &pipeline.commands {
+        match stage {
+            Stage::Simple(cmd) => {
+                if cmd
+                    .argv
+                    .first()
+                    .is_some_and(|n| crate::func::exists(n) || crate::builtins::is_builtin(n))
+                {
+                    return Err(
+                        "backgrounding a builtin or function is not supported on this platform"
+                            .into(),
+                    );
+                }
+                cmds.push(cmd);
+            }
+            Stage::Compound(_) => {
+                return Err(
+                    "a compound command as a background pipeline stage is not supported on \
+                     this platform"
+                        .into(),
+                );
+            }
+        }
     }
-    let program = cmd
-        .argv
+    let program = cmds
         .first()
-        .ok_or_else(|| "empty command".to_string())?;
-    if crate::vars::restricted() && program.contains('/') {
+        .and_then(|c| c.argv.first())
+        .map(String::as_str)
+        .unwrap_or_default();
+    if crate::vars::restricted()
+        && cmds
+            .iter()
+            .any(|c| c.argv.first().is_some_and(|p| p.contains('/')))
+    {
         return Err(format!(
             "{program}: restricted: cannot specify `/' in command names"
         ));
     }
-
-    let mut resolved_argv = cmd.argv.clone();
-    resolved_argv[0] = crate::exec::resolve_program(program);
-    let command_line = build_command_line(&resolved_argv);
-    let env_vars = environment_pairs(cmd);
-    let env_block = rusty_win32::process::environment_block(
-        env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-    );
 
     // No process spawned yet past this point, so a failure here has
     // nothing to clean up beyond the job handle itself.
@@ -132,79 +148,26 @@ pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
         return Err(win_err(program, e));
     }
 
-    // Redirects apply only for the instant of spawning: `CreateProcessW`
-    // snapshots the std-handle slots it inherits at that moment, so the
-    // guard is dropped (restoring the shell's own stdio) immediately
-    // after, before this returns control to the prompt.
-    let guard = match crate::exec::redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref()) {
-        Ok(g) => g,
-        Err(e) => {
-            close_job(job);
-            return Err(e);
-        }
-    };
-    // SAFETY: `command_line` was built by `build_command_line`, which
-    // quotes every argument (including the resolved program path);
-    // `env_block` was built by `environment_block`, which always
-    // double-NUL-terminates.
-    let spawned =
-        unsafe { rusty_win32::process::spawn_suspended(&command_line, true, Some(&env_block)) };
-    drop(guard);
-    let spawned = match spawned {
+    let spawned = match spawn_pipeline_into_job(job, &cmds) {
         Ok(s) => s,
         Err(e) => {
+            // SAFETY: `job` is valid; this tears down whatever stage(s)
+            // already made it into the job before the one that failed —
+            // `spawn_pipeline_into_job` itself only cleans up the failing
+            // stage's own leftover handles, not earlier ones already
+            // running, by design (this is the one place that needs to
+            // know about all of them at once).
+            unsafe {
+                let _ = rusty_win32::job::terminate(job, 1);
+            }
             close_job(job);
             // Matches job.rs's own background-spawn-failure handling: the
             // script isn't aborted, `$?`/pipestatus for `cmd &` stay 0
-            // regardless (set unconditionally by `run_job`), and this
-            // reports the same "not found"/"found but couldn't run"
-            // message a foreground spawn failure would.
-            crate::exec::spawn_failure_status(&cmd.argv, &std::io::Error::from(e));
+            // regardless (set unconditionally by `run_job`).
+            eprintln!("rush: {e}");
             return Ok(());
         }
     };
-
-    // SAFETY: `job`/`spawned.process` are both valid; the child is still
-    // suspended (not resumed until below), so job membership is guaranteed
-    // before it — or anything it later spawns — executes a single
-    // instruction.
-    if let Err(e) = unsafe { rusty_win32::job::assign(job, spawned.process) } {
-        // Known, narrow gap: `rusty_win32` has no raw `TerminateProcess`,
-        // and the process was never a job member (assignment is what just
-        // failed), so there's no way to kill it from here — it's left
-        // suspended and orphaned rather than resumed untracked, which
-        // would be the worse failure mode. Expected to be very rare:
-        // `AssignProcessToJobObject` failing on a process this function
-        // itself just created isn't an ordinary, command-specific error.
-        // SAFETY: both handles are valid, each closed exactly once.
-        unsafe {
-            let _ = rusty_win32::handle::close(spawned.process);
-            let _ = rusty_win32::handle::close(spawned.thread);
-        }
-        close_job(job);
-        return Err(win_err(program, e));
-    }
-    // SAFETY: `spawned.thread` is a freshly created, valid, not-yet-resumed
-    // thread handle; job assignment above already committed, so this is
-    // safe to clean up via the job either way.
-    if let Err(e) = unsafe { rusty_win32::process::resume(spawned.thread) } {
-        // Unlike the assign failure above, the process *is* a job member
-        // now, so `TerminateJobObject` can actually reach and kill it.
-        // SAFETY: `job` is valid; `spawned.process` is a member of it.
-        unsafe {
-            let _ = rusty_win32::job::terminate(job, 1);
-            let _ = rusty_win32::handle::close(spawned.process);
-            let _ = rusty_win32::handle::close(spawned.thread);
-        }
-        close_job(job);
-        return Err(win_err(program, e));
-    }
-    // SAFETY: no longer needed once resumed — `wait` only ever touches
-    // `spawned.process`, and closing the thread handle doesn't affect the
-    // (now running) thread itself.
-    unsafe {
-        let _ = rusty_win32::handle::close(spawned.thread);
-    }
 
     let cmd_text = crate::exec::pipeline_text(pipeline);
     let id = STATE.with(|s| {
@@ -221,7 +184,9 @@ pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
         });
         id
     });
-    // `$!` (matching job.rs: the directly-spawned process's own pid).
+    // `$!` — the *last* stage's own pid (verified against real bash
+    // directly by `job.rs`'s own comment on the same convention); for a
+    // single-command background job they're the same pid anyway.
     crate::vars::set_last_bg_pid(spawned.process_id as i32);
     // Only announced interactively, matching job.rs's own gating (a
     // non-interactive script prints nothing here).
@@ -229,6 +194,214 @@ pub fn run_background(pipeline: &Pipeline) -> Result<(), String> {
         println!("[{id}] {}", spawned.process_id);
     }
     Ok(())
+}
+
+/// Spawn every stage of `cmds` suspended, connected by real pipes,
+/// assigning each to `job` and resuming it before moving to the next —
+/// job membership is guaranteed before each stage (or anything it spawns)
+/// runs, same guarantee the single-stage case always had, just applied
+/// per stage here. Returns the *last* stage's [`rusty_win32::process::SpawnedProcess`] —
+/// the only one `winjob.rs` tracks for `wait`/`jobs` polling afterward
+/// (matching `$!`'s own "last stage" convention); earlier stages' own
+/// process/thread handles are closed here once assigned+resumed, since
+/// their lifetime from then on is governed by `job` itself (reachable via
+/// `kill %n`), not individually polled — tracking every stage's own exit
+/// status (for a Windows `${PIPESTATUS[@]}` equivalent) is a possible
+/// follow-up, not attempted here.
+///
+/// On failure partway through, only the *failing* stage's own leftover
+/// handles are cleaned up here — any earlier stage that already made it
+/// into `job` is deliberately left running, still assigned; the caller
+/// tears down the whole job (and everything already in it) in one call
+/// once this returns `Err`, rather than this function trying to track and
+/// unwind each already-succeeded stage individually.
+fn spawn_pipeline_into_job(
+    job: rusty_win32::RawHandle,
+    cmds: &[&crate::exec::Command],
+) -> Result<rusty_win32::process::SpawnedProcess, String> {
+    let n = cmds.len();
+    let mut prev_read: Option<rusty_win32::RawHandle> = None;
+    let mut last_spawned: Option<rusty_win32::process::SpawnedProcess> = None;
+
+    for (i, cmd) in cmds.iter().enumerate() {
+        let is_last = i == n - 1;
+        let program = cmd.argv.first().map(String::as_str).unwrap_or_default();
+
+        let next_pipe = if is_last {
+            None
+        } else {
+            Some(rusty_win32::handle::create_pipe().map_err(|e| win_err(program, e))?)
+        };
+        let stdout_dst = next_pipe.map(|(_, w)| w);
+
+        let spawn_result = spawn_stage(cmd, prev_read, stdout_dst);
+        // Whatever happened, this process's own copies of the boundary
+        // pipe ends (if any) aren't needed again either way — a spawned
+        // child inherited its own; a failed spawn never needed them at
+        // all. Closing them now, regardless of outcome, is what stops
+        // them leaking into whatever spawns next via `inherit_handles`.
+        if let Some(h) = prev_read {
+            // SAFETY: opened by the previous iteration's `create_pipe`,
+            // not used again after this.
+            unsafe {
+                let _ = rusty_win32::handle::close(h);
+            }
+        }
+        if let Some(h) = stdout_dst {
+            // SAFETY: opened just above, not used again after this.
+            unsafe {
+                let _ = rusty_win32::handle::close(h);
+            }
+        }
+        let spawned = match spawn_result {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some((r, _)) = next_pipe {
+                    // SAFETY: opened just above, never handed to anything.
+                    unsafe {
+                        let _ = rusty_win32::handle::close(r);
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        // SAFETY: `job`/`spawned.process` are both valid; the process is
+        // still suspended (not resumed until below), so job membership is
+        // guaranteed before it — or anything it later spawns — executes a
+        // single instruction.
+        if let Err(e) = unsafe { rusty_win32::job::assign(job, spawned.process) } {
+            // SAFETY: neither handle has been used elsewhere; each closed
+            // exactly once.
+            unsafe {
+                let _ = rusty_win32::handle::close(spawned.process);
+                let _ = rusty_win32::handle::close(spawned.thread);
+            }
+            if let Some((r, _)) = next_pipe {
+                unsafe {
+                    let _ = rusty_win32::handle::close(r);
+                }
+            }
+            return Err(win_err(program, e));
+        }
+        // SAFETY: `spawned.thread` is freshly created, valid, and
+        // not-yet-resumed; job assignment above already committed, so
+        // this is safe to clean up via the job either way.
+        if let Err(e) = unsafe { rusty_win32::process::resume(spawned.thread) } {
+            // SAFETY: `job` is valid; `spawned.process` is a member of it,
+            // so terminating via the job (rather than needing a raw
+            // `TerminateProcess`, which `rusty_win32` doesn't have) can
+            // actually reach it here, unlike the assign-failure case above.
+            unsafe {
+                let _ = rusty_win32::job::terminate(job, 1);
+                let _ = rusty_win32::handle::close(spawned.process);
+                let _ = rusty_win32::handle::close(spawned.thread);
+            }
+            if let Some((r, _)) = next_pipe {
+                unsafe {
+                    let _ = rusty_win32::handle::close(r);
+                }
+            }
+            return Err(win_err(program, e));
+        }
+        // SAFETY: no longer needed once resumed.
+        unsafe {
+            let _ = rusty_win32::handle::close(spawned.thread);
+        }
+        if !is_last {
+            // Not tracked individually past this point — see this
+            // function's own doc comment.
+            // SAFETY: no longer needed; this stage's lifetime is governed
+            // by `job` from here on.
+            unsafe {
+                let _ = rusty_win32::handle::close(spawned.process);
+            }
+        }
+
+        prev_read = next_pipe.map(|(r, _)| r);
+        last_spawned = Some(spawned);
+    }
+
+    Ok(last_spawned.expect("cmds is non-empty: run_background never calls this with none"))
+}
+
+/// Spawn one already-validated external-command pipeline stage.
+/// `stdin_src`/`stdout_dst` — an adjacent stage's pipe end, if any — are
+/// wired as this stage's *default* stdio; an explicit redirect in
+/// `cmd.redirects` still wins over that default, matching
+/// `exec::build_stage`'s own precedence for the foreground path. Returns
+/// the still-suspended, not-yet-job-assigned child — the caller
+/// ([`spawn_pipeline_into_job`]) owns assigning it to the pipeline's
+/// shared job and resuming it.
+fn spawn_stage(
+    cmd: &crate::exec::Command,
+    stdin_src: Option<rusty_win32::RawHandle>,
+    stdout_dst: Option<rusty_win32::RawHandle>,
+) -> Result<rusty_win32::process::SpawnedProcess, String> {
+    let program = cmd
+        .argv
+        .first()
+        .ok_or_else(|| "empty command".to_string())?;
+
+    let mut resolved_argv = cmd.argv.clone();
+    resolved_argv[0] = crate::exec::resolve_program(program);
+    let command_line = build_command_line(&resolved_argv);
+    let env_vars = environment_pairs(cmd);
+    let env_block = rusty_win32::process::environment_block(
+        env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    );
+
+    // The pipe ends `create_pipe` hands back aren't inheritable by
+    // default (unlike a `std::fs::File`, which the existing redirect path
+    // already relies on being inheritable) — mark whichever one(s) this
+    // stage needs, for exactly the duration of spawning it, so they don't
+    // leak into any later spawn via `inherit_handles: true`'s
+    // "everything currently inheritable" semantics.
+    for h in [stdin_src, stdout_dst].into_iter().flatten() {
+        // SAFETY: freshly created by `spawn_pipeline_into_job`'s own
+        // `create_pipe` call, still open, not used by anything else yet.
+        if let Err(e) = unsafe { rusty_win32::handle::set_inheritable(h, true) } {
+            return Err(win_err(program, e));
+        }
+    }
+
+    let prev_stdin = crate::winstdio::get(crate::winstdio::STD_INPUT_HANDLE);
+    let prev_stdout = crate::winstdio::get(crate::winstdio::STD_OUTPUT_HANDLE);
+    if let Some(h) = stdin_src {
+        crate::winstdio::set(crate::winstdio::STD_INPUT_HANDLE, h);
+    }
+    if let Some(h) = stdout_dst {
+        crate::winstdio::set(crate::winstdio::STD_OUTPUT_HANDLE, h);
+    }
+
+    // Redirects apply only for the instant of spawning: `CreateProcessW`
+    // snapshots the std-handle slots it inherits at that moment, so the
+    // guard is dropped (restoring whatever this function itself just set)
+    // immediately after.
+    let result =
+        crate::exec::redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref()).and_then(|guard| {
+            // SAFETY: `command_line` was built by `build_command_line`,
+            // which quotes every argument (including the resolved program
+            // path); `env_block` was built by `environment_block`, which
+            // always double-NUL-terminates.
+            let spawned = unsafe {
+                rusty_win32::process::spawn_suspended(&command_line, true, Some(&env_block))
+            };
+            drop(guard);
+            spawned.map_err(|e| win_err(program, e))
+        });
+
+    crate::winstdio::set(crate::winstdio::STD_INPUT_HANDLE, prev_stdin);
+    crate::winstdio::set(crate::winstdio::STD_OUTPUT_HANDLE, prev_stdout);
+    for h in [stdin_src, stdout_dst].into_iter().flatten() {
+        // Best-effort: spawning is already over either way by this point,
+        // and there's nothing more useful to do with an error un-marking
+        // a handle `spawn_pipeline_into_job` is about to close regardless.
+        // SAFETY: same handles as above, still valid.
+        let _ = unsafe { rusty_win32::handle::set_inheritable(h, false) };
+    }
+
+    result
 }
 
 /// Poll every not-yet-known-finished job's tracked process handle

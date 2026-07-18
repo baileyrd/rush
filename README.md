@@ -9,9 +9,10 @@ has a growing test suite, but it hasn't been hardened as a daily-driver shell
 yet — treat it as a project to explore and contribute to, not (yet) a drop-in
 `chsh` replacement. Full job control (`fg`/`bg`, Ctrl-Z, process groups) is
 **Unix only**; on Windows, `cmd &`/`jobs`/`wait`/`kill %n`/`disown`/`$!`
-work for a single external command (via Windows Job Objects, see
-`docs/WINDOWS_JOB_CONTROL.md`), but backgrounded pipelines/builtins and
-`fg`/`bg`/Ctrl-Z don't yet.
+work for external commands, single-stage or piped together (via Windows
+Job Objects, see `docs/WINDOWS_JOB_CONTROL.md`), but a builtin/function as
+a background pipeline stage (no Windows `fork()`) and `fg`/`bg`/Ctrl-Z
+don't.
 
 `rush` reads a command line, lexes and parses it, expands it, then executes the
 result. It covers most of the core POSIX shell language: pipelines and
@@ -73,7 +74,7 @@ home is /home/baileyrd, here is /home/baileyrd/projects/rust_bash
 | Control flow | ✅ | `if`/`while`/`until`/`for`/`select` (`for`/`select x; do` with no `in` iterates `"$@"`), C-style `for ((init;cond;update))`, `case … esac` (incl. `;&`/`;;&` fallthrough), `break`/`continue [n]`; single- or multi-line |
 | Functions | ✅ | `name() { … }`, recursion, own `$1`…, `return [n]`, `local [name[=value]]…` for function-scoped variables; brace groups `{ …; }` |
 | Subshells | ✅ | `( … )` forks a real child on Unix (genuine isolation, incl. `exit`); state save/restore fallback elsewhere |
-| Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`/`wait`, `$!`) | ✅ | **Full support Unix only** — process groups, terminal hand-off, signals (`libc`). **Windows**: `&`/`jobs`/`wait`/`kill %n`/`disown`/`$!` for a single external command via Windows Job Objects (`rusty_win32`); `fg`/`bg`/Ctrl-Z not yet — see `docs/WINDOWS_JOB_CONTROL.md` |
+| Background & job control (`&`, Ctrl-Z, `fg`/`bg`/`jobs`/`kill %n`/`wait`, `$!`) | ✅ | **Full support Unix only** — process groups, terminal hand-off, signals (`libc`). **Windows**: `&`/`jobs`/`wait`/`kill %n`/`disown`/`$!` for external commands, single-stage or piped together, via Windows Job Objects (`rusty_win32`); a builtin/function/compound as a stage (no Windows `fork()`) and `fg`/`bg`/Ctrl-Z not — see `docs/WINDOWS_JOB_CONTROL.md` |
 
 ## Build & Run
 

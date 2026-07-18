@@ -26,6 +26,24 @@ fn rush(src: &str) -> (String, i32) {
     )
 }
 
+/// Like [`rush`], but also returning stderr — for diagnosing a builtin's
+/// own error path (e.g. `disown`'s), which a plain exit-status check can
+/// miss: a later command in the same `-c` script (like `echo $!`) still
+/// sets the *script's* own final status, independent of whether an
+/// earlier command failed and printed a message to stderr.
+fn rush_full(src: &str) -> (String, String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .arg("-c")
+        .arg(src)
+        .output()
+        .expect("spawn rush");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
 #[test]
 fn background_command_returns_immediately_and_is_listed() {
     // `ping`'s built-in delay stands in for "still running" — there's no
@@ -193,12 +211,21 @@ fn disown_lets_the_job_survive_shell_exit() {
     // `CloseHandle` call. So the only real proof this works is checking
     // the process from *outside* the `rush -c` invocation, after it has
     // already exited (`rush()` below waits for it via `Command::output`).
-    let (out, status) = rush("ping -n 5 127.0.0.1 > nul & disown %1; echo $!");
-    assert_eq!(status, 0, "stdout was: {out:?}");
+    //
+    // `powershell -Command "Start-Sleep -Seconds 5"` rather than `ping`
+    // (used elsewhere in this file): this needs a solid few seconds of
+    // guaranteed survival *after* the shell has already exited, not just
+    // "still alive a moment after backgrounding it" the way
+    // `kill_terminates_the_job` does — a sleep doesn't depend on the CI
+    // runner's loopback network stack behaving like a normal machine's.
+    let (out, err, status) = rush_full(
+        r#"powershell -NoProfile -Command "Start-Sleep -Seconds 5" & disown %1; echo $!"#,
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}, stderr was: {err:?}");
     let pid: u32 = out
         .trim()
         .parse()
-        .unwrap_or_else(|_| panic!("$! should be a plain pid, got: {out:?}"));
+        .unwrap_or_else(|_| panic!("$! should be a plain pid, got: {out:?} (stderr: {err:?})"));
 
     let listing = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
@@ -208,11 +235,11 @@ fn disown_lets_the_job_survive_shell_exit() {
     assert!(
         listing.contains(&pid.to_string()),
         "disowned job (pid {pid}) should still be running after the shell exited, \
-         tasklist said: {listing:?}"
+         tasklist said: {listing:?} (disown's own stderr, if any: {err:?})"
     );
 
-    // The process would finish on its own in a couple more seconds
-    // regardless (`ping -n 5`); no reason to let this test wait for that.
+    // The process would finish on its own in a few more seconds
+    // regardless; no reason to let this test wait for that.
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
         .output();

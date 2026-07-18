@@ -351,22 +351,9 @@ fn spawn_stage(
         env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())),
     );
 
-    // The pipe ends `create_pipe` hands back aren't inheritable by
-    // default (unlike a `std::fs::File`, which the existing redirect path
-    // already relies on being inheritable) — mark whichever one(s) this
-    // stage needs, for exactly the duration of spawning it, so they don't
-    // leak into any later spawn via `inherit_handles: true`'s
-    // "everything currently inheritable" semantics.
-    for h in [stdin_src, stdout_dst].into_iter().flatten() {
-        // SAFETY: freshly created by `spawn_pipeline_into_job`'s own
-        // `create_pipe` call, still open, not used by anything else yet.
-        if let Err(e) = unsafe { rusty_win32::handle::set_inheritable(h, true) } {
-            return Err(win_err(program, e));
-        }
-    }
-
     let prev_stdin = crate::winstdio::get(crate::winstdio::STD_INPUT_HANDLE);
     let prev_stdout = crate::winstdio::get(crate::winstdio::STD_OUTPUT_HANDLE);
+    let prev_stderr = crate::winstdio::get(crate::winstdio::STD_ERROR_HANDLE);
     if let Some(h) = stdin_src {
         crate::winstdio::set(crate::winstdio::STD_INPUT_HANDLE, h);
     }
@@ -380,6 +367,37 @@ fn spawn_stage(
     // immediately after.
     let result =
         crate::exec::redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref()).and_then(|guard| {
+            // Neither the pipe ends `create_pipe` hands back (the
+            // pipe-boundary default set above) nor a file `redirect_stdio`
+            // itself just opened are inheritable by default — a Windows
+            // `HANDLE` starts non-inheritable regardless of how it was
+            // created (`rusty_win32::handle`'s own doc comment). Mark
+            // inheritable whichever std slot(s) now differ from this
+            // stage's own pre-spawn baseline (captured above, before
+            // either the pipe-boundary swap or `redirect_stdio` touched
+            // anything) — a slot still at its baseline is the shell's own
+            // real stdio, untouched by this stage, and is never marked.
+            let touched: Vec<rusty_win32::RawHandle> = [
+                (crate::winstdio::STD_INPUT_HANDLE, prev_stdin),
+                (crate::winstdio::STD_OUTPUT_HANDLE, prev_stdout),
+                (crate::winstdio::STD_ERROR_HANDLE, prev_stderr),
+            ]
+            .into_iter()
+            .filter_map(|(slot, baseline)| {
+                let current = crate::winstdio::get(slot);
+                (current != baseline && !current.is_null()).then_some(current)
+            })
+            .collect();
+            for h in &touched {
+                // SAFETY: `h` is whatever this stage's own pipe-boundary
+                // swap or `redirect_stdio` just placed in a std slot —
+                // freshly opened (a pipe end or a redirect target file),
+                // valid, and open for the life of this spawn attempt.
+                if let Err(e) = unsafe { rusty_win32::handle::set_inheritable(*h, true) } {
+                    return Err(win_err(program, e));
+                }
+            }
+
             // SAFETY: `command_line` was built by `build_command_line`,
             // which quotes every argument (including the resolved program
             // path); `env_block` was built by `environment_block`, which
@@ -387,20 +405,24 @@ fn spawn_stage(
             let spawned = unsafe {
                 rusty_win32::process::spawn_suspended(&command_line, true, Some(&env_block))
             };
+            for h in &touched {
+                // Best-effort: spawning is already over either way by this
+                // point, and every handle here is either closed when
+                // `guard` drops right below (a redirect target file, the
+                // here-doc pipe's read end) or by the caller immediately
+                // after this function returns (a pipeline-boundary pipe
+                // end) — nothing depends on its inheritable flag surviving
+                // past this one spawn attempt.
+                unsafe {
+                    let _ = rusty_win32::handle::set_inheritable(*h, false);
+                }
+            }
             drop(guard);
             spawned.map_err(|e| win_err(program, e))
         });
 
     crate::winstdio::set(crate::winstdio::STD_INPUT_HANDLE, prev_stdin);
     crate::winstdio::set(crate::winstdio::STD_OUTPUT_HANDLE, prev_stdout);
-    for h in [stdin_src, stdout_dst].into_iter().flatten() {
-        // Best-effort: spawning is already over either way by this point,
-        // and there's nothing more useful to do with an error un-marking
-        // a handle `spawn_pipeline_into_job` is about to close regardless.
-        // SAFETY: same handles as above, still valid.
-        let _ = unsafe { rusty_win32::handle::set_inheritable(h, false) };
-    }
-
     result
 }
 

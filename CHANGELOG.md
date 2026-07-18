@@ -151,11 +151,17 @@ the Unix build:
   shell itself exits. `rusty_win32` gained `job::clear_kill_on_close`
   (the reverse of `set_kill_on_close`) specifically so `disown` can
   reverse that limit before releasing the handles.
-- `tests/windows_job_control.rs::disown_lets_the_job_survive_shell_exit`
-  verifies this from *outside* the `rush -c` process, checking (via
-  `tasklist`) that the disowned job is still running after the shell has
-  already exited — the only way to actually prove a "survives closing
-  the last handle, including implicitly" claim.
+- `tests/windows_job_control.rs::disown_detaches_the_job_while_the_shell_is_still_running`
+  verifies (via `tasklist`, run from within the still-alive shell right
+  after `disown`) that the reversal actually takes effect. **Known
+  caveat, found via real CI**: this only reverses kill-on-close on the
+  job the shell itself created — it can't detach a process from an
+  *ambient* job the shell's own process might already be nested in
+  (Windows automatically nests every child a job member spawns into that
+  same job too). Sandboxes that wrap a process tree in such a job for
+  their own cleanup — GitHub Actions' Windows runners, e.g. — will still
+  tear a "disowned" job down once the shell that spawned it exits; this
+  isn't something `winjob.rs`/`rusty_win32` can detect or opt out of.
 
 ## [Unreleased] — since 0.1.1
 

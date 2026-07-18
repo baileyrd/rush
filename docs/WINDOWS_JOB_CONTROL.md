@@ -305,10 +305,26 @@ kill the process on the spot, or at the latest when the shell itself
 exits. `rusty_win32` gained `job::clear_kill_on_close` (the reverse of
 `set_kill_on_close`) specifically so `disown` can reverse that limit
 before releasing the handles — the actual "detach" operation here.
-`tests/windows_job_control.rs::disown_lets_the_job_survive_shell_exit`
-proves this from *outside* the `rush -c` process, after it has already
-exited, since that's the only way to actually verify a "survives closing
-the last handle, including implicitly" claim.
+`tests/windows_job_control.rs::disown_detaches_the_job_while_the_shell_is_still_running`
+proves the reversal actually takes effect, checked from *within* the
+still-running shell right after `disown` runs.
+
+**Known caveat, found via real CI rather than assumed:** an earlier
+version of that test tried to prove survival from *outside* the `rush -c`
+process, after it had already exited — the stronger claim `disown` is
+really for. It failed consistently on `windows-latest`, even though
+`clear_kill_on_close` never reported an error and the process was
+confirmed alive moments earlier from inside the shell. The likely
+explanation: `clear_kill_on_close` only clears kill-on-close on the job
+*this shell created*; it can't detach a process from an *ambient* job the
+shell's own process might already be nested in (Windows automatically
+nests every child a job member spawns into that same job too), and
+GitHub Actions' Windows runners are documented to wrap each step's
+process tree in exactly such a job for orphan cleanup. There's no
+portable way to detect or opt out of this from inside the shell, so
+`disown`'s test coverage only asserts what's actually attributable to
+`winjob.rs`/`rusty_win32`'s own code, not the sandbox a background job
+happens to run under — see `winjob.rs::disown_cmd`'s own doc comment.
 
 Each step above should be its own PR — small enough for CI's after-the-fact
 signal to be a meaningful check, in keeping with why this was scoped as a

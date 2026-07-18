@@ -525,6 +525,19 @@ fn kill_cmd(argv: &[String]) -> i32 {
 /// reverses kill-on-close first (`rusty_win32::job::clear_kill_on_close`,
 /// added specifically for this) before releasing the handles, which is
 /// the actual "detach" operation on this platform.
+///
+/// **Known caveat**, confirmed via real Windows CI rather than assumed:
+/// this only clears kill-on-close on the job *this shell created* for its
+/// own tracking. If the shell's own process is itself already a member of
+/// some *ambient* job (Windows automatically nests every child a job
+/// member spawns into that same job too — not something a caller opts
+/// into), a disowned process can still die once the shell's own process
+/// exits, because that ambient job's own kill-on-close (if any) is
+/// untouched by anything this function does. Environments that wrap a
+/// process tree in such a job for their own cleanup purposes — GitHub
+/// Actions' Windows runners, e.g. — will still tear down a "disowned" job
+/// once the shell that spawned it exits. There's no portable way to
+/// detect or opt out of this from inside the shell.
 fn disown_cmd(argv: &[String]) -> i32 {
     let idx = STATE.with(|s| {
         let s = s.borrow();

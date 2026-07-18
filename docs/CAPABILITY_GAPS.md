@@ -319,10 +319,12 @@ strategy (G11)" — no Windows target reaches `libc`'s `setpgid`/`tcsetpgrp`/
 etc. at all, not a policy choice), but `docs/WINDOWS_JOB_CONTROL.md`'s
 scoped slice of this gap — background jobs via Windows Job Objects — is
 landed: `src/winjob.rs` gives Windows `&`/`jobs`/`wait`/`kill`/`disown`/
-`$!` for a single external command. Backgrounded pipelines/builtins, and
-(permanently out of scope, a separate harder problem) `fg`/`bg` terminal
-hand-off, Ctrl-Z suspend, process substitution, and `coproc` remain — see
-the design doc's "Suggested staging" for what's next.
+`$!` for external commands, single-stage or piped together. A builtin,
+function, or compound command as a stage remains rejected — a permanent
+limitation (no Windows `fork()`), not a staging gap. (Permanently out of
+scope for a separate, harder reason:) `fg`/`bg` terminal hand-off, Ctrl-Z
+suspend, process substitution, and `coproc` remain — see the design doc's
+"Suggested staging" for what's next.
 
 ---
 

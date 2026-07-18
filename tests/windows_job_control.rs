@@ -4,11 +4,14 @@
 //! `rush()` helper uses, kept in a separate file since this is a
 //! platform-specific milestone easier to find and grow on its own.
 //!
-//! Scope is a single external command only (see `winjob.rs`'s module doc):
-//! these tests cover backgrounding returning immediately, `$!`/`jobs`
-//! reflecting it, `wait`/`kill`/`disown` against a tracked job, and
-//! pipelines/builtins being rejected outright rather than silently doing
-//! the wrong thing.
+//! Scope is external commands only, single-stage or piped together (see
+//! `winjob.rs`'s module doc): these tests cover backgrounding returning
+//! immediately, `$!`/`jobs` reflecting it, `wait`/`kill`/`disown` against
+//! a tracked job (single-stage or a whole pipeline treated as one job),
+//! real inter-stage data flow through a backgrounded pipeline, and a
+//! builtin/function/compound stage being rejected outright — a permanent
+//! limitation, not a staging gap — rather than silently doing the wrong
+//! thing.
 #![cfg(windows)]
 
 use std::process::Command;
@@ -71,12 +74,14 @@ fn dollar_bang_is_the_backgrounded_pid() {
 }
 
 #[test]
-fn background_pipeline_is_rejected_not_silently_wrong() {
+fn background_pipeline_of_builtins_is_rejected_not_silently_wrong() {
     // Pure builtins on both sides — no dependency on any external tool
     // being on PATH, so this stays deterministic across any Windows
-    // runner. Milestone 1 explicitly narrows to a single external command;
-    // this must fail loudly, not silently run only the first stage (or
-    // worse, both stages un-backgrounded).
+    // runner. Windows has no `fork()`, so a builtin anywhere in a
+    // backgrounded pipeline is a permanent limitation, not a staging gap
+    // (see `winjob.rs`'s own module doc); this must fail loudly, not
+    // silently run only one stage (or worse, the whole pipeline
+    // un-backgrounded).
     let (_, status) = rush("echo a | echo b &");
     assert_ne!(status, 0);
 }
@@ -85,6 +90,83 @@ fn background_pipeline_is_rejected_not_silently_wrong() {
 fn background_builtin_is_rejected_not_silently_wrong() {
     let (_, status) = rush("echo hi &");
     assert_ne!(status, 0);
+}
+
+#[test]
+fn background_compound_stage_is_rejected_not_silently_wrong() {
+    let (_, status) = rush("{ :; } | cmd.exe /c \"exit 0\" &");
+    assert_ne!(status, 0);
+}
+
+#[test]
+fn background_pipeline_of_external_commands_connects_correctly() {
+    // Proves the pipeline actually connects stage 0's stdout to stage 1's
+    // stdin through a real pipe (not, say, silently running only the
+    // first stage and ignoring the rest): `findstr` only ever sees
+    // "hello" if it's actually reading `echo`'s piped output, and its own
+    // stdout redirect (on the *last* stage) proves an explicit redirect
+    // still applies on top of the pipe wiring `spawn_stage` sets up by
+    // default.
+    let dir = std::env::temp_dir();
+    let out_path = dir.join(format!("rush_pipeline_test_{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&out_path);
+    let out_path_str = out_path.to_str().unwrap().replace('\\', "/");
+
+    let script =
+        format!(r#"cmd.exe /c "echo hello" | findstr hello > {out_path_str} & wait; echo $?"#);
+    let (out, err, status) = rush_full(&script);
+    assert_eq!(status, 0, "stdout was: {out:?}, stderr was: {err:?}");
+    assert_eq!(out.trim(), "0", "wait's own status, got: {out:?}");
+
+    let content = std::fs::read_to_string(&out_path).unwrap_or_else(|e| {
+        panic!(
+            "expected the pipeline's output file to exist and be readable: {e} \
+             (stdout: {out:?}, stderr: {err:?})"
+        )
+    });
+    assert!(
+        content.trim().eq_ignore_ascii_case("hello"),
+        "got: {content:?}"
+    );
+    let _ = std::fs::remove_file(&out_path);
+}
+
+#[test]
+fn background_pipeline_reports_the_last_stages_pid_as_dollar_bang() {
+    let (out, status) = rush(r#"cmd.exe /c "exit 0" | cmd.exe /c "exit 5" & wait $!; echo $?"#);
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(out.trim(), "5");
+}
+
+#[test]
+fn background_pipeline_is_listed_and_killed_as_one_job() {
+    // Each stage's own `> nul` (suppressing ping's own chatter, which
+    // would otherwise pollute this test's captured stdout) overrides the
+    // default pipe wiring for that stage's stdout — matching
+    // `spawn_stage`'s documented precedence, an explicit redirect always
+    // wins. That's fine here: this test only cares that `jobs`/`kill`
+    // treat the two-stage pipeline as *one* job, not about data actually
+    // flowing between the stages (covered instead by
+    // `background_pipeline_of_external_commands_connects_correctly`).
+    let (out, status) = rush(
+        "ping -n 30 127.0.0.1 > nul | ping -n 30 127.0.0.1 > nul & \
+         jobs; \
+         kill %1; \
+         wait %1; echo $?",
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    let mut lines = out.lines();
+    assert!(
+        lines
+            .next()
+            .is_some_and(|l| l.contains("[1]") && l.contains("Running")),
+        "expected job [1] listed as Running, got: {out:?}"
+    );
+    assert_eq!(
+        lines.last(),
+        Some("143"),
+        "kill should terminate the whole pipeline's job, not just one stage, got: {out:?}"
+    );
 }
 
 #[test]

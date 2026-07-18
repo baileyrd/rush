@@ -4,17 +4,22 @@ Originally written as a design doc, not yet implemented — scoping closing
 Windows' job-control gap without writing the implementation itself, staged
 so review and CI feedback could happen incrementally rather than in one
 large unverifiable patch. **Milestones 1–4 of the staging plan below have
-since landed, plus `disown`**: `src/winjob.rs`, backed by
+since landed, plus `disown` and backgrounded pipelines of external
+commands**: `src/winjob.rs`, backed by
 [rusty_win32](https://github.com/baileyrd/rusty_win32)'s `job`/`process`
 modules (Job Objects, `CreateProcessW`-with-`CREATE_SUSPENDED`) rather than
 the originally-sketched hand-rolled FFI, since that crate now exists and
 already provides exactly these primitives, verified independently against
 real `windows-latest` CI. `cmd &`/`jobs`/`wait`/`kill`/`disown`/`$!` all
-work now, for a single external command; see `winjob.rs`'s own module doc
-for its remaining, narrower-than-full scope (no pipelines, no backgrounded
-builtins/functions). The rest of this document — the design rationale,
-"Deliberately out of scope", and the staging plan's own step-by-step
-detail — is otherwise unchanged from the original design pass.
+work now, for external commands, single-stage or piped together; see
+`winjob.rs`'s own module doc for its one remaining, *permanent* narrowing
+(not a staging gap) — a builtin, function, or compound command as a
+pipeline stage, since Windows has no `fork()` for it to run in a
+background child the way `job.rs`'s Unix `spawn_builtin_stage`/
+`spawn_compound_stage` do. The rest of this document — the design
+rationale, "Deliberately out of scope", and the staging plan's own
+step-by-step detail — is otherwise unchanged from the original design
+pass.
 
 **Scope decision (already made, not this document's to revisit):** background
 jobs only — `cmd &`, `jobs`, `wait`, `kill`, a real `$!`. Explicitly *not* in
@@ -325,6 +330,34 @@ portable way to detect or opt out of this from inside the shell, so
 `disown`'s test coverage only asserts what's actually attributable to
 `winjob.rs`/`rusty_win32`'s own code, not the sandbox a background job
 happens to run under — see `winjob.rs::disown_cmd`'s own doc comment.
+
+**Backgrounded pipelines of external commands** (`cmd1 | cmd2 | ... &`, the
+narrowing milestone 1 originally accepted — "no pipelines" — as a first
+cut) are **done**. `winjob::spawn_pipeline_into_job` spawns every stage
+suspended, connected by real anonymous pipes
+(`rusty_win32::handle::create_pipe`), assigns each to the *same* Job
+Object as it goes, and resumes it — the same "assign before resume"
+guarantee the single-stage case always had, just applied per stage. `$!`
+and the tracked process for `wait`/`jobs` polling are the pipeline's
+*last* stage, matching bash's own convention (verified directly, per
+`job.rs`'s own comment on the same rule); `kill %n` reaches every stage at
+once via the shared job, not just the last one, since `TerminateJobObject`
+terminates every process currently assigned to a job in one call.
+Tracking each stage's own individual exit status (a Windows
+`${PIPESTATUS[@]}` equivalent) isn't attempted — a possible follow-up, not
+needed for `wait`/`kill`/`jobs` to work correctly on the pipeline as a
+whole.
+
+A pipeline stage that's a builtin, function, or compound command remains
+rejected — explicitly confirmed as the **permanent** limitation the
+original design doc's own "worth flagging as a likely-necessary
+narrowing" comment anticipated, not a gap staged for later: Windows has
+no `fork()`, so there's no way to run one of those in a background child
+process the way `job.rs`'s Unix `spawn_builtin_stage`/
+`spawn_compound_stage` do. `winjob::run_background` validates every stage
+of a pipeline up front, before touching any OS resources, so this fails
+loudly and immediately rather than silently running only the external
+stages or leaving the pipeline half-wired.
 
 Each step above should be its own PR — small enough for CI's after-the-fact
 signal to be a meaningful check, in keeping with why this was scoped as a

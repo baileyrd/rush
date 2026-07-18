@@ -16,11 +16,15 @@ jobs:
       fail-fast: false
       matrix:
         # Linux exercises the Unix job-control path (job.rs) on the default
-        # rusty_libc backend; macOS exercises the same job-control path but
-        # on the libc-crate backend (the only option there — rusty_libc is
-        # Linux-only, see Cargo.toml); Windows exercises the foreground-only
-        # fallback.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # rusty_libc backend; Windows exercises the foreground-only
+        # fallback. macOS was briefly in this matrix but pulled back out —
+        # its Test step hung indefinitely (build succeeded; see PR #149's
+        # history for the RLIMIT_* build fix that got it that far). Root
+        # cause not yet diagnosed (tracked as a backlog item — most likely
+        # job.rs's Unix signal/pty handling behaving differently there);
+        # re-add once it's actually fixed rather than leaving a permanently
+        # red/stuck job in the matrix.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 

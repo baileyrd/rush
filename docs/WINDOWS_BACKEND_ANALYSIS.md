@@ -50,7 +50,7 @@ than at the module level). Grouped by theme, with a verdict on whether
 | Subshell / capture isolation (no `fork`) | 8 | Working alt-impl (self-re-exec) for the common case; gap for a compound command captured mid-pipeline |
 | Coprocess (`coproc`) | 1 | **Real gap** — hard stub |
 | Process substitution (`<(cmd)`/`>(cmd)`) | 5 | **Real gap** — hard stub, no `/dev/fd` equivalent |
-| Signals / traps / Ctrl+C | 9 | Idle-prompt Ctrl-C already works (via `rusty_lines`); `TERM`/`HUP` trap registration is a **silent no-op** (accepted, never fires); foreground-child Ctrl-C behavior unverified |
+| Signals / traps / Ctrl+C | 9 | Idle-prompt Ctrl-C does **not** work — `rusty_lines`' non-Unix path has no Ctrl-C handling at all (checked directly against that crate's source, correcting an earlier assumption here); `TERM`/`HUP` trap registration is a **silent no-op** (accepted, never fires); foreground-child Ctrl-C behavior unverified |
 | fds / pipes / dup / redirects | 9 | fd 0-2 fine (`winstdio`); fd 3+ / `{name}>` varfd / coprocess pipe-sharing = **real gap** |
 | `rlimit`/`ulimit`/`umask` | 2 | Real gap, but mostly non-portable by nature |
 | File metadata / ownership (uid/gid, `-ef`, fifo/socket tests) | 6 | Honest degradation (false/0/None); one real fix available (`same_file`) |
@@ -82,10 +82,21 @@ and one correction:
   *which* signal-shaped need is real: `SetConsoleCtrlHandler` for
   `TERM`/`HUP`-equivalent graceful shutdown (`trap.rs`'s doc comment at
   line 1-6 already names this exact use case — a container's PID 1 —
-  independent of any terminal). Idle-prompt Ctrl-C is not this crate's
-  problem (owned by `rusty_lines`); foreground-child Ctrl-C targeting
+  independent of any terminal). Idle-prompt Ctrl-C is `rusty_lines`'
+  problem to own, but — checked directly against that crate's source, not
+  assumed — it does not own it yet: the entire raw-mode editor is
+  `#[cfg(unix)]`, and its non-Unix `read_line` fallback drops the `Hooks`
+  callback rush's `on_interrupted_read` relies on entirely (`let _ =
+  (rprompt, hooks);`), so `ReadResult::Interrupted` is unreachable off
+  Unix. In practice, Ctrl-C during rush's interactive prompt on Windows
+  today most likely invokes the OS's *default* Ctrl handler and kills the
+  whole process, rather than gracefully aborting the current line the way
+  Unix does — a real, user-visible gap, corrected from an earlier version
+  of this document that assumed (without checking `rusty_lines`' actual
+  source) that this already worked. Foreground-child Ctrl-C targeting
   (does a Ctrl-C reach rush and the child at once, or just the child?) is
-  a genuinely open question the inventory flags as unverified — see §4.
+  a separate, still genuinely open question the inventory flags as
+  unverified — see §4.
 - **`waitpid`/`wait`** — confirmed handle-based, and already proven low-risk
   in practice: `WINDOWS_JOB_CONTROL.md` §"`wait` semantics" already worked
   out that `WaitForSingleObject`/`WaitForMultipleObjects` on stored process
@@ -107,14 +118,21 @@ and one correction:
   sharing all fail today specifically because nothing maps a rush-chosen
   integer to a `HANDLE`. This is `rusty_win32`'s single largest surface
   once job control is set aside — see §4.
-- **Raw terminal mode** — confirmed ConPTY is the right target, but this is
-  `rusty_lines`' dependency to add, not something rush's own `cfg` sites
-  call for directly (rush never touches terminal mode itself; it's fully
-  delegated). Still correct to build in `rusty_win32` as the shared
-  primitive, since `rusty_lines` would consume it the same way rush's
-  Windows job-control and fd work would consume `rusty_win32::process`/
-  `handle` — just not something *this* inventory found a rush-side call
-  site for.
+- **Raw terminal mode** — the handoff doc's own sketch here (ConPTY,
+  `CreatePseudoConsole`) turned out to be the wrong primitive, found by
+  actually reading `rusty_lines`' source rather than assuming: ConPTY
+  hosts a *child* process's console session — what a terminal emulator
+  does — but `rusty_lines` reads from its own inherited stdin, exactly the
+  way its Unix backend (`term_sys.rs`) calls `tcgetattr`/`tcsetattr` on
+  its own fd, not on some newly-created pty. The real analog of
+  `tcgetattr`/`tcsetattr` is `GetConsoleMode`/`SetConsoleMode`, with
+  `ENABLE_VIRTUAL_TERMINAL_INPUT` (Windows 10+, within this crate's
+  existing floor) as the bit that makes `ReadFile` on a console handle
+  deliver a Unix-tty-like VT/ANSI byte stream instead of requiring
+  `ReadConsoleInputW`'s structured records — not something rush's own
+  `cfg` sites call for directly (rush never touches terminal mode itself;
+  it's fully delegated to `rusty_lines`), but still correct to build in
+  `rusty_win32` as the shared primitive that crate would consume.
 - **`clock_gettime` fast path** — no correction needed, but demoted in
   priority: rush uses `std::time` exclusively (no direct
   `QueryPerformanceCounter` call site anywhere in `src/`), and std's own
@@ -240,13 +258,16 @@ inventory actually shows rush needs, in priority order:
   can't start without these.
 - **`console`** — `SetConsoleCtrlHandler` first (closes §4.4, the
   highest-value/lowest-risk item in this whole inventory — no dependency
-  on job/handle work). ConPTY (`CreatePseudoConsole`) and raw-mode get/set
-  are lower priority *for rush itself* (owned by `rusty_lines`, §1) but
-  belong in this crate as the shared primitive both consumers would use.
-  Window-size query (`GetConsoleScreenBufferInfo`) likewise — `rusty_lines`
-  already provides `terminal_size()` today by some means; confirm with that
-  crate's own maintainers whether it already has a Windows arm before
-  duplicating effort here.
+  on job/handle work). `GetConsoleMode`/`SetConsoleMode` (raw-mode get/set
+  — **not** ConPTY/`CreatePseudoConsole`, see the correction to the "Raw
+  terminal mode" bullet above), `ReadFile` (the chunked raw-byte read),
+  and a `WaitForSingleObject`-backed poll are lower priority *for rush
+  itself* (owned by `rusty_lines`, §1) but belong in this crate as the
+  shared primitive that crate would consume. Window-size query
+  (`GetConsoleScreenBufferInfo`) likewise — checked directly:
+  `rusty_lines`' `terminal_size()` returns `None` unconditionally off
+  Unix today (`#[cfg(not(unix))]` arm, `src/lib.rs`), so there is no
+  existing Windows arm to avoid duplicating.
 - **`time`** — lowest priority, matching the handoff doc's own phasing;
   no rush call site depends on it (§3). Build it last, if at all, purely
   for `rusty_lines`/completeness rather than an open rush gap.
@@ -276,9 +297,15 @@ inventory actually shows rush needs, in priority order:
 - `exec -a`/`exec -l` argv0 surgery (Theme 13) — no Win32 equivalent exists
   at all; a spawned process always reports its real command line. Permanent
   limitation, not a gap to close.
-- ConPTY/raw-mode implementation itself — belongs in `rusty_lines`, not
-  rush or `rusty_win32` directly consuming it on rush's behalf; `rusty_win32`
-  provides the primitive, doesn't own the integration.
+- A raw-mode *editor* implementation itself (key decoding, render engine,
+  keymaps — the Windows counterpart of `rusty_lines`' `#[cfg(unix)]`
+  editor internals) — belongs in `rusty_lines`, not rush or `rusty_win32`
+  directly consuming the primitives on rush's behalf; `rusty_win32`
+  provides `GetConsoleMode`/`SetConsoleMode`/`ReadFile`/window-size
+  primitives (§5), doesn't own the integration or decide what "raw mode"
+  means in terms of which mode bits to flip — that policy lives in
+  `rusty_lines`' `term_sys.rs` on Unix and would live in its Windows
+  counterpart, not in this crate.
 
 ## 7. Effort estimate and phasing
 
@@ -290,7 +317,7 @@ signal (§4's danger ordering, §5/§6's scope corrections):
 | 1 | `Win32Error` + `console::install_ctrl_handler` (§4.4) | Self-contained, no dependency on any other phase, closes the single most surprising gap (silent trap no-op) found in this inventory | low |
 | 2 | `handle` (`DuplicateHandle`/`CreatePipe`/`SetHandleInformation`) | Unblocks rush's own fd-3+/varfd/coprocess follow-up work (§4.2); no Job Object dependency | low-medium |
 | 3 | `process::spawn_suspended`/`resume` + `job` (Job Objects) | The actual blocker for `WINDOWS_JOB_CONTROL.md`'s staged plan; depends on nothing above except `Win32Error` | medium (well-scoped by the existing design doc) |
-| 4 | `console` ConPTY/raw-mode primitives | For `rusty_lines`' benefit, not a rush gap this inventory found; coordinate with that crate before building blind | high (no interactive Windows verification in this environment, same constraint noted throughout) |
+| 4 | `console` raw-mode primitives (`GetConsoleMode`/`SetConsoleMode`/`ReadFile`/window-size — **not** ConPTY, see the corrected "Raw terminal mode" bullet in §3) | Implemented last in practice (after Phase 5), once the correct primitive was confirmed against `rusty_lines`' real source rather than guessed at from the original handoff doc's ConPTY sketch; closes a gap that turned out to be rush-relevant after all (§2's Ctrl+C correction), even though the primitives themselves are for `rusty_lines` to consume | medium once the correct primitive was identified (no interactive Windows verification in this environment, same constraint noted throughout) |
 | 5 | `time` fast path | No known dependent; do last, matches the handoff doc's own reasoning | low |
 
 Process substitution (§4.3) and the foreground-Ctrl-C-targeting question

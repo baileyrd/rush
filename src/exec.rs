@@ -6,9 +6,12 @@
 //! before it runs*, left to right, so a `cd` takes effect for later pipelines.
 //!
 //! On Unix, foreground and background pipelines go through [`crate::job`], which
-//! adds process groups, terminal control, and stop/`fg`/`bg` handling. On other
-//! platforms there is no job control: foreground pipelines run with a plain
-//! spawn-and-wait, and `&` is rejected.
+//! adds process groups, terminal control, and stop/`fg`/`bg` handling. On
+//! Windows, foreground pipelines run with a plain spawn-and-wait (no
+//! process-group/terminal-control equivalent — see `winjob`'s own doc for
+//! why), but background pipelines (`cmd &`) do go through
+//! [`crate::winjob`] for the single-external-command case; `fg`/`bg`/Ctrl-Z
+//! remain permanently out of scope there.
 //!
 //! Within a pipeline, builtins only run in-process when the pipeline is a
 //! single command — a builtin in the middle of a pipe (`echo hi | cd`) is a
@@ -1987,14 +1990,14 @@ impl Drop for StdioGuard {
     }
 }
 
-/// Run an already-expanded pipeline in the background. Unix only.
+/// Run an already-expanded pipeline in the background.
 #[cfg(unix)]
 fn run_background(pipeline: &Pipeline) -> Result<(), String> {
     crate::job::run_background(pipeline)
 }
 #[cfg(not(unix))]
-fn run_background(_pipeline: &Pipeline) -> Result<(), String> {
-    Err("background jobs are not supported on this platform".into())
+fn run_background(pipeline: &Pipeline) -> Result<(), String> {
+    crate::winjob::run_background(pipeline)
 }
 
 /// Run a command list and return its stdout — the engine behind `$(...)`.
@@ -2529,7 +2532,7 @@ pub fn pipeline_status(stage_statuses: &[i32]) -> i32 {
 /// directly) — routing it through the exact same not-found handling a
 /// missing command already gets, without a second error path to keep
 /// consistent with it.
-fn resolve_program(program: &str) -> String {
+pub(crate) fn resolve_program(program: &str) -> String {
     if crate::builtins::looks_like_path(program) {
         return program.to_string();
     }
@@ -2558,7 +2561,7 @@ fn resolve_program(program: &str) -> String {
 /// any) and appends to it, without touching the shell's own variable table
 /// — prefix assignments never persist past the one command, matching the
 /// plain `=` case's existing behavior.
-fn prefix_env_value(name: &str, op: &crate::vars::AssignOp) -> Option<String> {
+pub(crate) fn prefix_env_value(name: &str, op: &crate::vars::AssignOp) -> Option<String> {
     use crate::vars::{AssignOp, AssignValue};
     match op {
         AssignOp::Set(AssignValue::Scalar(v)) => Some(v.clone()),

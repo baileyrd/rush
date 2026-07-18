@@ -522,15 +522,24 @@ failed on an unrelated package-repository error. Unnecessary for the
 job-control conclusion above, though, since that's decided statically by
 which code compiles in, not by anything only observable at runtime.)
 
-**A path forward, not yet implemented:** `docs/WINDOWS_JOB_CONTROL.md` is a
-design doc (deliberately not code — the same "no Windows machine to verify
-against interactively" constraint applies to implementation, not just this
-analysis) proposing a *new*, Windows-native mechanism for a scoped slice of
-this gap — background jobs only (`&`/`jobs`/`wait`/`kill`/`$!`) via Windows
-Job Objects, a genuinely different primitive from POSIX process groups, not
-a port of `job.rs`'s `libc` calls. `fg`/`bg` terminal hand-off, Ctrl-Z,
+**A path forward:** `docs/WINDOWS_JOB_CONTROL.md` is a design doc proposing
+a *new*, Windows-native mechanism for a scoped slice of this gap —
+background jobs only (`&`/`jobs`/`wait`/`kill`/`$!`) via Windows Job
+Objects, a genuinely different primitive from POSIX process groups, not a
+port of `job.rs`'s `libc` calls. `fg`/`bg` terminal hand-off, Ctrl-Z,
 process substitution, and `coproc` are explicitly out of that scope — each a
-separately hard problem the design doc explains individually.
+separately hard problem the design doc explains individually. **Milestone
+1 of that design has since landed** as `src/winjob.rs` (`#[cfg(not(unix))]`,
+alongside `job.rs`'s `#[cfg(unix)]`), backed by the
+[rusty_win32](https://github.com/baileyrd/rusty_win32) crate's `job`/
+`process` modules — a single background external command, `$!`, and `jobs`
+work; `wait`/`kill`/`disown`/pipelines/backgrounded builtins don't yet (see
+`winjob.rs`'s own module doc, and the design doc's "Suggested staging" for
+the remaining milestones). So the "foreground-only, unconditionally, by
+construction" conclusion above no longer holds in full: Windows still has
+no `job.rs`-style process-group/terminal-control job control (that part of
+the analysis is unchanged — `winjob.rs` implements something structurally
+different, not a port), but it's no longer strictly foreground-only either.
 
 Within that foreground-only ceiling, native Windows is at parity with the
 Unix build for the everyday shell loop (verified natively on Windows 11):

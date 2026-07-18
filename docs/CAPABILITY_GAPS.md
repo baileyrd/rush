@@ -188,7 +188,7 @@ applicable to that shell's own model.
 | Bang-history recall (`!!`/`!n`/`!$`/etc.) | ✅‖‖ | ❌ | ✅ | ✅ | ✅ | ❌ |
 | Context-aware completion | ✅§§§ | — | 🟡 | 🟡 | ✅ | ✅ |
 | History autosuggestion | ✅*** | — | ❌ | ❌ | 🟡 | ✅ |
-| Native Windows job control | ❌††† | — | — | — | — | 🟡 |
+| Native Windows job control | 🟡††† | — | — | — | — | 🟡 |
 | `[[ ]]` extended test | ✅× | ❌ | ✅ | ✅ | ✅ | ❌ |
 | `readonly` / read-only vars | ✅×× | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `$`/`$PPID`/`$-` special vars | ✅××× | ✅ | ✅ | ✅ | ✅ | 🟡 |
@@ -313,14 +313,16 @@ variables (`$fish_pid`, no direct `$-` equivalent), so its own model
 only partially overlaps rather than matching the POSIX/bash-family
 syntax directly.
 
-††† Not started — see `docs/ARCHITECTURE.md`'s "Windows strategy (G11)"
-for why this is a hard `cfg`-level wall (`job.rs`'s POSIX `libc` calls
-have no Windows target that reaches them at all, not a policy choice)
-and `docs/WINDOWS_JOB_CONTROL.md` for a design (not yet implemented) for
-closing a *scoped* slice of it — background jobs (`&`, `jobs`, `wait`,
-`kill`, `$!`) via Windows Job Objects — with `fg`/`bg` terminal hand-off,
-Ctrl-Z suspend, process substitution, and `coproc` deliberately left for
-separate, harder follow-ups the design doc explains individually.
+††† `job.rs`'s POSIX process-group/terminal/signal model itself is still a
+hard `cfg`-level wall on Windows (see `docs/ARCHITECTURE.md`'s "Windows
+strategy (G11)" — no Windows target reaches `libc`'s `setpgid`/`tcsetpgrp`/
+etc. at all, not a policy choice), but `docs/WINDOWS_JOB_CONTROL.md`'s
+scoped slice of this gap — background jobs via Windows Job Objects — has
+partially landed: `src/winjob.rs` gives Windows `&`/`jobs`/`$!` for a
+single external command. `wait`/`kill`/`disown`, backgrounded pipelines/
+builtins, and (permanently out of scope, a separate harder problem) `fg`/
+`bg` terminal hand-off, Ctrl-Z suspend, process substitution, and `coproc`
+remain — see the design doc's "Suggested staging" for what's next.
 
 ---
 

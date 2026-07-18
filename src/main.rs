@@ -644,6 +644,8 @@ fn interactive() -> std::io::Result<()> {
         // Report any background jobs that finished or stopped since last prompt.
         #[cfg(unix)]
         job::reap_background();
+        #[cfg(not(unix))]
+        winjob::reap_background();
         // Fire (or default-terminate on) any TERM/HUP received since the last
         // prompt — same idea as `reap_background`, for signals instead of jobs.
         #[cfg(unix)]

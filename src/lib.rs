@@ -31,4 +31,6 @@ pub mod trap;
 pub mod unparse;
 pub mod vars;
 #[cfg(not(unix))]
+pub mod winjob;
+#[cfg(not(unix))]
 pub mod winstdio;

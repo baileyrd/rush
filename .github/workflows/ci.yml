@@ -16,8 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         # Linux exercises the Unix job-control path (job.rs) on the default
-        # rusty_libc backend; Windows exercises the foreground-only
-        # fallback. macOS was briefly in this matrix but pulled back out —
+        # rusty_libc backend; Windows exercises winjob.rs's Job-Object-based
+        # background jobs (docs/WINDOWS_JOB_CONTROL.md) alongside the plain
+        # spawn-and-wait foreground path. macOS was briefly in this matrix
+        # but pulled back out —
         # its Test step hung indefinitely (build succeeded; see PR #149's
         # history for the RLIMIT_* build fix that got it that far). Root
         # cause not yet diagnosed (tracked as a backlog item — most likely

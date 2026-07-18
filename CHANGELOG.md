@@ -139,6 +139,24 @@ the Unix build:
   (stopped-only) is accepted but always prints nothing, since Windows
   background jobs have no Stopped state.
 
+### Native Windows: disown
+- **`disown [%n|n]` works on Windows.** Turned out to need a real
+  `rusty_win32` primitive addition, not just table bookkeeping: a job
+  created with kill-on-close ties its member process's lifetime to the
+  job handle staying open in *this* process, which closes implicitly at
+  the owning process's own exit — so simply dropping the `winjob.rs`
+  table entry and closing its handles (the way Unix `disown` conceptually
+  works, since a pid there is already independent of anything the shell
+  holds) would kill the process on the spot, or at the latest when the
+  shell itself exits. `rusty_win32` gained `job::clear_kill_on_close`
+  (the reverse of `set_kill_on_close`) specifically so `disown` can
+  reverse that limit before releasing the handles.
+- `tests/windows_job_control.rs::disown_lets_the_job_survive_shell_exit`
+  verifies this from *outside* the `rush -c` process, checking (via
+  `tasklist`) that the disowned job is still running after the shell has
+  already exited — the only way to actually prove a "survives closing
+  the last handle, including implicitly" claim.
+
 ## [Unreleased] — since 0.1.1
 
 ### Packaging & release (G1–G4)

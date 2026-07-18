@@ -6,7 +6,7 @@
 //!
 //! Scope is a single external command only (see `winjob.rs`'s module doc):
 //! these tests cover backgrounding returning immediately, `$!`/`jobs`
-//! reflecting it, `wait`/`kill` against a tracked job, and
+//! reflecting it, `wait`/`kill`/`disown` against a tracked job, and
 //! pipelines/builtins being rejected outright rather than silently doing
 //! the wrong thing.
 #![cfg(windows)]
@@ -166,4 +166,54 @@ fn jobs_dash_r_excludes_finished_jobs() {
     let (out, status) = rush(r#"cmd.exe /c "exit 0" & wait; jobs -r"#);
     assert_eq!(status, 0, "stdout was: {out:?}");
     assert_eq!(out, "", "expected no Running jobs listed, got: {out:?}");
+}
+
+#[test]
+fn disown_removes_the_job_from_jobs_listing() {
+    let (out, status) = rush("ping -n 5 127.0.0.1 > nul & disown %1; jobs");
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(
+        out, "",
+        "expected no jobs listed after disown, got: {out:?}"
+    );
+}
+
+#[test]
+fn disown_on_an_unknown_job_is_an_error() {
+    let (_, status) = rush("disown %1");
+    assert_ne!(status, 0);
+}
+
+#[test]
+fn disown_lets_the_job_survive_shell_exit() {
+    // The whole point of `disown` (and the reason `rusty_win32` grew
+    // `job::clear_kill_on_close` for it): a job created with kill-on-close
+    // dies when the *last* handle to it closes, which happens implicitly
+    // when the owning process exits — not just via an explicit
+    // `CloseHandle` call. So the only real proof this works is checking
+    // the process from *outside* the `rush -c` invocation, after it has
+    // already exited (`rush()` below waits for it via `Command::output`).
+    let (out, status) = rush("ping -n 5 127.0.0.1 > nul & disown %1; echo $!");
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    let pid: u32 = out
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("$! should be a plain pid, got: {out:?}"));
+
+    let listing = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .expect("spawn tasklist");
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(
+        listing.contains(&pid.to_string()),
+        "disowned job (pid {pid}) should still be running after the shell exited, \
+         tasklist said: {listing:?}"
+    );
+
+    // The process would finish on its own in a couple more seconds
+    // regardless (`ping -n 5`); no reason to let this test wait for that.
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
 }

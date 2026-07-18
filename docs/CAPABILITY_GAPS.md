@@ -318,11 +318,11 @@ hard `cfg`-level wall on Windows (see `docs/ARCHITECTURE.md`'s "Windows
 strategy (G11)" — no Windows target reaches `libc`'s `setpgid`/`tcsetpgrp`/
 etc. at all, not a policy choice), but `docs/WINDOWS_JOB_CONTROL.md`'s
 scoped slice of this gap — background jobs via Windows Job Objects — is
-largely landed: `src/winjob.rs` gives Windows `&`/`jobs`/`wait`/`kill`/`$!`
-for a single external command. `disown`, backgrounded pipelines/builtins,
-and (permanently out of scope, a separate harder problem) `fg`/`bg`
-terminal hand-off, Ctrl-Z suspend, process substitution, and `coproc`
-remain — see the design doc's "Suggested staging" for what's next.
+landed: `src/winjob.rs` gives Windows `&`/`jobs`/`wait`/`kill`/`disown`/
+`$!` for a single external command. Backgrounded pipelines/builtins, and
+(permanently out of scope, a separate harder problem) `fg`/`bg` terminal
+hand-off, Ctrl-Z suspend, process substitution, and `coproc` remain — see
+the design doc's "Suggested staging" for what's next.
 
 ---
 

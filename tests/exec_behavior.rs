@@ -3614,10 +3614,13 @@ fn dirstack_variable_tracks_pushd_popd_and_cd() {
     assert_eq!(out, format!("{a_display}\n"));
 
     // pushd prepends the old cwd behind the new one; popd removes it again.
+    // No `/dev/null` here (Windows has no such path — `pushd`/`popd`'s own
+    // stack-listing output is tolerated instead, via unique markers).
     let (out, _) = rush(&format!(
-        r#"cd "{a_display}" && pushd "{b_display}" >/dev/null && echo "${{DIRSTACK[@]}}" && popd >/dev/null && echo "${{DIRSTACK[@]}}""#
+        r#"cd "{a_display}"; pushd "{b_display}"; echo "STACK1=${{DIRSTACK[@]}}"; popd; echo "STACK2=${{DIRSTACK[@]}}""#
     ));
-    assert_eq!(out, format!("{b_display} {a_display}\n{a_display}\n"));
+    assert!(out.contains(&format!("STACK1={b_display} {a_display}\n")), "got: {out:?}");
+    assert!(out.contains(&format!("STACK2={a_display}\n")), "got: {out:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

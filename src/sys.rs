@@ -68,21 +68,30 @@ mod imp {
     pub use libc::{c_int, mode_t, pid_t, rlim_t, rlimit, sighandler_t, uid_t};
     // Which constants a given build actually references depends on cfg (e.g.
     // `F_GETFD` only on the non-Linux here-doc path), so allow unused here.
+    // Every one of these is POSIX-common — present in the `libc` crate on
+    // any Unix this module can back (other Unix, or Linux with
+    // `libc-backend`), unlike the Linux-only RLIMIT_* cluster below.
     #[allow(unused_imports)]
     pub use libc::{
         FD_CLOEXEC, F_GETFD, F_SETFD, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_DATA, RLIMIT_FSIZE,
-        RLIMIT_LOCKS, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC,
-        RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_SIGPENDING, RLIMIT_STACK, RLIM_INFINITY, SIGABRT, SIGALRM,
-        SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL, SIGPIPE, SIGQUIT,
-        SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIG_DFL,
-        SIG_IGN, STDIN_FILENO, WCONTINUED, WNOHANG, WUNTRACED,
+        RLIMIT_MEMLOCK, RLIMIT_NOFILE, RLIMIT_NPROC, RLIMIT_RSS, RLIMIT_STACK, RLIM_INFINITY,
+        SIGABRT, SIGALRM, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGKILL,
+        SIGPIPE, SIGQUIT, SIGSEGV, SIGSTOP, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1,
+        SIGUSR2, SIG_DFL, SIG_IGN, STDIN_FILENO, WCONTINUED, WNOHANG, WUNTRACED,
     };
-    // `RLIMIT_RTTIME` (`ulimit -R`, C135) is Linux-only in the `libc` crate,
-    // so it's not available when this shared module backs a non-Linux Unix
-    // target — only when it's standing in for `rusty_libc` via
-    // `libc-backend` on Linux itself.
-    #[cfg(target_os = "linux")]
-    pub use libc::RLIMIT_RTTIME;
+    // `RLIMIT_RTTIME`/`RLIMIT_LOCKS`/`RLIMIT_MSGQUEUE`/`RLIMIT_NICE`/
+    // `RLIMIT_RTPRIO`/`RLIMIT_SIGPENDING` are Linux-only in the `libc`
+    // crate (absent on macOS/BSD) — gated to match exactly the
+    // `#[cfg(any(target_os = "linux", target_os = "android"))]` already on
+    // every `ULIMIT_RESOURCES` entry that references them
+    // (`builtins.rs`). Found the hard way: a plain `pub use` here built
+    // fine everywhere this module had ever actually been compiled for
+    // (Linux's `libc-backend` escape hatch) but broke the moment macOS
+    // joined CI, since `other Unix` is this same shared module.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub use libc::{
+        RLIMIT_LOCKS, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING,
+    };
 
     /// errno as an `io::Error`; glibc's TLS `errno` in this backend.
     pub fn last_os_error() -> std::io::Error {

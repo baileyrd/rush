@@ -111,64 +111,112 @@ actually existing on `rusty_lines`' published `main`, matching how every
 `rusty_win32` primitive earlier in this project's job-control work landed
 before the `rush`-side consumer that used it).
 
-### 1. `rusty_lines`: let a hook signal "I printed something, repaint around it"
+### 1. `rusty_lines`: a new `prepare_external_output()`, not a `Hooks` signature change
 
-`Hooks::on_interrupted_read` currently returns `()`
-(`rusty_lines/src/lib.rs:138`). The minimal change: return a `bool` (`true`
-= "I wrote to stdout/stderr outside the editor's own rendering, please
-repaint"), default `false` for source compatibility with every existing
-`Hooks` impl that doesn't care. The idle-wait loop
-(`lib.rs:2153-2196`) already has an unconditional-detection branch that does
-exactly the repaint dance needed (`writeln!(io::stdout())?;
-render(&mut st, history)?;` at `lib.rs:2184-2185`, currently gated on "raw
-mode got clobbered" or "columns changed") — extending that branch's
-condition to also trigger on the hook's return value reuses the existing,
-already-tested code path rather than adding a new one.
+**Revised from this doc's first pass** (below), after actually tracing
+`render()`'s own invariant rather than guessing at the API shape: a bare
+`bool` returned from `on_interrupted_read` — "I printed, please clean up
+after me" — is the wrong shape, not just an unresolved detail. `render()`
+(`lib.rs:4319`) unconditionally opens with `\r` then, if
+`st.painted_cursor_row > 0`, `ESC[{n}A` to move *up* that many rows
+(`lib.rs:4327-4330`) — it assumes the cursor is sitting exactly where the
+*previous* `render()` call left it. Anything that writes to the terminal in
+between without also resetting `painted_rows`/`painted_cursor_row`/
+`fresh_region` first (the existing self-heal branch does this at
+`lib.rs:2181-2183`, *before* its own `writeln!`) makes the next `render()`
+move up the wrong number of rows against content that's no longer there —
+this is what "please repaint" arriving *after* an interleaved `eprintln!`
+would actually produce: corrupted movement, not just stale content. The
+reset has to happen **before** the host's own print, not signaled after it.
 
-Open question this doc doesn't resolve, left for whoever picks up that PR:
-whether the host needs to move the cursor to a fresh line *before* printing
-(so the notice doesn't land mid-way through the currently-rendered
-prompt+buffer) via a new method the hook can call first (something like
-`Editor`/a passed context exposing `prepare_external_output()`, doing what
-the self-heal branch's `writeln!` already does), or whether it's acceptable
-for the host to print first and rely on the post-hook repaint to clean up
-any visual mess — the existing self-heal branch gets away with the latter
-only because raw-mode breakage and resize don't themselves print anything
-mid-screen the way an interleaved `eprintln!` would. This needs an actual
-prototype against a real terminal (or the pty harness — see "Risk" below)
-to settle, not a guess in a design doc.
+That rules out a `Hooks` signature change entirely, and turns out to need
+only a small, freestanding, opt-in primitive instead — a real improvement
+on the first pass, not merely a fix:
+
+```rust
+/// Interrupt the current prompt/buffer's on-screen paint for output a
+/// host wants to print outside the editor's own rendering (e.g. a
+/// background job's completion notice printed while idle at the
+/// prompt): moves to a fresh line now and marks the region for a full
+/// repaint at the next safe point (the end of the current
+/// `Hooks::on_interrupted_read` call, or the next one reached, for a
+/// caller nested deeper in the read path). Call this *before* printing,
+/// every time, even for the first of several notices in a row — cheap
+/// and idempotent if the flag's already set. A no-op outside the raw-mode
+/// interactive editor (the piped-stdin path has no on-screen paint to
+/// protect in the first place).
+pub fn prepare_external_output() -> io::Result<()> { .. }
+```
+
+Backed by a `thread_local! { static EXTERNAL_OUTPUT_PENDING: Cell<bool> }`
+`writeln!`s immediately (matching the self-heal branch's own ordering) and
+sets the flag; every call site that already invokes
+`hooks.on_interrupted_read()` (`lib.rs:608, 1320, 2169, 2521` — the raw
+tick, the piped-stdin EINTR path, `read_byte`'s own EINTR handling, and
+`wait_for_key`) checks the flag immediately after and, wherever `st: &mut
+LineState` is actually in scope at that point (the tick at `lib.rs:2169`
+and `wait_for_key` at `lib.rs:2521` both have it; `read_byte`/
+`read_line_plain` don't), performs the same reset-then-`render()` the
+self-heal branch already does, reusing that exact code path rather than
+adding a new one. A call site without `st` in scope just leaves the flag
+set for the next one that has it to pick up — at most one key-read cycle
+of deferral, never lost, never wrong. In practice this project's own use
+(job notification, wired through the *outer* 200ms tick, deliberately not
+a real signal handler — see "Why the idle tick" above) always hits the
+tick call site directly, so the deferred case doesn't come up for it.
+
+No `Hooks` trait change at all, so this is fully additive — every existing
+`Hooks` impl (including `rush`'s own `NoHooks`/other consumers, if any)
+keeps compiling untouched.
 
 ### 2. `rush`: wire `reap_background` into the hook, behind `set -b`
 
-`ShellHooks::on_interrupted_read` (`main.rs:52-57`) gains, guarded by a new
-`vars::notify()` accessor (matching the existing one-function-per-option
-pattern — `vars::errexit()`, `vars::nounset()`, `vars::xtrace()`, etc. at
-`vars.rs:237-300` — backed by real state instead of `set -b`'s current
-no-op parse):
+`job::notify_and_prune`/`winjob::reap_background`'s printing needs to move
+*before* a caller can call `prepare_external_output()` at the right
+moment — the ordering problem is symmetric with (1) above: the hook doesn't
+know whether anything will be printed until reaping has already happened,
+by which point it's too late to prepare first. Fix: keep `job.rs`/
+`winjob.rs` themselves unaware `rusty_lines` exists at all (they're already
+usable without an `Editor` — script/`-c` mode never constructs one, and
+these modules shouldn't need to start caring); have them return *what* to
+report instead of printing it directly, and let `main.rs` — which already
+owns the `rusty_lines` dependency via `ShellHooks` — decide when to prepare
+the terminal:
 
 ```rust
-fn on_interrupted_read(&self) -> bool {
+// job.rs / winjob.rs: reap_background() keeps its exact existing
+// behavior (still prints, still called unconditionally every prompt);
+// a new sibling exposes the same detection without printing, for the
+// hook path to use instead.
+pub fn reap_background_notices() -> Vec<String> { .. } // "[1]+  Done\tsleep 5", one per line
+
+// main.rs
+fn on_interrupted_read(&self) {
     #[cfg(unix)]
     trap::check_pending();
     if vars::notify() {
         #[cfg(unix)]
-        return job::reap_background_now(); // returns true if it printed anything
+        let notices = job::reap_background_notices();
         #[cfg(not(unix))]
-        return winjob::reap_background_now();
+        let notices = winjob::reap_background_notices();
+        if !notices.is_empty() {
+            let _ = rusty_lines::prepare_external_output();
+            for n in notices {
+                eprintln!("{n}");
+            }
+        }
     }
-    false
 }
 ```
 
-`reap_background`'s existing per-prompt call site (`main.rs:643-648`) stays
-exactly as-is regardless — it's still the correct behavior for `set -b`
-*off* (the default), and even with it *on* it remains a harmless safety net
-for the brief window between a submitted line returning and the next idle
-tick starting. `job::reap_background`/`winjob::reap_background` likely need
-a `_now`-style variant (or an added return value on the existing function)
-that reports whether it actually printed a notice, to answer the `bool` the
-new `on_interrupted_read` contract requires — a small, mechanical change to
-each, not a new mechanism.
+Guarded by a new `vars::notify()` accessor, matching the existing
+one-function-per-option pattern (`vars::errexit()`, `vars::nounset()`,
+`vars::xtrace()`, etc. at `vars.rs:237-300`) backed by real state instead
+of `set -b`'s current no-op parse. `reap_background`'s existing per-prompt
+call site (`main.rs:643-648`) stays exactly as-is regardless — still
+correct for `set -b` *off* (the default), and even *on* it remains a
+harmless safety net for jobs that finish in the brief window between a
+submitted line returning and the next idle tick starting.
 
 ## Deliberately out of scope
 
@@ -228,16 +276,23 @@ each, not a new mechanism.
 
 ## Suggested staging
 
-1. **`rusty_lines`:** change `Hooks::on_interrupted_read` to return `bool`;
-   extend the existing self-heal repaint branch to also trigger on it; add
-   a pty-based (or equivalent real-terminal) test proving a hook that
-   prints mid-idle-tick ends up with a clean repaint afterward, not
-   corrupted output. Land and publish independently of `rush`.
+1. **`rusty_lines`:** add `prepare_external_output()` and the
+   `EXTERNAL_OUTPUT_PENDING` thread-local; check it at each of the four
+   `on_interrupted_read` call sites, reusing the existing self-heal
+   reset-then-`render()` sequence wherever `st` is in scope. No `Hooks`
+   trait change, so fully additive. Add a pty-based (or equivalent
+   real-terminal) test proving a hook that calls it before printing ends up
+   with a clean repaint afterward, not corrupted movement — this is the
+   one part of the whole design that a unit test can't stand in for; see
+   "Risk" below. Land and publish independently of `rush`.
 2. **`rush`:** bump the `rusty_lines` pin; add `vars::notify()` backed by
    real `set -b`/`set -o notify` state (replacing the current inert parse);
-   wire `job::reap_background`/`winjob::reap_background` (each gaining a
-   "did I print anything" return value) into `ShellHooks::on_interrupted_read`,
-   gated on `vars::notify()`. Add an integration test — likely a new pty
-   scenario, not a `rush -c` one, given the "while idle" requirement above.
+   add `job::reap_background_notices()`/`winjob::reap_background_notices()`
+   (detection only, no printing) alongside the existing, unchanged
+   `reap_background()`; wire the notices path into
+   `ShellHooks::on_interrupted_read`, gated on `vars::notify()`, calling
+   `prepare_external_output()` once before printing any notice. Add an
+   integration test — likely a new pty scenario, not a `rush -c` one, given
+   the "while idle" requirement above.
 3. Only then: decide whether the default should change (bash itself
    defaults `-b` off; no reason found here to diverge from that default).

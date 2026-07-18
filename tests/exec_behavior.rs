@@ -60,14 +60,26 @@ fn rush_stdin(src: &str, input: &str) -> (String, i32) {
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn rush");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .expect("write stdin");
+    write_stdin_concurrently(&mut child, input);
     let output = child.wait_with_output().expect("wait rush");
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
+}
+
+/// Feed `input` to `child`'s stdin on a background thread rather than
+/// blocking the caller on `write_all` before it starts draining stdout —
+/// writing synchronously then calling `wait_with_output` deadlocks the
+/// instant the child fills its stdout (or stderr) pipe before finishing
+/// its own read of stdin, since neither side is then making progress.
+/// Never triggered on Linux's large auto-growing pipe buffer, but macOS's
+/// is a small fixed 16KB, so a test comfortably under that limit elsewhere
+/// can hang indefinitely there — no per-test timeout in `cargo test` means
+/// this reads as a stuck CI job, not a failing test.
+fn write_stdin_concurrently(child: &mut std::process::Child, input: &str) {
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_string();
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(input.as_bytes());
+    });
 }
 
 /// Pipe `input` as the command source into a *plain* `rush` (no `-c`/`-s`)
@@ -80,7 +92,7 @@ fn rush_stdin_plain(input: &str) -> String {
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn rush");
-    child.stdin.take().unwrap().write_all(input.as_bytes()).expect("write stdin");
+    write_stdin_concurrently(&mut child, input);
     let output = child.wait_with_output().expect("wait rush");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -96,12 +108,7 @@ fn rush_stdin_stderr(src: &str, input: &str) -> (String, i32) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rush");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .expect("write stdin");
+    write_stdin_concurrently(&mut child, input);
     let output = child.wait_with_output().expect("wait rush");
     (String::from_utf8_lossy(&output.stderr).into_owned(), output.status.code().unwrap_or(-1))
 }
@@ -133,12 +140,7 @@ fn rush_interactive(input: &str) -> (String, String) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rush");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .expect("write stdin");
+    write_stdin_concurrently(&mut child, input);
     let output = child.wait_with_output().expect("wait rush");
     let _ = std::fs::remove_dir_all(&home);
     (String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned())
@@ -3234,7 +3236,7 @@ fn rush_stdin_script(script: &str) -> (String, i32) {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn rush");
-    child.stdin.take().unwrap().write_all(script.as_bytes()).expect("write stdin");
+    write_stdin_concurrently(&mut child, script);
     let output = child.wait_with_output().expect("wait rush");
     (String::from_utf8_lossy(&output.stdout).into_owned(), output.status.code().unwrap_or(-1))
 }

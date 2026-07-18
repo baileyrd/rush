@@ -3,18 +3,18 @@
 Originally written as a design doc, not yet implemented — scoping closing
 Windows' job-control gap without writing the implementation itself, staged
 so review and CI feedback could happen incrementally rather than in one
-large unverifiable patch. **Milestone 1 of the staging plan below has since
-landed**: `src/winjob.rs`, backed by
+large unverifiable patch. **Milestones 1–4 of the staging plan below have
+since landed**: `src/winjob.rs`, backed by
 [rusty_win32](https://github.com/baileyrd/rusty_win32)'s `job`/`process`
 modules (Job Objects, `CreateProcessW`-with-`CREATE_SUSPENDED`) rather than
 the originally-sketched hand-rolled FFI, since that crate now exists and
 already provides exactly these primitives, verified independently against
-real `windows-latest` CI. See `winjob.rs`'s own module doc for its current,
-narrower-than-full scope (a single external command only — no pipelines, no
-backgrounded builtins/functions, no `wait`/`kill`/`disown` yet). The rest of
-this document — the design rationale, the staging plan's remaining
-milestones, and "deliberately out of scope" — is otherwise unchanged from
-the original design pass.
+real `windows-latest` CI. `cmd &`/`jobs`/`wait`/`kill`/`$!` all work now,
+for a single external command; see `winjob.rs`'s own module doc for its
+remaining, narrower-than-full scope (no pipelines, no backgrounded
+builtins/functions, no `disown` yet). The rest of this document — the
+design rationale, "Deliberately out of scope", and the staging plan's own
+step-by-step detail — is otherwise unchanged from the original design pass.
 
 **Scope decision (already made, not this document's to revisit):** background
 jobs only — `cmd &`, `jobs`, `wait`, `kill`, a real `$!`. Explicitly *not* in
@@ -261,22 +261,38 @@ session. Concretely:
    necessary and implemented as such — a background builtin would indeed
    race `winstdio`'s process-global std-handle slots against the
    foreground shell).
-2. `wait`/exit status, via `WaitForSingleObject` on the tracked handle.
-   (`$!` itself already works — that part of this milestone shipped in
-   step 1 above, since `spawn_suspended` naturally hands back the pid
-   `vars::set_last_bg_pid` needs regardless of whether `wait` can block on
-   it yet.)
-3. `kill %n` via `TerminateJobObject`.
-4. `jobs -l`/multi-job listing parity with the Unix builtin's own output
-   format (reuse `job.rs`'s display formatting logic where it's already
-   platform-neutral, rather than reimplementing it). `winjob.rs`'s `jobs`
-   already supports `-l` and multiple concurrent jobs as of step 1; this
-   step is about closing any remaining formatting/flag gaps against
-   `job.rs`'s own output (e.g. `-r`/`-s`/`-n` filtering), not building the
-   feature from scratch.
+2. **Done.** `wait [-n] [-p var] [pid|%job ...]`, via
+   `WaitForSingleObject` (`rusty_win32::process::wait` with an infinite
+   timeout) on the tracked process handle directly — mirrors
+   `job.rs::wait_cmd`'s own argument handling almost exactly. `wait -n`
+   (no `WaitForMultipleObjects` wrapper in `rusty_win32` yet) polls every
+   not-yet-finished job's handle in a short-sleep loop instead — the same
+   zero-timeout-poll primitive `refresh_all` already used, just repeated;
+   a real `WaitForMultipleObjects`-based version remains a follow-up if
+   `-n`'s polling latency ever matters in practice. A `REAPED` map
+   (matching `job.rs`'s own) lets a second `wait` on an already-settled pid
+   still report its status.
+3. **Done.** `kill [-SIG|-s SIG] %n` via `TerminateJobObject`, with a fixed
+   conventional exit code (128+15) reported back through `wait`/`$?` for
+   every kill — Windows has no real signal delivery, so *which* signal was
+   requested can't actually be honored, only "terminate it can"; the flag
+   is still accepted (not rejected) for script portability. Only `%n`
+   targets are supported, not a bare pid: `rusty_win32` has no raw
+   `TerminateProcess`, only `TerminateJobObject`, which needs the job
+   handle a `%n`-tracked entry has and an arbitrary pid doesn't.
+4. **Done** (with one intentional narrowing). `jobs` gained `-l`/`-p`/
+   `-r`/`-s`, matching `job.rs::jobs_cmd`'s flags with one exception:
+   `-n` (changed-since-last-notification) isn't implemented, since it
+   needs per-job "already told you" bookkeeping this module doesn't keep
+   (see `winjob.rs::jobs_cmd`'s own doc comment). `-s` (stopped-only)
+   is accepted but always prints nothing — Windows background jobs have
+   no Stopped state (no Ctrl-Z).
 5. Only then: evaluate whether the polling-based done-detection from step 1
    is worth upgrading to the I/O-completion-port approach, based on whatever
-   real usage/perf signal shows up.
+   real usage/perf signal shows up. Still open, along with `disown` (never
+   explicitly staged above, but listed in the original `winjob.rs` surface
+   sketch) and the `wait -n` polling-vs-`WaitForMultipleObjects` question
+   step 2 flagged.
 
 Each step above should be its own PR — small enough for CI's after-the-fact
 signal to be a meaningful check, in keeping with why this was scoped as a

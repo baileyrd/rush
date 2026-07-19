@@ -1,18 +1,22 @@
 # Async background-job notification (`set -b`)
 
-A design doc, not yet implemented — scoping what it would take to print a
-background job's completion (`[1]+  Done    sleep 5`) the moment it finishes,
-even while the shell is sitting idle at the prompt with a partially-typed
-line, instead of only at the next prompt boundary the way both `job.rs`
-(Unix) and `winjob.rs` (Windows) work today. Written after a conversational
-back-and-forth floated this as a follow-up to the Windows job-control work
-and an earlier off-the-cuff answer in that conversation claimed it would need
-a background thread (Unix: a real `SIGCHLD` handler interrupting a blocking
-`read()`; Windows: a second thread or overlapped I/O, since Windows has no
-"a signal interrupts a blocking syscall" primitive). **That answer was wrong
-by omission, not merely imprecise, once the actual line-editor code was
-read** — see "Starting point" below. Correcting it here rather than quietly
-is why this doc exists at all.
+A design doc, scoping (and, for stage 1, now implementing) what it takes to
+print a background job's completion (`[1]+  Done    sleep 5`) the moment it
+finishes, even while the shell is sitting idle at the prompt with a
+partially-typed line, instead of only at the next prompt boundary the way
+both `job.rs` (Unix) and `winjob.rs` (Windows) work today. Written after a
+conversational back-and-forth floated this as a follow-up to the Windows
+job-control work and an earlier off-the-cuff answer in that conversation
+claimed it would need a background thread (Unix: a real `SIGCHLD` handler
+interrupting a blocking `read()`; Windows: a second thread or overlapped
+I/O, since Windows has no "a signal interrupts a blocking syscall"
+primitive). **That answer was wrong by omission, not merely imprecise, once
+the actual line-editor code was read** — see "Starting point" below.
+Correcting it here rather than quietly is why this doc exists at all.
+
+**Status: stage 1 is done and merged** (`rusty_lines`'s `prepare_external_output()`
+— [PR #28](https://github.com/baileyrd/rusty_lines/pull/28)); stage 2 (`rush`'s
+own wiring, behind `set -b`) is not started. See "Suggested staging" below.
 
 **Scope decision:** gate the new behavior behind `set -b`/`set -o notify`
 (bash's own real option for exactly this — see below), leaving the default
@@ -111,7 +115,14 @@ actually existing on `rusty_lines`' published `main`, matching how every
 `rusty_win32` primitive earlier in this project's job-control work landed
 before the `rush`-side consumer that used it).
 
-### 1. `rusty_lines`: a new `prepare_external_output()`, not a `Hooks` signature change
+### 1. `rusty_lines`: a new `prepare_external_output()`, not a `Hooks` signature change — **done**
+
+Landed as [PR #28](https://github.com/baileyrd/rusty_lines/pull/28), verified
+on real CI (`prepare_external_output_prints_cleanly_while_idle_and_keeps_the_line`,
+a new pty test proving the notice lands on its own line and an in-progress
+buffer survives intact around it) and published on `rusty_lines`' `main`.
+`rush` hasn't bumped its pin or consumed this yet — that's stage 2, still
+open.
 
 **Revised from this doc's first pass** (below), after actually tracing
 `render()`'s own invariant rather than guessing at the API shape: a bare
@@ -232,14 +243,12 @@ submitted line returning and the next idle tick starting.
   `set -b` gate for free. (Windows has no Stopped state at all — see
   `docs/WINDOWS_JOB_CONTROL.md`'s own note on `jobs -s` — so this is
   Unix-only in practice regardless.)
-- **A `rusty_lines` pty test scenario proving the repaint is actually
-  clean** (not just that the hook fires). `tests/pty/editor_pty_test.py`
-  is `rush`'s own harness, but the repaint contract itself belongs to
-  `rusty_lines` and should be proven there, with its own scenario, before
-  `rush` ever wires a real notification through it — otherwise a broken
-  repaint only surfaces as "the Windows/Linux CI screen looks wrong" noise
-  in `rush`'s own end-to-end suite, several layers away from the actual
-  bug.
+- **A `rush`-side pty test scenario proving the notification actually
+  appears while idle, end to end.** `rusty_lines`' own pty test (stage 1,
+  done) proves the *repaint* is clean; it doesn't and shouldn't prove
+  `rush`'s specific notice text/`set -b` gating, since that's `rush`'s
+  concern, not the editor's. `tests/pty/editor_pty_test.py` is where that
+  belongs, once stage 2 lands — not attempted by this doc.
 - **Any change to *what* counts as job-control-enabled.** Both
   `job::job_control_enabled()` and Windows's `vars::interactive()` gating
   already restrict this correctly — `on_interrupted_read` only fires from
@@ -276,16 +285,17 @@ submitted line returning and the next idle tick starting.
 
 ## Suggested staging
 
-1. **`rusty_lines`:** add `prepare_external_output()` and the
-   `EXTERNAL_OUTPUT_PENDING` thread-local; check it at each of the four
+1. **Done.** `rusty_lines`: `prepare_external_output()` and the
+   `EXTERNAL_OUTPUT_PENDING` thread-local, checked at each of the four
    `on_interrupted_read` call sites, reusing the existing self-heal
    reset-then-`render()` sequence wherever `st` is in scope. No `Hooks`
-   trait change, so fully additive. Add a pty-based (or equivalent
-   real-terminal) test proving a hook that calls it before printing ends up
-   with a clean repaint afterward, not corrupted movement — this is the
-   one part of the whole design that a unit test can't stand in for; see
-   "Risk" below. Land and publish independently of `rush`.
-2. **`rush`:** bump the `rusty_lines` pin; add `vars::notify()` backed by
+   trait change, so fully additive. A pty-based test
+   (`prepare_external_output_prints_cleanly_while_idle_and_keeps_the_line`)
+   proves a hook that calls it before printing ends up with a clean
+   repaint afterward, not corrupted movement — verified on real CI before
+   merging. Landed and published independently of `rush`
+   ([PR #28](https://github.com/baileyrd/rusty_lines/pull/28)).
+2. **Not started.** `rush`: bump the `rusty_lines` pin; add `vars::notify()` backed by
    real `set -b`/`set -o notify` state (replacing the current inert parse);
    add `job::reap_background_notices()`/`winjob::reap_background_notices()`
    (detection only, no printing) alongside the existing, unchanged

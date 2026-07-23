@@ -404,8 +404,17 @@ fn spawn_stage(
             // which quotes every argument (including the resolved program
             // path); `env_block` was built by `environment_block`, which
             // always double-NUL-terminates.
+            //
+            // `new_process_group: false` — unlike `exec.rs`'s foreground
+            // path (see `winctrlc`), a background job's own console
+            // isolation is a separate, already-tracked concern
+            // (`docs/WINDOWS_JOB_CONTROL.md`), not part of the §4.5 fix
+            // this argument exists for; grouping wouldn't protect it from
+            // a broadcast `CTRL_C_EVENT` anyway (only `CTRL_BREAK_EVENT`
+            // can be scoped to one group), so there's nothing to gain by
+            // setting it here without that separate design.
             let spawned = unsafe {
-                rusty_win32::process::spawn_suspended(&command_line, true, Some(&env_block))
+                rusty_win32::process::spawn_suspended(&command_line, true, false, Some(&env_block))
             };
             for h in &touched {
                 // Best-effort: spawning is already over either way by this

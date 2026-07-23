@@ -425,7 +425,7 @@ source = "git+https://github.com/baileyrd/rusty_regx?rev=6466cd2d87ce42e3c564b5a
 [[package]]
 name = "rusty_win32"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_win32?branch=main#5050b61e9c0be43dc6bfe2facdec8e7d83ff35bb"
+source = "git+https://github.com/baileyrd/rusty_win32?branch=main#91040f5fd48ec331d6a79be37c16c653e6420f67"
 
 [[package]]
 name = "same-file"

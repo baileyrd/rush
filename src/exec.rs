@@ -7,11 +7,14 @@
 //!
 //! On Unix, foreground and background pipelines go through [`crate::job`], which
 //! adds process groups, terminal control, and stop/`fg`/`bg` handling. On
-//! Windows, foreground pipelines run with a plain spawn-and-wait (no
-//! process-group/terminal-control equivalent — see `winjob`'s own doc for
-//! why), but background pipelines (`cmd &`) do go through
-//! [`crate::winjob`] for the single-external-command case; `fg`/`bg`/Ctrl-Z
-//! remain permanently out of scope there.
+//! Windows, foreground pipelines run with a plain spawn-and-wait — no
+//! terminal-control equivalent (`fg`/`bg`/Ctrl-Z remain permanently out of
+//! scope, see `winjob`'s own doc for why), but each stage does get its own
+//! console process group (`CREATE_NEW_PROCESS_GROUP`, see [`build_stage`]),
+//! so a Ctrl-C can be scoped to just the running child instead of hitting
+//! rush at the same time — see [`crate::winctrlc`]. Background pipelines
+//! (`cmd &`) go through [`crate::winjob`] for the single-external-command
+//! case.
 //!
 //! Within a pipeline, builtins only run in-process when the pipeline is a
 //! single command — a builtin in the middle of a pipe (`echo hi | cd`) is a
@@ -269,12 +272,15 @@ fn run_pipeline_node(raw: &RawPipeline) -> Result<i32, String> {
     run_pipeline_node_untimed(raw)
 }
 
-/// `time pipeline` (C112): wall time from a monotonic clock; user/sys
-/// from the kernel's children CPU accounting (`/proc/self/stat`'s
-/// cutime/cstime delta — Linux, where the default backend lives; zeros
-/// elsewhere). Output goes to stderr like bash: `TIMEFORMAT` when set
-/// (`%R`/`%U`/`%S` with optional precision, `%%`), otherwise bash's
-/// default `real/user/sys` block; `-p` forces the POSIX format.
+/// `time pipeline` (C112): wall time from a monotonic clock; user/sys from
+/// the kernel's children CPU accounting (`/proc/self/stat`'s cutime/cstime
+/// delta on Linux; `GetProcessTimes` on each waited child, accumulated by
+/// `exec::record_child_cpu_time`, on Windows — see that function's own doc
+/// for the one difference from Linux's fuller accounting: no in-process
+/// self-CPU term; zeros on any other, non-Linux Unix). Output goes to
+/// stderr like bash: `TIMEFORMAT` when set (`%R`/`%U`/`%S` with optional
+/// precision, `%%`), otherwise bash's default `real/user/sys` block; `-p`
+/// forces the POSIX format.
 fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
     fn child_cpu_seconds() -> (f64, f64) {
         #[cfg(target_os = "linux")]
@@ -293,8 +299,16 @@ fn time_pipeline(raw: &RawPipeline) -> Result<i32, String> {
                 let sys = field(12) + field(14);
                 return (user / ticks, sys / ticks);
             }
+            (0.0, 0.0)
         }
-        (0.0, 0.0)
+        #[cfg(not(unix))]
+        {
+            child_cpu_time_secs()
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            (0.0, 0.0)
+        }
     }
     fn minutes(seconds: f64, precision: usize) -> String {
         format!("{}m{:.*}s", (seconds / 60.0) as u64, precision, seconds % 60.0)
@@ -2418,6 +2432,51 @@ fn close_pending_proc_subs() {
     }
 }
 
+// Running total of user/sys CPU time consumed by every external-command
+// child this shell has ever waited on via `run` below — the Windows
+// counterpart to `/proc/self/stat`'s ever-increasing `cutime`/`cstime`
+// fields `time_pipeline`'s Linux arm reads directly (see that function's
+// own `child_cpu_seconds`, which diffs a before/after snapshot of this
+// same kind of running total). Doesn't include the shell's own in-process
+// CPU time (builtins, loops) the way Linux's `utime`/`stime` fields do —
+// `rusty_win32` doesn't expose a way to query the calling process's own
+// handle yet, so only child-process CPU time is tracked here; still a
+// real improvement over the hardcoded zero this replaces for the common
+// case (`time` around an external command).
+#[cfg(not(unix))]
+thread_local! {
+    static CHILD_CPU_TIME_SECS: std::cell::Cell<(f64, f64)> =
+        const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// The current running total `time_pipeline`'s Windows arm reads — see
+/// `CHILD_CPU_TIME_SECS`'s own doc comment.
+#[cfg(not(unix))]
+pub(crate) fn child_cpu_time_secs() -> (f64, f64) {
+    CHILD_CPU_TIME_SECS.with(std::cell::Cell::get)
+}
+
+/// Add `child`'s own CPU time to the running total above — called from
+/// `run`'s wait loop right after a successful `wait()`, while the
+/// `Child`'s handle is still open (`Child` doesn't close it until
+/// dropped). Best-effort: a `GetProcessTimes` failure just leaves the
+/// total unchanged rather than propagating an error from what is,
+/// everywhere this is called, an already-successful wait.
+#[cfg(not(unix))]
+fn record_child_cpu_time(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    let handle = child.as_raw_handle() as rusty_win32::RawHandle;
+    // SAFETY: `child` is a `Child` this function's caller just
+    // successfully `wait()`ed on, so its handle is still open and valid.
+    if let Ok(times) = unsafe { rusty_win32::process::times(handle) } {
+        let secs = |t: rusty_win32::Timespec| t.secs as f64 + f64::from(t.nanos) / 1e9;
+        CHILD_CPU_TIME_SECS.with(|c| {
+            let (u, s) = c.get();
+            c.set((u + secs(times.user_time), s + secs(times.kernel_time)));
+        });
+    }
+}
+
 /// Plain spawn-and-wait runner: used for capture, and as the foreground runner
 /// on non-Unix platforms. Returns `(exit status, captured stdout)`; the string
 /// is empty unless `capture` is set.
@@ -2427,6 +2486,14 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
     // Stdin for the next stage: the read end of the previous stage's pipe.
     let mut prev_stdout: Option<Stdio> = None;
     let mut captured = String::new();
+    // Tracks each spawned stage as a Ctrl-C-forwarding target for as long
+    // as this function is blocked waiting on it (docs/
+    // WINDOWS_BACKEND_ANALYSIS.md §4.5) — dropped in the same order the
+    // corresponding `children` wait loop below finishes with each, so a
+    // stage that's already exited stops being targeted immediately rather
+    // than staying registered until every stage in the pipeline is done.
+    #[cfg(not(unix))]
+    let mut foreground_guards: Vec<crate::winctrlc::ForegroundGuard> = Vec::with_capacity(n);
 
     for (i, stage) in pipeline.commands.iter().enumerate() {
         let cmd = match stage {
@@ -2489,12 +2556,30 @@ fn run(pipeline: &Pipeline, capture: bool) -> Result<(i32, String), String> {
                 out.read_to_string(&mut captured).map_err(|e| e.to_string())?;
             }
         }
+        // `build_stage` already gave this stage its own console process
+        // group (`CREATE_NEW_PROCESS_GROUP`) — register its pid (which
+        // doubles as that group's id) as a target for `winctrlc`'s
+        // handler now, before this function blocks waiting on it below.
+        #[cfg(not(unix))]
+        foreground_guards.push(crate::winctrlc::ForegroundGuard::new(child.id()));
         children.push(child);
     }
 
     let mut statuses = Vec::with_capacity(n);
+    #[cfg(not(unix))]
+    let mut foreground_guards = foreground_guards.into_iter();
     for mut child in children {
         let exit = child.wait().map_err(|e| e.to_string())?;
+        // While `child`'s handle is still open (before it's dropped at the
+        // end of this iteration): fold its CPU time into the running total
+        // `time_pipeline` reads on Windows.
+        #[cfg(not(unix))]
+        record_child_cpu_time(&child);
+        // Stop targeting this stage the instant it's actually reaped, not
+        // only once every stage in the pipeline is — matches this
+        // function's own per-stage wait ordering.
+        #[cfg(not(unix))]
+        drop(foreground_guards.next());
         statuses.push(exit.code().unwrap_or(1));
     }
 
@@ -2594,6 +2679,20 @@ pub fn build_stage(
     }
     let mut command = OsCommand::new(resolve_program(program));
     command.args(&cmd.argv[1..]);
+
+    // Give the child its own console process group (docs/
+    // WINDOWS_BACKEND_ANALYSIS.md §4.5): without this, a Ctrl-C reaches
+    // rush and the child at the same time (both attached to the same
+    // console) instead of being scoped to just the child. This alone only
+    // sets up the group — `winctrlc` is what actually forwards a targeted
+    // `CTRL_BREAK_EVENT` into it once rush's own console-control handler
+    // observes a `CTRL_C_EVENT`.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
 
     // Seed the environment: exported shell variables first, then this command's
     // own `NAME=value` prefixes (which override). An array-valued prefix

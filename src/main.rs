@@ -212,6 +212,13 @@ fn main() -> std::io::Result<()> {
     #[cfg(not(unix))]
     winstdio::capture_startup_stdin();
 
+    // Scope Ctrl-C to a running foreground external command instead of it
+    // reaching rush's own process at the same time
+    // (docs/WINDOWS_BACKEND_ANALYSIS.md §4.5) — see `winctrlc`'s own doc
+    // comment.
+    #[cfg(not(unix))]
+    winctrlc::install();
+
     // Seed the shell's own variable table with the inherited process
     // environment, marked exported — matching real bash: an env-inherited
     // variable stays exported through a later *plain* reassignment (no

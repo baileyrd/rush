@@ -1245,6 +1245,49 @@ fn parse_whole_array_at(s: &str) -> Option<WholeArrayAt> {
     }
 }
 
+/// Skip a `$(...)` (or `$((...))`, which just means one extra level of
+/// paren nesting) region starting at `bytes[start]` (`$`, with `(` right
+/// after) — returns the byte index just past the matching `)`. Mirrors
+/// `take_balanced_paren`'s own quote/nesting rules, over raw bytes to match
+/// `quoted_embedded_at`'s own byte-indexed scan.
+///
+/// `quoted_embedded_at` must never treat a `[@]`/`$@` occurring *inside* a
+/// nested command substitution as *this* (outer) quoted word's own
+/// embedded whole-array reference (C169) — `"$(echo "${a[@]}")"` broke
+/// exactly this way: the naive byte scan had no notion of `$(...)`
+/// boundaries, so it found `${a[@]}` (which genuinely belongs to the
+/// *inner* command's own argument, already fully quote-scoped there) and
+/// mis-split the outer word around it, corrupting `pre`/`post` into
+/// unbalanced fragments of the command-substitution syntax itself.
+fn skip_dollar_paren(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2; // past `$(`
+    let mut depth = 1usize;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => match b {
+                b'\'' | b'"' => quote = Some(b),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// Scan quoted text for an embedded `$@`, `${@}`, `${arr[@]}`, or
 /// `${!arr[@]}` (C77). `Some((pre, values, post))` when found — `pre` and
 /// `post` already `$`-expanded; only the *first* occurrence is treated
@@ -1257,6 +1300,12 @@ fn quoted_embedded_at(s: &str) -> Result<Option<(String, Vec<String>, String)>, 
     while i < bytes.len() {
         if bytes[i] != b'$' {
             i += 1;
+            continue;
+        }
+        // A nested `$(...)`/`$((...))` never contributes an embedded
+        // whole-array reference of its *own* — skip it wholesale (C169).
+        if bytes.get(i + 1) == Some(&b'(') {
+            i = skip_dollar_paren(bytes, i);
             continue;
         }
         // `$@`

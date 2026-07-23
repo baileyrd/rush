@@ -3234,6 +3234,47 @@ fn at_k_uses_bashs_own_double_quoted_style_not_at_qs() {
 
 #[cfg(unix)]
 #[test]
+fn whole_array_at_nested_inside_command_substitution_inside_double_quotes() {
+    // C169: `quoted_embedded_at`'s scan for an embedded `"${arr[@]}"` (the
+    // C77 prefix/suffix-splitting rule) had no notion of `$(...)`
+    // boundaries — it found `${a[@]}` even when it actually belonged to a
+    // *nested* command substitution's own argument, and mis-split the
+    // outer quoted word around it into unbalanced fragments of the
+    // substitution's own syntax, erroring "unterminated `$(`".
+    let (out, status) = rush(r#"a=(1 2 3); echo "$(echo "${a[@]}")""#);
+    assert_eq!(out, "1 2 3\n");
+    assert_eq!(status, 0);
+
+    // Nested arithmetic substitution (an extra level of paren nesting)
+    // through the same code path.
+    assert_eq!(rush(r#"echo "$(echo $((1+2)))""#).0, "3\n");
+
+    // The exact repro from the differential pass that found this.
+    let (out, _) =
+        rush(r#"a=(1 2 3); for i in "$(printf "%s-" "${a[@]}")"; do echo "$i"; done"#);
+    assert_eq!(out, "1-2-3-\n");
+
+    // Regressions to guard: every already-working sibling form in the
+    // identical nesting stays correct — a plain index, `${#a[@]}`, and the
+    // *joining* `${a[*]}` form (a different code path, `WholeArrayAt` never
+    // applies to it).
+    assert_eq!(rush(r#"a=(1 2 3); echo "$(echo "${a[0]}")""#).0, "1\n");
+    assert_eq!(rush(r#"a=(1 2 3); echo "$(echo "${#a[@]}")""#).0, "3\n");
+    assert_eq!(rush(r#"a=(1 2 3); echo "$(echo "${a[*]}")""#).0, "1 2 3\n");
+
+    // The outer word's *own* embedded whole-array reference (not nested in
+    // a substitution at all) must still split per-element as before.
+    assert_eq!(rush(r#"a=(1 2 3); echo "x${a[@]}y""#).0, "x1 2 3y\n");
+
+    // Both an outer *and* a nested embedded reference in the same word.
+    assert_eq!(
+        rush(r#"a=(1 2 3); echo "${a[@]}$(echo "${a[@]}")""#).0,
+        "1 2 31 2 3\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ansi_c_numeric_escapes() {
     // C119: `\xHH`, octal `\nnn`, `\uXXXX`, and `\cX` in `$'...'` came out
     // as literal backslash text.

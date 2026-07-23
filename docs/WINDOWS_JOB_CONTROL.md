@@ -282,14 +282,17 @@ session. Concretely:
    silently ignoring anything past the 64th. A `REAPED` map (matching
    `job.rs`'s own) lets a second `wait` on an already-settled pid still
    report its status.
-3. **Done.** `kill [-SIG|-s SIG] %n` via `TerminateJobObject`, with a fixed
-   conventional exit code (128+15) reported back through `wait`/`$?` for
-   every kill — Windows has no real signal delivery, so *which* signal was
-   requested can't actually be honored, only "terminate it can"; the flag
-   is still accepted (not rejected) for script portability. Only `%n`
-   targets are supported, not a bare pid: `rusty_win32` has no raw
-   `TerminateProcess`, only `TerminateJobObject`, which needs the job
-   handle a `%n`-tracked entry has and an arbitrary pid doesn't.
+3. **Done.** `kill [-SIG|-s SIG] %n|pid` — a `%n` target via
+   `TerminateJobObject`, a bare pid via `OpenProcess`/`TerminateProcess`
+   (`rusty_win32::process::open_by_pid`/`terminate`, added specifically to
+   close this gap — that crate had no raw `TerminateProcess` when this was
+   first written, only `TerminateJobObject`), with a fixed conventional
+   exit code (128+15) reported back through `wait`/`$?` for every kill —
+   Windows has no real signal delivery, so *which* signal was requested
+   can't actually be honored, only "terminate it can"; the flag is still
+   accepted (not rejected) for script portability. Unlike `wait`, a bare
+   pid need not be one of this shell's own tracked jobs — `OpenProcess`
+   can reach any process the caller has permission to.
 4. **Done** (with one intentional narrowing). `jobs` gained `-l`/`-p`/
    `-r`/`-s`, matching `job.rs::jobs_cmd`'s flags with one exception:
    `-n` (changed-since-last-notification) isn't implemented, since it

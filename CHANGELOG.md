@@ -1924,3 +1924,40 @@ In the engine's 20,000-case differential sweep the overall match now
 agrees with bash on every case; submatch reporting follows the POSIX
 longest-alternative rule, which glibc itself deviates from in rare
 corners (~0.01% of generated cases). All C56 tests pass unchanged.
+
+### Native Windows: foreground Ctrl-C scoping and real `time` CPU accounting
+`rusty_win32` bumped to pick up its own round-2 capability assessment
+(`process::spawn_suspended`'s `new_process_group` parameter,
+`console::generate_ctrl_event`, `process::times`, plus job resource
+limits/accounting, named pipes, non-character key synthesis, drive
+enumeration, and 8.3 path normalization — the last several with no
+current rush consumer yet).
+
+- **Foreground external commands now get their own console process
+  group** (`build_stage`'s `CREATE_NEW_PROCESS_GROUP`), and a new
+  `winctrlc` module installs a console-control handler at startup that
+  claims `CTRL_C_EVENT` (so rush's own process is never killed by it —
+  idle-prompt Ctrl-C stays handled entirely at the readline level, see
+  `main.rs`'s `ReadResult::Interrupted`) and forwards a targeted
+  `CTRL_BREAK_EVENT` to whichever foreground stage(s) are currently
+  running (`exec.rs`'s `run`, via `ForegroundGuard`). Closes
+  `docs/WINDOWS_BACKEND_ANALYSIS.md` §4.5: previously, nothing requested
+  a new process group at all, so a Ctrl-C could reach rush and the child
+  at the same time instead of being scoped to just the child. **Not
+  confirmed at runtime by an automated test** — simulating a real
+  console Ctrl-C delivery safely from within `cargo test` (without
+  risking the test binary's own process) needs its own harness-side
+  console-control handler, judged too fragile to add blind, without a
+  Windows machine, alongside everything else in this change; the
+  mechanism itself follows `rusty_win32`'s documented API contract
+  exactly, and CI's existing several-hundred-test suite already
+  exercises the modified spawn path (unaffected by the new creation
+  flag, or those tests would be failing).
+- **`time` reports real child CPU time on Windows** instead of the
+  hardcoded `(0.0, 0.0)` it always fell back to off Linux. `run`
+  accumulates each waited external-command child's own `GetProcessTimes`
+  result into a running total (`record_child_cpu_time`), which
+  `time_pipeline`'s existing before/after-snapshot diffing already knew
+  how to consume — the same shape as the Linux `/proc/self/stat` path,
+  just without that path's additional *self* (in-process builtin/loop)
+  CPU-time term, which `rusty_win32` doesn't expose a way to query yet.

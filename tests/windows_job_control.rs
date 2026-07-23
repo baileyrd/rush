@@ -396,3 +396,23 @@ fn disown_detaches_the_job_while_the_shell_is_still_running() {
         .args(["/PID", &pid.to_string(), "/F"])
         .output();
 }
+
+/// Confirms `process::times` (from `rusty_win32`'s round-2 capability
+/// assessment) actually replaced `time`'s previous hardcoded `(0.0, 0.0)`
+/// user/sys CPU time on Windows (`docs/WINDOWS_BACKEND_ANALYSIS.md`'s own
+/// noted gap — see `exec.rs::record_child_cpu_time`) — a real busy loop
+/// should show measurably nonzero user CPU time now. Not pinning an exact
+/// value: real Windows scheduling/timer-resolution variance makes that
+/// unreliable, only that it's no longer exactly zero the way it always
+/// was before.
+#[test]
+fn time_reports_real_child_cpu_time_instead_of_a_hardcoded_zero() {
+    let (out, err, status) = rush_full(
+        r#"time powershell -NoProfile -Command "for($i=0;$i -lt 500000;$i++){}""#,
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}, stderr was: {err:?}");
+    assert!(
+        err.contains("user\t") && !err.contains("user\t0m0.000s"),
+        "expected nonzero user CPU time for a real busy loop, got stderr: {err:?}"
+    );
+}

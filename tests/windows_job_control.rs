@@ -405,11 +405,17 @@ fn disown_detaches_the_job_while_the_shell_is_still_running() {
 /// value: real Windows scheduling/timer-resolution variance makes that
 /// unreliable, only that it's no longer exactly zero the way it always
 /// was before.
+///
+/// The PowerShell command is single-quoted at the *rush* level
+/// (`'...'`), not double-quoted: rush itself expands `$name` inside
+/// double quotes (correct POSIX behavior, verified against bash), which
+/// would silently blank out `$i` before PowerShell ever saw it — single
+/// quotes keep the whole `-Command` argument literal so PowerShell gets
+/// its own real `$i` variable.
 #[test]
 fn time_reports_real_child_cpu_time_instead_of_a_hardcoded_zero() {
-    let (out, err, status) = rush_full(
-        r#"time powershell -NoProfile -Command "for($i=0;$i -lt 500000;$i++){}""#,
-    );
+    let (out, err, status) =
+        rush_full(r#"time powershell -NoProfile -Command 'for($i=0;$i -lt 500000;$i++){}'"#);
     assert_eq!(status, 0, "stdout was: {out:?}, stderr was: {err:?}");
     assert!(
         err.contains("user\t") && !err.contains("user\t0m0.000s"),

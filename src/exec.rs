@@ -1613,6 +1613,21 @@ fn dispatch_builtin(cmd: &Command) -> i32 {
 /// since a forked child never needs to restore anything (see
 /// `job::spawn_compound_stage`). Unix only: needs a real `dup`/`dup2` to save
 /// and restore descriptors that outlive this call.
+/// Save `fd`'s current value for later restore, at a floor comfortably
+/// above any fd a script would plausibly reference — the same `F_DUPFD`
+/// convention `allocate_varfd`'s `{name}>file` allocator already uses, and
+/// deliberately *not* plain `dup()` (lowest-available-fd). A backup taken
+/// with plain `dup()` can itself land on a low fd number: one this exact
+/// redirect list (or an earlier command's `exec fd>&-`) just closed on
+/// purpose, silently "un-closing" it as a side effect of saving something
+/// else entirely (C168). `-1` means `fd` wasn't open yet (EBADF) — the
+/// same "nothing to restore but a close" case a restore already handles.
+#[cfg(unix)]
+fn save_original_fd(fd: i32) -> i32 {
+    const F_DUPFD: i32 = 0;
+    unsafe { crate::sys::fcntl(fd, F_DUPFD, 10) }
+}
+
 #[cfg(unix)]
 pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<StdioGuard, String> {
     use std::os::unix::io::AsRawFd;
@@ -1621,10 +1636,7 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
 
     let redirect_to = |guard: &mut StdioGuard, target: i32, source: File| -> Result<(), String> {
         if !guard.saved.iter().any(|(fd, _)| *fd == target) {
-            // `dup` fails with EBADF when `target` simply isn't open yet —
-            // normal for fd 3+ (`exec 7>file`, C111). Record `-1` so the
-            // restore closes it again instead of erroring here.
-            let saved = unsafe { crate::sys::dup(target) };
+            let saved = save_original_fd(target);
             guard.saved.push((target, saved));
         }
         if unsafe { crate::sys::dup2(source.as_raw_fd(), target) } == -1 {
@@ -1687,8 +1699,7 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
                 let dst = *fd as i32;
                 let src = *target as i32;
                 if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
-                    // As in `redirect_to`: -1 means "wasn't open" (C111).
-                    let saved = unsafe { crate::sys::dup(dst) };
+                    let saved = save_original_fd(dst);
                     guard.saved.push((dst, saved));
                 }
                 if unsafe { crate::sys::dup2(src, dst) } == -1 {
@@ -1699,7 +1710,7 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
             Redirect::Close { fd } => {
                 let dst = *fd as i32;
                 if !guard.saved.iter().any(|(fd, _)| *fd == dst) {
-                    let saved = unsafe { crate::sys::dup(dst) };
+                    let saved = save_original_fd(dst);
                     guard.saved.push((dst, saved));
                 }
                 unsafe {
@@ -1720,7 +1731,7 @@ pub fn redirect_stdio(redirects: &[Redirect], heredoc: Option<&str>) -> Result<S
                 let src = *target as i32;
                 for tracked in [dst, src] {
                     if !guard.saved.iter().any(|(fd, _)| *fd == tracked) {
-                        let saved = unsafe { crate::sys::dup(tracked) };
+                        let saved = save_original_fd(tracked);
                         guard.saved.push((tracked, saved));
                     }
                 }
@@ -2841,6 +2852,41 @@ pub fn build_stage(
     if !extra_fds.is_empty() {
         use std::os::unix::io::AsRawFd;
         use std::os::unix::process::CommandExt;
+
+        // Validate every `Dup`'s source fd *here, in the parent, before
+        // forking at all* (C168) — skipping any source that's itself a
+        // `dest` created earlier in this same list (`3>file 4>&3` legally
+        // references a sibling entry, not a pre-existing shell fd, so it
+        // can't be checked yet). A source that's genuinely not open needs
+        // to fail *synchronously, right here* rather than inside the
+        // forked child's own `pre_exec` closure: between `fork()` and that
+        // closure's `dup2` call, the exact low fd number a script just
+        // closed (`exec 4<&-`) is up for grabs by anything — including
+        // `std::process::Command`'s own internal exec-status pipe, which
+        // can legitimately land on it. `dup2`-ing from *that* fd, then
+        // exec'ing without `CLOEXEC` on the fresh duplicate (`dup2` never
+        // copies it), leaks a live reference to that pipe into the exec'd
+        // child, which then never closes it — so the parent's own read on
+        // it (waiting to learn whether exec succeeded) blocks forever
+        // instead of ever seeing EOF. Reproduced directly: `exec 4<&-; cat
+        // <&4` in the same shell hung indefinitely for exactly this
+        // reason, immune to `timeout`'s own default `SIGTERM`.
+        let created: std::collections::HashSet<u32> = extra_fds
+            .iter()
+            .filter_map(|a| match a {
+                FdAction::Open(_, dest) | FdAction::Dup { dest, .. } => Some(*dest),
+                FdAction::Close(_) => None,
+            })
+            .collect();
+        for action in &extra_fds {
+            if let FdAction::Dup { source, dest } = action
+                && !created.contains(source)
+                && unsafe { crate::sys::fcntl(*source as i32, crate::sys::F_GETFD, 0) } == -1
+            {
+                return Err(format!("{dest}: {}", crate::sys::last_os_error()));
+            }
+        }
+
         // SAFETY: the closure only calls `dup2`/inspects `errno` — both
         // async-signal-safe, the requirement `pre_exec` documents. It owns
         // `extra_fds` (including any opened `File`s), keeping their fds open

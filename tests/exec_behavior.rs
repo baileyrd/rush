@@ -1087,6 +1087,72 @@ fn redirect_to_fd_3_actually_uses_fd_3_not_stdout() {
 
 #[cfg(unix)]
 #[test]
+fn fd_close_redirect_actually_closes_the_fd() {
+    // C168: `fd>&-`/`fd<&-` was a silent no-op — a subsequent redirect
+    // referencing that same fd number kept working instead of erroring,
+    // because the *backup* fd this shell saves for restore was itself
+    // taken via plain `dup()` (lowest-available-fd), which could land
+    // right back on the fd number a redirect earlier in the very same
+    // list (or an earlier `exec fd>&-`) had just deliberately freed —
+    // silently "un-closing" it as a side effect of saving something else.
+    let path = std::env::temp_dir().join(format!("rush_c168_close_{}.txt", std::process::id()));
+    let file = shell_path(&path);
+
+    // Close then dup within one command's own redirect list (a builtin,
+    // through `redirect_stdio`): `3>&-` must actually close fd 3 before
+    // `1>&3` tries to dup from it. A redirect failure aborts the rest of
+    // the script (a pre-existing, documented gap shared by every
+    // `redirect_stdio`/`build_stage` failure, not specific to this fix —
+    // so `echo status:$?` never actually runs), but the file must stay
+    // untouched and the script must report a real failure either way.
+    let (out, status) = rush(&format!("exec 3>{file}; echo hi 3>&- 1>&3; echo status:$?"));
+    assert_eq!(out, "");
+    assert_ne!(status, 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), "");
+    let _ = std::fs::remove_file(&path);
+
+    // Permanent close via a bare `exec`, then a *separate* later command
+    // (still a builtin) referencing that same fd number.
+    let (out, status) = rush(&format!(
+        "exec 3>{file}; exec 3>&-; echo hi >&3; echo status:$?"
+    ));
+    assert_eq!(out, "");
+    assert_ne!(status, 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap_or_default(), "");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn fd_close_redirect_for_an_external_command_errors_instead_of_hanging() {
+    // C168's other half: an external command (`build_stage`, not
+    // `redirect_stdio`) reading from a just-closed fd used to hang
+    // indefinitely instead of failing. Root cause: the just-freed low fd
+    // number could get legitimately reused by `std::process::Command`'s
+    // own internal exec-status pipe between `fork()` and the child's
+    // `pre_exec` `dup2` call — which would then duplicate *that* pipe's fd
+    // instead of erroring, and (since `dup2` never copies `CLOEXEC`) leak
+    // a live reference to it into the exec'd child, so the parent's own
+    // read waiting to learn whether exec succeeded never saw EOF. Fixed by
+    // validating the source fd in the parent, before forking at all.
+    let path = std::env::temp_dir().join(format!("rush_c168_close_ext_{}.txt", std::process::id()));
+    std::fs::write(&path, "data\n").unwrap();
+    let file = shell_path(&path);
+
+    let (_out, status) = rush_stdin(
+        &format!("exec 4<{file}; exec 4<&-; cat <&4; echo status:$?"),
+        "",
+    );
+    // Must not hang (this test itself is the timeout: if the fix
+    // regresses, `cargo test` hangs here rather than this assertion
+    // firing) and must report a real failure, not silently succeed.
+    assert_ne!(status, 0);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
 fn read_side_fd_dup_works_for_builtins_and_external_commands() {
     // The read-side counterpart of the above: `N<&target` (verified above
     // in `lexer.rs` to not even parse before this fix) actually reads

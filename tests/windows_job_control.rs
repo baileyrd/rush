@@ -281,6 +281,33 @@ fn kill_on_an_unknown_job_is_an_error() {
 }
 
 #[test]
+fn kill_by_bare_pid_terminates_the_process() {
+    // Same shape as `kill_terminates_the_job` above, but targeting the
+    // job's pid directly (`$!`) instead of its `%1` job spec — exercises
+    // the `OpenProcess`/`TerminateProcess` path
+    // (`rusty_win32::process::open_by_pid`/`terminate`) rather than
+    // `TerminateJobObject`. `wait %1` still reports the same conventional
+    // killed-exit-code, since a bare-pid kill and a `%n` kill both funnel
+    // through the same fixed 128+15 status.
+    let (out, status) = rush(
+        "ping -n 30 127.0.0.1 > nul & \
+         kill $!; \
+         wait %1; echo $?",
+    );
+    assert_eq!(status, 0, "stdout was: {out:?}");
+    assert_eq!(out.trim(), "143");
+}
+
+#[test]
+fn kill_by_bare_pid_on_pid_zero_is_an_error() {
+    // pid 0 (the System Idle Process) is documented to never be openable
+    // via OpenProcess — the same deterministic case rusty_win32's own
+    // `open_by_pid` test relies on.
+    let (_, status) = rush("kill 0");
+    assert_ne!(status, 0);
+}
+
+#[test]
 fn jobs_dash_p_lists_only_pids() {
     let (out, status) = rush(r#"cmd.exe /c "exit 0" & jobs -p"#);
     assert_eq!(status, 0, "stdout was: {out:?}");

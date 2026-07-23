@@ -289,9 +289,11 @@ fn spawn_pipeline_into_job(
         // this is safe to clean up via the job either way.
         if let Err(e) = unsafe { rusty_win32::process::resume(spawned.thread) } {
             // SAFETY: `job` is valid; `spawned.process` is a member of it,
-            // so terminating via the job (rather than needing a raw
-            // `TerminateProcess`, which `rusty_win32` doesn't have) can
-            // actually reach it here, unlike the assign-failure case above.
+            // so terminating via the job is the simplest way to reach it
+            // here, unlike the assign-failure case above (a raw
+            // `TerminateProcess`, via `rusty_win32::process::terminate`,
+            // would work too, but there's no reason to prefer it over the
+            // job here — this process is already a member either way).
             unsafe {
                 let _ = rusty_win32::job::terminate(job, 1);
                 let _ = rusty_win32::handle::close(spawned.process);
@@ -662,17 +664,22 @@ fn wait_one(target: &str) -> i32 {
     wait_and_record(pid, process)
 }
 
-/// `kill [-SIG|-s SIG] %job ...` — terminate a tracked background job via
-/// its Job Object. Windows has no real signal delivery, so unlike
-/// `job.rs::kill_cmd`'s Unix counterpart the requested signal name/number
-/// can't actually be honored beyond "terminate it" — the flag is still
-/// accepted (so a script written for portability, e.g. `kill -9 %1`,
-/// doesn't hard-error over a distinction Windows genuinely can't make),
-/// but every kill reports the same conventional exit code back through
-/// `wait`/`$?` (128 + 15, matching what an ordinary `kill`-via-SIGTERM
-/// would report on Unix). A bare pid (no `%` prefix) isn't supported:
-/// `rusty_win32` has no raw `TerminateProcess`, only `TerminateJobObject`,
-/// which needs a job handle — something only a `%n`-tracked entry has.
+/// `kill [-SIG|-s SIG] %job|pid ...` — terminate a tracked background job
+/// via its Job Object, or an arbitrary pid via `OpenProcess`/`TerminateProcess`
+/// (`rusty_win32::process::open_by_pid`/`terminate`). Windows has no real
+/// signal delivery, so unlike `job.rs::kill_cmd`'s Unix counterpart the
+/// requested signal name/number can't actually be honored beyond
+/// "terminate it" — the flag is still accepted (so a script written for
+/// portability, e.g. `kill -9 %1`, doesn't hard-error over a distinction
+/// Windows genuinely can't make), but every kill reports the same
+/// conventional exit code back through `wait`/`$?` (128 + 15, matching
+/// what an ordinary `kill`-via-SIGTERM would report on Unix).
+///
+/// A bare pid need not be one of this shell's own tracked jobs: unlike
+/// `wait`, which can only ever act on a child, POSIX `kill` can signal any
+/// process the caller has permission to — `OpenProcess` (with the minimal
+/// `PROCESS_TERMINATE` right) is what makes that possible here rather than
+/// requiring a `%n`-tracked `JobEntry`.
 fn kill_cmd(argv: &[String]) -> i32 {
     const KILLED_EXIT_CODE: u32 = 128 + 15;
 
@@ -687,32 +694,53 @@ fn kill_cmd(argv: &[String]) -> i32 {
         start = 2;
     }
     if argv.len() <= start {
-        eprintln!("kill: usage: kill [-signal] %job ...");
+        eprintln!("kill: usage: kill [-signal] %job|pid ...");
         return 1;
     }
 
     let mut status = 0;
     for target in &argv[start..] {
-        let Some(spec) = target.strip_prefix('%') else {
-            eprintln!("kill: {target}: bare pids are not supported on this platform yet — use %n");
+        if let Some(spec) = target.strip_prefix('%') {
+            let Some(id) = spec.parse::<usize>().ok() else {
+                eprintln!("kill: %{spec}: no such job");
+                status = 1;
+                continue;
+            };
+            let job = STATE.with(|s| s.borrow().jobs.iter().find(|j| j.id == id).map(|j| j.job));
+            let Some(job) = job else {
+                eprintln!("kill: %{id}: no such job");
+                status = 1;
+                continue;
+            };
+            // SAFETY: `job` is a valid handle this job entry still owns.
+            if let Err(e) = unsafe { rusty_win32::job::terminate(job, KILLED_EXIT_CODE) } {
+                eprintln!("kill: %{id}: {}", std::io::Error::from(e));
+                status = 1;
+            }
+            continue;
+        }
+
+        let Ok(pid) = target.parse::<u32>() else {
+            eprintln!("kill: {target}: arguments must be process or job IDs");
             status = 1;
             continue;
         };
-        let Some(id) = spec.parse::<usize>().ok() else {
-            eprintln!("kill: %{spec}: no such job");
-            status = 1;
-            continue;
-        };
-        let job = STATE.with(|s| s.borrow().jobs.iter().find(|j| j.id == id).map(|j| j.job));
-        let Some(job) = job else {
-            eprintln!("kill: %{id}: no such job");
-            status = 1;
-            continue;
-        };
-        // SAFETY: `job` is a valid handle this job entry still owns.
-        if let Err(e) = unsafe { rusty_win32::job::terminate(job, KILLED_EXIT_CODE) } {
-            eprintln!("kill: %{id}: {}", std::io::Error::from(e));
-            status = 1;
+        match rusty_win32::process::open_by_pid(pid, rusty_win32::process::PROCESS_TERMINATE) {
+            Ok(handle) => {
+                // SAFETY: `handle` was just opened above by `OpenProcess`
+                // with `PROCESS_TERMINATE`, is valid, and is closed exactly
+                // once below.
+                let result = unsafe { rusty_win32::process::terminate(handle, KILLED_EXIT_CODE) };
+                let _ = unsafe { rusty_win32::handle::close(handle) };
+                if let Err(e) = result {
+                    eprintln!("kill: ({pid}) - {}", std::io::Error::from(e));
+                    status = 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("kill: ({pid}) - {}", std::io::Error::from(e));
+                status = 1;
+            }
         }
     }
     status

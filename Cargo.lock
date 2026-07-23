@@ -405,7 +405,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rusty_libc"
 version = "0.0.1"
-source = "git+https://github.com/baileyrd/rusty_libc?branch=main#40a8bd1ebbe7a0d6ab602cd13dfaacefad0c5d0f"
+source = "git+https://github.com/baileyrd/rusty_libc?branch=main#73aeb30e6a19c2a5c90eb5159257cfc97dcb0698"
 
 [[package]]
 name = "rusty_lines"

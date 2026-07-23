@@ -3121,12 +3121,27 @@ fn at_transform_case_key_and_prompt_forms() {
     assert_eq!(out, "ABC Abc abc\n'A B'\n");
 
     let (out, _) = rush(r#"a=(one two); echo "${a[@]@U}"; declare -A m=([x]=1); echo "${m[@]@k}"; echo "${m[@]@K}""#);
-    assert_eq!(out, "ONE TWO\nx 1\nx '1'\n");
+    assert_eq!(out, "ONE TWO\nx 1\nx \"1\"\n");
 
     // $"..." is plain "..." (no locale translation) — the `$` used to
     // leak into the output.
     let (out, _) = rush(r#"echo $"hello world""#);
     assert_eq!(out, "hello world\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn at_k_uses_bashs_own_double_quoted_style_not_at_qs() {
+    // C171: @K's array key/value form was wrongly reusing @Q's
+    // single-quote formatter; bash's real @K is double-quoted with
+    // backslash escaping of `\`/`` ` ``/`$`/`"`, falling back to the same
+    // `$'...'` ANSI-C form as @Q only for control characters.
+    let (out, _) = rush(r#"a=('a b' 'c$d' 'e"f' 'g\h' 'i`j'); echo "${a[@]@K}""#);
+    assert_eq!(out, r#"0 "a b" 1 "c\$d" 2 "e\"f" 3 "g\\h" 4 "i\`j"
+"#);
+
+    let (out, _) = rush("a=($'tab\there' plain); echo \"${a[@]@K}\"");
+    assert_eq!(out, "0 $'tab\\there' 1 \"plain\"\n");
 }
 
 #[cfg(unix)]

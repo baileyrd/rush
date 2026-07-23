@@ -2046,7 +2046,7 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
                     .iter()
                     .zip(&values)
                     .map(|(k, v)| {
-                        if op == "K" { format!("{k} {}", shell_quote(v)) } else { format!("{k} {v}") }
+                        if op == "K" { format!("{k} {}", key_value_quote(v)) } else { format!("{k} {v}") }
                     })
                     .collect();
                 return Ok(pairs.join(&sep));
@@ -2332,6 +2332,28 @@ fn shell_quote(value: &str) -> String {
         return out;
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// `${arr[@]@K}`'s per-value quoting: bash's own `declare -p`-style
+/// double-quoted, backslash-escaped form — distinct from `@Q`'s
+/// POSIX-shell-safe single-quote style, which is what a *scalar* `${v@K}`
+/// still falls back to (see the `"Q" | "K" | "k"` arm below; `@K`'s
+/// key/value pairing only exists for arrays). Falls back to the same
+/// `$'...'` ANSI-C form as `shell_quote` for any value containing a
+/// control character, matching bash directly.
+fn key_value_quote(value: &str) -> String {
+    if value.chars().any(|c| c.is_control()) {
+        return shell_quote(value);
+    }
+    let mut out = String::from('"');
+    for c in value.chars() {
+        if matches!(c, '\\' | '`' | '$' | '"') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// `${v@E}` (C60): interpret backslash escapes the way `$'...'` would.

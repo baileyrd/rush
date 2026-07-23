@@ -16,9 +16,16 @@
 //! parentheses, and bare variable names (which resolve like `$name`, with
 //! unset → `0`). Comparisons and logicals yield `1`/`0`, as in the shell.
 //!
-//! Not supported: the comma operator (`a=1, b=2`, rare even in real bash),
-//! and any lvalue other than a plain variable name (`arr[i]++`,
-//! `arr[i] = x` — arithmetic-context array element assignment).
+//! Array/associative-array element references (`a[i]`, `(( a[i] = x ))`,
+//! `(( a[i]++ ))`, `(( a[i] += 1 ))`, `(( ++a[i] ))`) are supported (C170) —
+//! the subscript is kept as raw source text through parsing (not evaluated
+//! into an `Expr`), since an associative array's subscript is a literal
+//! string key rather than an arithmetic expression; which of the two it is
+//! can only be decided at evaluation time (`vars::is_assoc`), matching
+//! `expand.rs`'s own `read_subscript`/`vars::key_set` dispatch for
+//! `${arr[k]}`/`arr[k]=v` outside arithmetic.
+//!
+//! Not supported: the comma operator (`a=1, b=2`, rare even in real bash).
 
 pub fn eval(src: &str) -> Result<i64, String> {
     // An empty (or all-blank) expression evaluates to 0, matching bash
@@ -40,6 +47,10 @@ enum Tok {
     Num(i64),
     Ident(String),
     Op(&'static str),
+    /// `[...]` immediately following an `Ident` token — an array-element
+    /// subscript, captured as raw text (see this module's own doc comment
+    /// for why it isn't parsed into an `Expr` here).
+    Subscript(String),
 }
 
 fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
@@ -145,6 +156,31 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
                 i += 1;
             }
             toks.push(Tok::Ident(chars[start..i].iter().collect()));
+            // `name[subscript]` (C170): captured whole, as raw text between
+            // the balanced brackets — not tokenized/parsed further here.
+            if i < chars.len() && chars[i] == '[' {
+                let bstart = i + 1;
+                let mut j = bstart;
+                let mut depth = 1;
+                while j < chars.len() {
+                    match chars[j] {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if depth != 0 {
+                    return Err("missing `]` in arithmetic".into());
+                }
+                toks.push(Tok::Subscript(chars[bstart..j].iter().collect()));
+                i = j + 1;
+            }
         } else {
             // Three-character operators, then two-character, then
             // single-character — longest match wins.
@@ -252,6 +288,37 @@ enum Expr {
     CompoundAssign(&'static str, String, Box<Expr>),
     /// `a, b` — the comma operator (C132): evaluate both, yield the right.
     Comma(Box<Expr>, Box<Expr>),
+    /// `name[subscript]` (C170): an array/assoc-array element read. The
+    /// subscript is raw text — see this module's doc comment.
+    ArrayVar(String, String),
+    /// `++name[subscript]` / `--name[subscript]`.
+    ArrayPreIncDec(&'static str, String, String),
+    /// `name[subscript]++` / `name[subscript]--`.
+    ArrayPostIncDec(&'static str, String, String),
+    /// `name[subscript] = expr`.
+    ArrayAssign(String, String, Box<Expr>),
+    /// `name[subscript] OP= expr` — `OP` is the bare underlying operator,
+    /// same convention as `CompoundAssign`.
+    ArrayCompoundAssign(&'static str, String, String, Box<Expr>),
+}
+
+/// Strip the trailing `=` off a compound-assignment operator token
+/// (`"+="` → `"+"`), shared by the plain-variable and array-element
+/// assignment paths in `parse_assign`.
+fn strip_compound_eq(op: &'static str) -> &'static str {
+    match op {
+        "+=" => "+",
+        "-=" => "-",
+        "*=" => "*",
+        "/=" => "/",
+        "%=" => "%",
+        "<<=" => "<<",
+        ">>=" => ">>",
+        "&=" => "&",
+        "^=" => "^",
+        "|=" => "|",
+        _ => unreachable!(),
+    }
 }
 
 struct Parser {
@@ -300,34 +367,35 @@ impl Parser {
 
     fn parse_assign(&mut self) -> Result<Expr, String> {
         if let Some(Tok::Ident(name)) = self.tokens.get(self.pos).cloned() {
-            let assign_op = match self.tokens.get(self.pos + 1) {
+            // A `Subscript` token right after the identifier makes this a
+            // candidate array-element assignment (C170) — tentatively look
+            // past it for an assign-op without committing `self.pos` yet:
+            // if there's no assign-op after all, this falls through to
+            // `parse_ternary` unchanged, and `parse_primary` picks the
+            // `Ident`+`Subscript` pair back up as a plain element read.
+            let mut lookahead = self.pos + 1;
+            let subscript = if let Some(Tok::Subscript(sub)) = self.tokens.get(lookahead).cloned() {
+                lookahead += 1;
+                Some(sub)
+            } else {
+                None
+            };
+            let assign_op = match self.tokens.get(lookahead) {
                 Some(Tok::Op(op @ ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|="))) => {
                     Some(*op)
                 }
                 _ => None,
             };
             if let Some(op) = assign_op {
-                self.pos += 2;
+                self.pos = lookahead + 1;
                 let rhs = self.parse_assign()?;
-                return Ok(if op == "=" {
-                    Expr::Assign(name, Box::new(rhs))
-                } else {
-                    // Strip the trailing `=` to get the underlying operator
-                    // (`"+="` → `"+"`).
-                    let base = match op {
-                        "+=" => "+",
-                        "-=" => "-",
-                        "*=" => "*",
-                        "/=" => "/",
-                        "%=" => "%",
-                        "<<=" => "<<",
-                        ">>=" => ">>",
-                        "&=" => "&",
-                        "^=" => "^",
-                        "|=" => "|",
-                        _ => unreachable!(),
-                    };
-                    Expr::CompoundAssign(base, name, Box::new(rhs))
+                return Ok(match (op, subscript) {
+                    ("=", None) => Expr::Assign(name, Box::new(rhs)),
+                    ("=", Some(sub)) => Expr::ArrayAssign(name, sub, Box::new(rhs)),
+                    (op, None) => Expr::CompoundAssign(strip_compound_eq(op), name, Box::new(rhs)),
+                    (op, Some(sub)) => {
+                        Expr::ArrayCompoundAssign(strip_compound_eq(op), name, sub, Box::new(rhs))
+                    }
                 });
             }
         }
@@ -458,20 +526,24 @@ impl Parser {
             return Ok(Expr::Unary(op, Box::new(v)));
         }
         if let Some(op) = self.eat(&["++", "--"]) {
-            let name = self.expect_ident("++/--")?;
-            return Ok(Expr::PreIncDec(op, name));
+            let (name, sub) = self.expect_lvalue("++/--")?;
+            return Ok(match sub {
+                Some(sub) => Expr::ArrayPreIncDec(op, name, sub),
+                None => Expr::PreIncDec(op, name),
+            });
         }
         self.parse_postfix()
     }
 
     /// A primary followed by an optional postfix `++`/`--` — only valid
-    /// directly on a variable name, matching real bash (`(1+2)++` isn't a
-    /// valid lvalue).
+    /// directly on a variable name or array element, matching real bash
+    /// (`(1+2)++` isn't a valid lvalue).
     fn parse_postfix(&mut self) -> Result<Expr, String> {
         let node = self.parse_primary()?;
         if let Some(op) = self.eat(&["++", "--"]) {
             return match node {
                 Expr::Var(name) => Ok(Expr::PostIncDec(op, name)),
+                Expr::ArrayVar(name, sub) => Ok(Expr::ArrayPostIncDec(op, name, sub)),
                 _ => Err("++/--: not a variable".into()),
             };
         }
@@ -486,6 +558,10 @@ impl Parser {
             }
             Some(Tok::Ident(name)) => {
                 self.pos += 1;
+                if let Some(Tok::Subscript(sub)) = self.tokens.get(self.pos).cloned() {
+                    self.pos += 1;
+                    return Ok(Expr::ArrayVar(name, sub));
+                }
                 Ok(Expr::Var(name))
             }
             Some(Tok::Op("(")) => {
@@ -511,6 +587,17 @@ impl Parser {
             }
             _ => Err(format!("{context}: expected a variable name")),
         }
+    }
+
+    /// As [`Self::expect_ident`], plus an optional trailing `[subscript]`
+    /// (C170) — shared by prefix `++`/`--`'s lvalue.
+    fn expect_lvalue(&mut self, context: &str) -> Result<(String, Option<String>), String> {
+        let name = self.expect_ident(context)?;
+        if let Some(Tok::Subscript(sub)) = self.tokens.get(self.pos).cloned() {
+            self.pos += 1;
+            return Ok((name, Some(sub)));
+        }
+        Ok((name, None))
     }
 }
 
@@ -580,6 +667,25 @@ fn eval_expr(e: &Expr) -> Result<i64, String> {
             eval_expr(l)?;
             eval_expr(r)
         }
+        Expr::ArrayVar(name, sub) => array_elem_value(name, sub),
+        Expr::ArrayPreIncDec(op, name, sub) => apply_elem_delta(name, sub, op),
+        Expr::ArrayPostIncDec(op, name, sub) => {
+            let old = array_elem_value(name, sub)?;
+            apply_elem_delta(name, sub, op)?;
+            Ok(old)
+        }
+        Expr::ArrayAssign(name, sub, v) => {
+            let val = eval_expr(v)?;
+            array_elem_set(name, sub, val);
+            Ok(val)
+        }
+        Expr::ArrayCompoundAssign(op, name, sub, v) => {
+            let cur = array_elem_value(name, sub)?;
+            let rhs = eval_expr(v)?;
+            let new = binary_op(op, cur, rhs)?;
+            array_elem_set(name, sub, new);
+            Ok(new)
+        }
     }
 }
 
@@ -590,6 +696,38 @@ fn apply_delta(name: &str, op: &str) -> Result<i64, String> {
     let cur = var_value(name)?;
     let new = if op == "++" { cur.wrapping_add(1) } else { cur.wrapping_sub(1) };
     crate::vars::set(name, &new.to_string());
+    Ok(new)
+}
+
+/// `name[subscript]`'s current value (C170): unset element → 0, same rule
+/// as a bare unset variable. Same assoc-vs-indexed dispatch as
+/// `expand.rs`'s `read_subscript` / `vars::key_set`: an associative array's
+/// subscript is a literal string key, an indexed array's is itself
+/// re-evaluated as arithmetic (`expand::eval_index`, which also handles
+/// bash's negative-index-counts-from-the-end rule).
+fn array_elem_value(name: &str, subscript: &str) -> Result<i64, String> {
+    let raw = if crate::vars::is_assoc(name) {
+        crate::vars::assoc_get(name, subscript)
+    } else {
+        crate::expand::eval_index(name, subscript).and_then(|i| crate::vars::array_get(name, i))
+    }
+    .unwrap_or_default();
+    numeric_value(name, raw)
+}
+
+/// `name[subscript] = value` (C170) — the same dispatch `arr[k]=v` uses
+/// outside arithmetic, so auto-vivification and the scalar-as-index-0
+/// quirk (`x=5; (( x[0] ))` reads `5`) both match existing, already-tested
+/// behavior rather than reimplementing it.
+fn array_elem_set(name: &str, subscript: &str, value: i64) {
+    crate::vars::key_set(name, subscript, &value.to_string());
+}
+
+/// As [`apply_delta`], for an array/assoc-array element.
+fn apply_elem_delta(name: &str, subscript: &str, op: &str) -> Result<i64, String> {
+    let cur = array_elem_value(name, subscript)?;
+    let new = if op == "++" { cur.wrapping_add(1) } else { cur.wrapping_sub(1) };
+    array_elem_set(name, subscript, new);
     Ok(new)
 }
 
@@ -651,6 +789,14 @@ fn var_value(name: &str) -> Result<i64, String> {
     // `expand.rs`'s `var_raw`, which drops this same now-redundant (and,
     // post-`unset`, actively wrong — C40) fallback for the identical reason.
     let raw = crate::vars::get(name).unwrap_or_default();
+    numeric_value(name, raw)
+}
+
+/// Shared by [`var_value`] and [`array_elem_value`] (C170): a raw string
+/// value as an integer, with `var_value`'s own re-evaluation-of-non-numeric-
+/// strings rule and recursion depth cap. `name` is only used for error
+/// messages/the recursion guard, not to re-look-up `raw`.
+fn numeric_value(name: &str, raw: String) -> Result<i64, String> {
     let s = raw.trim();
     if s.is_empty() {
         return Ok(0);
@@ -748,6 +894,38 @@ mod tests {
         assert_eq!(eval("RUSH_A = RUSH_B = 7"), Ok(7));
         assert_eq!(crate::vars::get("RUSH_A"), Some("7".into()));
         assert_eq!(crate::vars::get("RUSH_B"), Some("7".into()));
+    }
+
+    #[test]
+    fn array_element_arithmetic() {
+        // C170: `a[i]` had no grammar at all in arithmetic context — read,
+        // assign, compound-assign, and pre/post inc/dec all errored.
+        crate::vars::set_array("RUSH_ARR", vec!["1".into(), "2".into(), "3".into()]);
+        assert_eq!(eval("RUSH_ARR[1]"), Ok(2));
+        assert_eq!(eval("RUSH_ARR[1] = 99"), Ok(99));
+        assert_eq!(crate::vars::array_get("RUSH_ARR", 1), Some("99".into()));
+
+        crate::vars::set_array("RUSH_ARR", vec!["1".into(), "2".into(), "3".into()]);
+        assert_eq!(eval("RUSH_ARR[1]++"), Ok(2)); // postfix: old value
+        assert_eq!(crate::vars::array_get("RUSH_ARR", 1), Some("3".into()));
+        assert_eq!(eval("++RUSH_ARR[1]"), Ok(4)); // prefix: new value
+        assert_eq!(crate::vars::array_get("RUSH_ARR", 1), Some("4".into()));
+        assert_eq!(eval("RUSH_ARR[1] += 10"), Ok(14));
+        assert_eq!(crate::vars::array_get("RUSH_ARR", 1), Some("14".into()));
+
+        // A computed subscript expression, not just a literal index.
+        crate::vars::set("RUSH_I", "0");
+        assert_eq!(eval("RUSH_ARR[RUSH_I + 1]"), Ok(14));
+
+        // Unset element reads as 0, same as an unset plain variable.
+        assert_eq!(eval("RUSH_ARR[50]"), Ok(0));
+
+        // An associative array's subscript is a literal string key, not a
+        // re-evaluated arithmetic expression.
+        crate::vars::set_assoc("RUSH_MAP", vec![("x".into(), "5".into()), ("y".into(), "10".into())]);
+        assert_eq!(eval("RUSH_MAP[x] + 1"), Ok(6));
+        assert_eq!(eval("RUSH_MAP[x] = 20"), Ok(20));
+        assert_eq!(crate::vars::assoc_get("RUSH_MAP", "x"), Some("20".into()));
     }
 
     #[test]

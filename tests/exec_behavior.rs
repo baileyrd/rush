@@ -1691,6 +1691,28 @@ fn arithmetic_short_circuit_skips_assignment_side_effects() {
 }
 
 #[test]
+fn arithmetic_bare_array_subscript_read_assign_and_inc_dec() {
+    // C170: `a[i]` had no grammar in arithmetic context at all — every
+    // read/assign/compound-assign/inc-dec form errored with "unexpected
+    // character `[` in arithmetic".
+    assert_eq!(rush("a=(1 2 3); echo $((a[1]))").0, "2\n");
+    assert_eq!(rush(r#"a=(1 2 3); (( a[1] = 99 )); echo "${a[@]}""#).0, "1 99 3\n");
+    assert_eq!(rush(r#"a=(1 2 3); (( a[1]++ )); echo "${a[@]}""#).0, "1 3 3\n");
+    assert_eq!(rush(r#"a=(1 2 3); (( ++a[1] )); echo "${a[@]}""#).0, "1 3 3\n");
+    assert_eq!(rush(r#"a=(1 2 3); (( a[1] += 10 )); echo "${a[@]}""#).0, "1 12 3\n");
+    // A computed subscript, not just a literal index.
+    assert_eq!(rush("a=(1 2 3); i=1; echo $((a[i+1]))").0, "3\n");
+    // An associative array's subscript is a literal key, not re-evaluated
+    // as arithmetic (an arithmetic `x` would resolve the unset var to 0).
+    assert_eq!(rush("declare -A m=([x]=5 [y]=10); echo $((m[x] + 1))").0, "6\n");
+    assert_eq!(rush(r#"declare -A m=([x]=5 [y]=10); (( m[x] = 20 )); echo "${m[x]}""#).0, "20\n");
+    // Unset element/unset array both read as 0, matching an unset scalar.
+    assert_eq!(rush("a=(1 2 3); echo $((a[10]))").0, "0\n");
+    // A plain scalar behaves as if it were a 1-element array at index 0.
+    assert_eq!(rush("x=5; echo $((x[0])) $((x[3]))").0, "5 0\n");
+}
+
+#[test]
 fn brace_expansion_comma_lists_and_cross_products() {
     // A plain comma-list turns one word into several argv words.
     assert_eq!(rush("echo {a,b,c}").0, "a b c\n");
